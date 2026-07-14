@@ -11,19 +11,34 @@ provenance_granularity = "claim"
 public_archive_dir = ".vault-pr/sources/public"
 timeout_seconds = 30
 max_download_bytes = 10000000
+wechat_timeout_seconds = 180
+max_asset_files = 200
+max_asset_bytes = 50000000
 
 [domains.tech]
+root_dir = "knowledgebase"
 source_notes_dir = "knowledgebase/sources"
+qmd_collection = "notebook-tech"
+qmd_context = "Technical knowledge, AI, agents, engineering notes, and persistent knowledge-base sources."
 
 [domains.life]
+root_dir = "life"
 source_notes_dir = "life/sources"
+qmd_collection = "notebook-life"
+qmd_context = "Personal life, humanities, science, health, and reading notes."
 
 [domains.work]
+root_dir = "work"
 source_notes_dir = "work/sources"
+qmd_collection = "notebook-work"
+qmd_context = "Work-domain technical notes and project knowledge."
 
 [index]
 backend = "qmd"
 name = "notebook"
+mask = "**/*.md"
+embed = true
+max_docs_per_batch = 64
 max_retries = 3
 retry_backoff_seconds = [2, 10, 30]
 
