@@ -15,27 +15,42 @@ private vault content and machine-specific paths must never be committed here.
 - CLI: `vault-pr`
 - Agent skill: `vault-pr`
 
-## Current status
+## Current capabilities
 
-The first vertical slice provides:
+The implemented workflow provides:
 
-- `vault-pr doctor` for read-only environment and Git safety checks;
-- `vault-pr ingest <url> --domain <name>` for immutable capture, Defuddle
-  extraction, manifest creation, and an Obsidian source-note draft;
-- `vault-pr index` for qmd refresh with bounded retries after a content commit.
-
-Semantic synthesis, policy enforcement, staging, independent review, recovery,
-and rollback will be added as later vertical slices.
+- `vault-pr doctor` for Git safety and declarative qmd drift checks;
+- URL ingestion through Defuddle, direct Markdown, PDF, WeChat, or an
+  authenticated browser snapshot;
+- domain-scoped BM25/vector retrieval for deduplication and semantic planning;
+- hash-bound change plans with a 15-note default limit;
+- independent reviewer approval for merge, delete, contradiction, and work
+  changes;
+- deterministic plan apply with rollback-on-error and an audit archive;
+- qmd collection reconciliation, update, and incremental embedding with at most
+  three retries after the first attempt.
 
 ## Local setup
 
 ```bash
 cp vault-pr.example.toml vault-pr.local.toml
 # Edit vault.path in the local file.
-PYTHONPATH=src python -m vault_pr.cli doctor --config vault-pr.local.toml
-PYTHONPATH=src python -m vault_pr.cli ingest https://example.com/article \
+uv sync
+uv run vault-pr doctor --config vault-pr.local.toml
+uv run vault-pr ingest https://example.com/article \
   --domain tech --config vault-pr.local.toml --apply
-PYTHONPATH=src python -m vault_pr.cli index --config vault-pr.local.toml
+uv run vault-pr index --config vault-pr.local.toml
+uv run vault-pr retrieve src_0123456789abcdef0123 \
+  --config vault-pr.local.toml
+uv run vault-pr plan init src_0123456789abcdef0123 \
+  --summary "Integrate the source" --config vault-pr.local.toml
 ```
 
 The local configuration is intentionally ignored by Git.
+
+Use `vault-pr index --check` for a read-only collection drift report. A normal
+`vault-pr index` repairs only explicitly configured collections, leaves all
+unmanaged collections untouched, and then refreshes lexical and vector indexes.
+If `doctor` reports an interrupted semantic transaction, run
+`vault-pr recover --config vault-pr.local.toml`; it rolls back only after journal,
+backup, file-state, and Git-state verification succeeds.
