@@ -20,6 +20,7 @@ from vault_pr.ingest import (
     require_public_url,
     safe_note_filename,
     source_note_path,
+    snapshot_source,
 )
 
 
@@ -32,7 +33,11 @@ def make_config(vault: Path) -> dict[str, object]:
             "max_download_bytes": 1_000_000,
         },
         "domains": {
-            "tech": {"source_notes_dir": "knowledgebase/sources"},
+            "tech": {
+                "root_dir": "knowledgebase",
+                "source_notes_dir": "knowledgebase/sources",
+                "qmd_collection": "notebook-tech",
+            },
         },
     }
 
@@ -103,6 +108,66 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual(extracted.title, "Test Article")
             self.assertIn("useful content", (output_dir / "extracted.md").read_text())
 
+    def test_pdf_extracts_page_text(self) -> None:
+        class Page:
+            def extract_text(self) -> str:
+                return "PDF text " * 30
+
+        class Metadata:
+            title = "PDF Title"
+
+        class Reader:
+            metadata = Metadata()
+            pages = [Page()]
+
+        fetched = FetchedSource(
+            requested_url="https://example.com/report.pdf",
+            final_url="https://example.com/report.pdf",
+            status=200,
+            headers={"content-type": "application/pdf"},
+            body=b"%PDF synthetic fixture",
+            captured_at="2026-07-15T00:00:00+00:00",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("pypdf.PdfReader", return_value=Reader()):
+                extracted = extract_source(fetched, Path(temp_dir))
+
+            self.assertEqual(extracted.extractor, "pypdf")
+            self.assertEqual(extracted.raw_filename, "source.pdf")
+            self.assertIn("## Page 1", (Path(temp_dir) / "extracted.md").read_text())
+
+    def test_authenticated_snapshot_never_fetches_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = Path(temp_dir) / "captured.md"
+            snapshot.write_text("# Private article\n\n" + "body " * 30)
+
+            fetched = snapshot_source(
+                url="https://internal.example/article",
+                snapshot_path=snapshot,
+                adapter="authenticated",
+                max_bytes=10000,
+            )
+
+            self.assertEqual(fetched.status, 0)
+            self.assertEqual(fetched.adapter, "authenticated")
+            self.assertNotIn("cookie", fetched.headers)
+
+    def test_snapshot_rejects_symbolic_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "target.md"
+            target.write_text("# Target\n")
+            snapshot = root / "snapshot.md"
+            snapshot.symlink_to(target)
+
+            with self.assertRaisesRegex(IngestError, "symbolic link"):
+                snapshot_source(
+                    url="https://example.com/article",
+                    snapshot_path=snapshot,
+                    adapter="authenticated",
+                    max_bytes=10000,
+                )
+
 
 class IngestTests(unittest.TestCase):
     def test_normalize_title_removes_newlines_and_controls(self) -> None:
@@ -169,6 +234,165 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(result["status"], "planned")
             self.assertFalse((vault / ".vault-pr").exists())
             self.assertFalse((vault / "knowledgebase").exists())
+
+    def test_snapshot_ingest_records_authenticated_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            snapshot = root / "private.md"
+            snapshot.write_text("# Private source\n\n" + "trusted body " * 20)
+
+            result = ingest_url(
+                config=make_config(vault),
+                url="https://internal.example/private",
+                domain="tech",
+                apply=True,
+                snapshot_path=snapshot,
+                adapter="authenticated",
+            )
+
+            manifest = json.loads(
+                (vault / result["capture_dir"] / "manifest.json").read_text()
+            )
+            self.assertEqual(manifest["adapter"], "authenticated")
+            self.assertEqual(manifest["http_status"], 0)
+            self.assertEqual(manifest["extractor"], "authenticated-snapshot")
+
+    def test_authenticated_adapter_requires_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+
+            with self.assertRaisesRegex(IngestError, "requires --snapshot"):
+                ingest_url(
+                    config=make_config(vault),
+                    url="https://internal.example/private",
+                    domain="tech",
+                    apply=False,
+                    adapter="authenticated",
+                )
+
+    def test_wechat_adapter_preserves_converted_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+
+            def converted_snapshot(
+                _url: str, output_dir: Path, timeout_seconds: float
+            ) -> Path:
+                self.assertGreater(timeout_seconds, 0)
+                article = output_dir / "wechat-adapter" / "output" / "article"
+                images = article / "images"
+                images.mkdir(parents=True)
+                (images / "cover.png").write_bytes(b"png fixture")
+                markdown = article / "article.md"
+                markdown.write_text(
+                    "# WeChat article\n\n![cover](images/cover.png)\n\n"
+                    + "content " * 30
+                )
+                return markdown
+
+            with (
+                patch(
+                    "vault_pr.ingest._wechat_snapshot", side_effect=converted_snapshot
+                ),
+                patch(
+                    "vault_pr.ingest.require_public_url",
+                    side_effect=lambda url: url,
+                ),
+            ):
+                result = ingest_url(
+                    config=make_config(vault),
+                    url="https://mp.weixin.qq.com/s/example",
+                    domain="tech",
+                    apply=True,
+                )
+
+            capture = vault / result["capture_dir"]
+            manifest = json.loads((capture / "manifest.json").read_text())
+            self.assertEqual(manifest["adapter"], "wechat")
+            self.assertIn("images/cover.png", manifest["asset_sha256"])
+            self.assertTrue((capture / "images" / "cover.png").is_file())
+
+    def test_wechat_asset_changes_produce_new_source_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            article = root / "article"
+            images = article / "images"
+            images.mkdir(parents=True)
+            snapshot = article / "article.md"
+            snapshot.write_text("# Article\n\n![cover](images/cover.png)\n")
+            cover = images / "cover.png"
+            cover.write_bytes(b"version one")
+
+            first = ingest_url(
+                config=make_config(vault),
+                url="https://mp.weixin.qq.com/s/example",
+                domain="tech",
+                apply=False,
+                snapshot_path=snapshot,
+                adapter="wechat",
+            )
+            cover.write_bytes(b"version two")
+            second = ingest_url(
+                config=make_config(vault),
+                url="https://mp.weixin.qq.com/s/example",
+                domain="tech",
+                apply=False,
+                snapshot_path=snapshot,
+                adapter="wechat",
+            )
+
+            self.assertNotEqual(first["source_id"], second["source_id"])
+
+    def test_wechat_assets_obey_file_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            article = root / "article"
+            images = article / "images"
+            images.mkdir(parents=True)
+            (images / "one.png").write_bytes(b"one")
+            (images / "two.png").write_bytes(b"two")
+            snapshot = article / "article.md"
+            snapshot.write_text("# Article\n")
+            config = make_config(vault)
+            config["sources"]["max_asset_files"] = 1
+
+            with self.assertRaisesRegex(IngestError, "1-file limit"):
+                ingest_url(
+                    config=config,
+                    url="https://mp.weixin.qq.com/s/example",
+                    domain="tech",
+                    apply=False,
+                    snapshot_path=snapshot,
+                    adapter="wechat",
+                )
+
+    def test_wechat_network_adapter_rejects_non_wechat_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+
+            with self.assertRaisesRegex(IngestError, "only accepts mp.weixin.qq.com"):
+                ingest_url(
+                    config=make_config(vault),
+                    url="http://127.0.0.1/private",
+                    domain="tech",
+                    apply=False,
+                    adapter="wechat",
+                )
 
     def test_failed_note_write_removes_new_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
