@@ -1,0 +1,16 @@
+[vault]
+path = "/absolute/path/to/your/obsidian-vault"
+mode = "direct"
+
+[ingest]
+max_touched_notes = 15
+create_source_note = true
+provenance_granularity = "claim"
+
+[index]
+backend = "qmd"
+max_retries = 3
+retry_backoff_seconds = [2, 10, 30]
+
+[review]
+independent_for = ["merge", "delete", "contradiction", "work"]

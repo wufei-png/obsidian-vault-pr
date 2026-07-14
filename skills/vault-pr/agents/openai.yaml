@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vault PR"
+  short_description: "Safely ingest and maintain existing Obsidian vaults"
+  default_prompt: "Use $vault-pr to ingest this source into my configured Obsidian vault safely."
