@@ -17,9 +17,15 @@ private vault content and machine-specific paths must never be committed here.
 
 ## Current status
 
-The initial scaffold provides a read-only `vault-pr doctor` command. Source
-ingestion, policy enforcement, staging, semantic review, apply, recovery, and
-rollback will be added as vertical slices.
+The first vertical slice provides:
+
+- `vault-pr doctor` for read-only environment and Git safety checks;
+- `vault-pr ingest <url> --domain <name>` for immutable capture, Defuddle
+  extraction, manifest creation, and an Obsidian source-note draft;
+- `vault-pr index` for qmd refresh with bounded retries after a content commit.
+
+Semantic synthesis, policy enforcement, staging, independent review, recovery,
+and rollback will be added as later vertical slices.
 
 ## Local setup
 
@@ -27,6 +33,9 @@ rollback will be added as vertical slices.
 cp vault-pr.example.toml vault-pr.local.toml
 # Edit vault.path in the local file.
 PYTHONPATH=src python -m vault_pr.cli doctor --config vault-pr.local.toml
+PYTHONPATH=src python -m vault_pr.cli ingest https://example.com/article \
+  --domain tech --config vault-pr.local.toml --apply
+PYTHONPATH=src python -m vault_pr.cli index --config vault-pr.local.toml
 ```
 
 The local configuration is intentionally ignored by Git.

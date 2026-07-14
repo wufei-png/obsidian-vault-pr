@@ -7,8 +7,23 @@ max_touched_notes = 15
 create_source_note = true
 provenance_granularity = "claim"
 
+[sources]
+public_archive_dir = ".vault-pr/sources/public"
+timeout_seconds = 30
+max_download_bytes = 10000000
+
+[domains.tech]
+source_notes_dir = "knowledgebase/sources"
+
+[domains.life]
+source_notes_dir = "life/sources"
+
+[domains.work]
+source_notes_dir = "work/sources"
+
 [index]
 backend = "qmd"
+name = "notebook"
 max_retries = 3
 retry_backoff_seconds = [2, 10, 30]
 
