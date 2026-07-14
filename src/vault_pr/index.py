@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from .config import ConfigError, DomainSpec, domain_specs, load_vault_path
 from .git import require_clean_git_root, run_git, vault_write_lock
+from .recovery import list_active_transactions
 
 
 class IndexUpdateError(RuntimeError):
@@ -294,12 +295,30 @@ def update_qmd_index(
         raise IndexUpdateError("required tool missing: qmd")
 
     if check_only:
+        git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")
+        if git_dir.returncode != 0:
+            raise IndexUpdateError("unable to resolve vault Git directory")
+        active = list_active_transactions(Path(git_dir.stdout.strip()))
+        if active:
+            raise IndexUpdateError(
+                "active vault-pr transaction must be finalized before indexing: "
+                + ", ".join(path.name for path in active)
+            )
         return reconcile_qmd_collections(
             config, check_only=True, runner=runner, executable=qmd
         )
 
     with vault_write_lock(vault):
         require_clean_git_root(vault)
+        git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")
+        if git_dir.returncode != 0:
+            raise IndexUpdateError("unable to resolve vault Git directory")
+        active = list_active_transactions(Path(git_dir.stdout.strip()))
+        if active:
+            raise IndexUpdateError(
+                "active vault-pr transaction must be finalized before indexing: "
+                + ", ".join(path.name for path in active)
+            )
         reconciliation = reconcile_qmd_collections(
             config, runner=runner, executable=qmd
         )

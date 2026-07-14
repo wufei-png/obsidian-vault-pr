@@ -3,34 +3,71 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
+import sys
 import tempfile
 import unicodedata
 import urllib.parse
-import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from .capture import (
+    CaptureError,
+    load_validated_capture,
+    source_identity_digest,
+    source_note_has_id,
+)
 from .config import (
     ConfigError,
     domain_source_notes_dir,
     load_vault_path,
     source_archive_dir,
 )
-from .git import require_clean_git_root, vault_write_lock
+from .git import require_clean_git_root, run_git, vault_write_lock
+from .process import (
+    LimitedProcessResult,
+    LimitedProcessTimeout,
+    run_limited_process,
+)
+from .recovery import (
+    RecoveryError,
+    mark_active_applied,
+    prepare_active_transaction,
+    rollback_active_transaction,
+)
 
 
 class IngestError(RuntimeError):
     """Raised when a source cannot be safely prepared."""
+
+
+def _git_dir(vault: Path) -> Path:
+    result = run_git(vault, "rev-parse", "--absolute-git-dir")
+    if result.returncode != 0:
+        raise IngestError("unable to resolve vault Git directory")
+    return Path(result.stdout.strip()).resolve()
+
+
+def _atomic_note_write(path: Path, content: str, staging_path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        staging_path.write_text(content, encoding="utf-8")
+        staging_path.chmod(0o644)
+        os.replace(staging_path, path)
+    finally:
+        staging_path.unlink(missing_ok=True)
 
 
 SAFE_RESPONSE_HEADERS = {
@@ -50,14 +87,40 @@ SUPPORTED_CONTENT_TYPES = {
 }
 SENSITIVE_QUERY_KEYS = {
     "access_token",
+    "accesskeyid",
     "api_key",
+    "apikey",
     "auth",
+    "authorization",
+    "awsaccesskeyid",
+    "credential",
+    "googleaccessid",
+    "jwt",
     "key",
+    "keypairid",
+    "passwd",
     "password",
+    "secret",
+    "securitytoken",
     "sig",
     "signature",
     "token",
 }
+SENSITIVE_QUERY_KEY_PARTS = {
+    "auth",
+    "authorization",
+    "credential",
+    "jwt",
+    "key",
+    "passwd",
+    "password",
+    "secret",
+    "sig",
+    "signature",
+    "token",
+}
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+MAX_REDIRECTS = 5
 
 
 @dataclass(frozen=True)
@@ -82,6 +145,13 @@ class ExtractedSource:
     extracted_filename: str
     extractor: str
     extractor_version: str
+
+
+@dataclass(frozen=True)
+class _ResolvedTarget:
+    canonical_url: str
+    parsed: urllib.parse.SplitResult
+    address: tuple[int, int, int, str, tuple[Any, ...]]
 
 
 class _TitleParser(HTMLParser):
@@ -119,24 +189,39 @@ def canonicalize_url(url: str) -> str:
     except ValueError as exc:
         raise IngestError("URL contains an invalid port") from exc
     query_keys = {
-        key.lower()
-        for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        key for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     }
-    sensitive_keys = sorted(query_keys & SENSITIVE_QUERY_KEYS)
+    sensitive_keys = sorted(key for key in query_keys if _is_sensitive_query_key(key))
     if sensitive_keys:
         raise IngestError(
             "URL query contains sensitive parameters: " + ", ".join(sensitive_keys)
         )
     default_port = 80 if parsed.scheme.lower() == "http" else 443
-    netloc = hostname if port in {None, default_port} else f"{hostname}:{port}"
+    display_hostname = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = (
+        display_hostname
+        if port in {None, default_port}
+        else f"{display_hostname}:{port}"
+    )
     path = parsed.path or "/"
     return urllib.parse.urlunsplit(
         (parsed.scheme.lower(), netloc, path, parsed.query, "")
     )
 
 
-def require_public_url(url: str) -> str:
-    """Reject local and non-global URL targets before fetching."""
+def _is_sensitive_query_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    compact = normalized.replace("_", "")
+    parts = {part for part in normalized.split("_") if part}
+    return (
+        normalized in SENSITIVE_QUERY_KEYS
+        or compact in SENSITIVE_QUERY_KEYS
+        or bool(parts & SENSITIVE_QUERY_KEY_PARTS)
+    )
+
+
+def _resolve_public_target(url: str) -> _ResolvedTarget:
+    """Resolve once, reject every non-public answer, and retain a pinned address."""
     canonical = canonicalize_url(url)
     parsed = urllib.parse.urlsplit(canonical)
     assert parsed.hostname is not None
@@ -149,43 +234,118 @@ def require_public_url(url: str) -> str:
         ip = ipaddress.ip_address(address[4][0])
         if not ip.is_global:
             raise IngestError(f"URL resolves to a non-public address: {ip}")
-    return canonical
+    if not addresses:
+        raise IngestError(f"URL hostname has no addresses: {parsed.hostname}")
+    return _ResolvedTarget(canonical, parsed, addresses[0])
 
 
-class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: urllib.request.Request,
-        fp: Any,
-        code: int,
-        msg: str,
-        headers: Any,
-        newurl: str,
-    ) -> urllib.request.Request | None:
-        require_public_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+def require_public_url(url: str) -> str:
+    """Reject local and non-global URL targets before fetching."""
+    return _resolve_public_target(url).canonical_url
+
+
+def _pinned_socket(
+    address: tuple[int, int, int, str, tuple[Any, ...]], timeout_seconds: float
+) -> socket.socket:
+    family, socktype, proto, _canonical_name, sockaddr = address
+    connection = socket.socket(family, socktype, proto)
+    try:
+        connection.settimeout(timeout_seconds)
+        connection.connect(sockaddr)
+        return connection
+    except Exception:
+        connection.close()
+        raise
+
+
+def _open_pinned_connection(
+    target: _ResolvedTarget, timeout_seconds: float
+) -> http.client.HTTPConnection:
+    """Open HTTP(S) to the validated address while preserving TLS hostname checks."""
+    hostname = target.parsed.hostname
+    assert hostname is not None
+    port = target.parsed.port or (443 if target.parsed.scheme == "https" else 80)
+    if target.parsed.scheme == "https":
+        connection = http.client.HTTPSConnection(
+            hostname,
+            port,
+            timeout=timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+
+        def connect() -> None:
+            raw_socket = _pinned_socket(target.address, timeout_seconds)
+            try:
+                connection.sock = connection._context.wrap_socket(  # noqa: SLF001
+                    raw_socket, server_hostname=hostname
+                )
+            except Exception:
+                raw_socket.close()
+                raise
+
+    else:
+        connection = http.client.HTTPConnection(hostname, port, timeout=timeout_seconds)
+
+        def connect() -> None:
+            connection.sock = _pinned_socket(target.address, timeout_seconds)
+
+    connection.connect = connect  # type: ignore[method-assign]
+    return connection
 
 
 def fetch_url(url: str, timeout_seconds: float, max_bytes: int) -> FetchedSource:
-    """Fetch a public URL once with redirect and size safeguards."""
-    canonical = require_public_url(url)
-    request = urllib.request.Request(
-        canonical,
-        headers={
-            "Accept": "text/html,text/markdown,application/pdf,text/plain;q=0.9,*/*;q=0.1",
-            "User-Agent": "obsidian-vault-pr/0.1",
-        },
-    )
-    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    """Fetch a public URL with address pinning, redirect, and size safeguards."""
+    requested_url = canonicalize_url(url)
+    current_url = requested_url
     try:
-        with opener.open(request, timeout=timeout_seconds) as response:
-            final_url = require_public_url(response.geturl())
-            body = response.read(max_bytes + 1)
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            target = _resolve_public_target(current_url)
+            current_url = target.canonical_url
+            request_target = urllib.parse.urlunsplit(
+                ("", "", target.parsed.path or "/", target.parsed.query, "")
+            )
+            connection = _open_pinned_connection(target, timeout_seconds)
+            try:
+                connection.request(
+                    "GET",
+                    request_target,
+                    headers={
+                        "Accept": "text/html,text/markdown,application/pdf,text/plain;q=0.9,*/*;q=0.1",
+                        "User-Agent": "obsidian-vault-pr/0.1",
+                    },
+                )
+                response = connection.getresponse()
+                if response.status in REDIRECT_STATUSES:
+                    location = response.getheader("Location")
+                    if not location:
+                        raise IngestError("redirect response has no Location header")
+                    if redirect_count >= MAX_REDIRECTS:
+                        raise IngestError(f"response exceeds {MAX_REDIRECTS} redirects")
+                    current_url = urllib.parse.urljoin(current_url, location)
+                    continue
+                if not 200 <= response.status < 300:
+                    raise IngestError(
+                        f"HTTP request failed with status {response.status}"
+                    )
+                content_length = response.getheader("Content-Length")
+                if content_length:
+                    try:
+                        if int(content_length) > max_bytes:
+                            raise IngestError(f"response exceeds {max_bytes} bytes")
+                    except ValueError as exc:
+                        raise IngestError(
+                            "response has an invalid Content-Length"
+                        ) from exc
+                body = response.read(max_bytes + 1)
+                response_headers = list(response.headers.items())
+                response_status = response.status
+            finally:
+                connection.close()
             if len(body) > max_bytes:
                 raise IngestError(f"response exceeds {max_bytes} bytes")
             headers = {
                 key.lower(): value
-                for key, value in response.headers.items()
+                for key, value in response_headers
                 if key.lower() in SAFE_RESPONSE_HEADERS
             }
             media_type = (
@@ -194,13 +354,14 @@ def fetch_url(url: str, timeout_seconds: float, max_bytes: int) -> FetchedSource
             if media_type and media_type not in SUPPORTED_CONTENT_TYPES:
                 raise IngestError(f"unsupported response content type: {media_type}")
             return FetchedSource(
-                requested_url=canonical,
-                final_url=final_url,
-                status=response.status,
+                requested_url=requested_url,
+                final_url=current_url,
+                status=response_status,
                 headers=headers,
                 body=body,
                 captured_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
+        raise AssertionError("redirect loop did not return or raise")
     except IngestError:
         raise
     except Exception as exc:
@@ -219,10 +380,21 @@ def _html_title(text: str) -> str | None:
     return title or None
 
 
-def _defuddle_version(executable: str) -> str:
-    result = subprocess.run(
-        [executable, "--version"], check=False, capture_output=True, text=True
-    )
+def _defuddle_version(
+    executable: str,
+    timeout_seconds: float,
+    max_memory_bytes: int,
+    max_file_bytes: int,
+) -> str:
+    try:
+        result = run_limited_process(
+            [executable, "--version"],
+            timeout_seconds=timeout_seconds,
+            max_memory_bytes=max_memory_bytes,
+            max_file_bytes=max_file_bytes,
+        )
+    except LimitedProcessTimeout:
+        return "unknown"
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
@@ -256,8 +428,6 @@ def snapshot_source(
     content_type = content_types.get(suffix)
     if not content_type:
         raise IngestError("snapshot must be HTML, Markdown, or PDF")
-    if adapter == "wechat" and content_type != "text/markdown":
-        raise IngestError("WeChat adapter requires a converted Markdown snapshot")
     return FetchedSource(
         requested_url=canonical,
         final_url=canonical,
@@ -267,38 +437,6 @@ def snapshot_source(
         captured_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         adapter=adapter,
     )
-
-
-def _wechat_snapshot(url: str, output_dir: Path, timeout_seconds: float) -> Path:
-    """Run the source-specific WeChat converter and return its Markdown artifact."""
-    executable = shutil.which("wechat-article-to-markdown")
-    if not executable:
-        raise IngestError("required tool missing: wechat-article-to-markdown")
-    work_dir = output_dir / "wechat-adapter"
-    work_dir.mkdir()
-    try:
-        result = subprocess.run(
-            [executable, url],
-            cwd=work_dir,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise IngestError("WeChat conversion timed out") from exc
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise IngestError(f"WeChat conversion failed: {detail}")
-    markdown_files = sorted((work_dir / "output").glob("**/*.md"))
-    if len(markdown_files) != 1:
-        raise IngestError(
-            f"WeChat converter produced {len(markdown_files)} Markdown files"
-        )
-    markdown = markdown_files[0]
-    if markdown.is_symlink() or not markdown.resolve().is_relative_to(work_dir):
-        raise IngestError("WeChat converter produced an unsafe Markdown path")
-    return markdown
 
 
 def _copy_snapshot_assets(
@@ -329,7 +467,15 @@ def _copy_snapshot_assets(
     return hashes
 
 
-def extract_source(fetched: FetchedSource, output_dir: Path) -> ExtractedSource:
+def extract_source(
+    fetched: FetchedSource,
+    output_dir: Path,
+    *,
+    extraction_timeout_seconds: float = 60,
+    max_pdf_pages: int = 500,
+    max_extracted_characters: int = 2_000_000,
+    max_extraction_memory_bytes: int = 536_870_912,
+) -> ExtractedSource:
     """Write the raw response and extract deterministic Markdown."""
     content_type = fetched.headers.get("content-type", "").lower()
     url_path = urllib.parse.urlsplit(fetched.final_url).path.lower()
@@ -344,35 +490,54 @@ def extract_source(fetched: FetchedSource, output_dir: Path) -> ExtractedSource:
 
     if is_pdf:
         try:
-            import pypdf
-
-            reader = pypdf.PdfReader(raw_path)
-            metadata_title = reader.metadata.title if reader.metadata else None
-            title = metadata_title or Path(url_path).stem or "Untitled PDF"
-            pages = []
-            for page_number, page in enumerate(reader.pages, start=1):
-                text = page.extract_text() or ""
-                pages.append(f"## Page {page_number}\n\n{text.strip()}")
-            extracted_text = f"# {normalize_title(title)}\n\n" + "\n\n".join(pages)
-            if len(extracted_text.strip()) < 100:
-                raise IngestError(
-                    "PDF contains too little extractable text; provide an OCR Markdown snapshot"
-                )
-            extracted_path.write_text(extracted_text, encoding="utf-8")
-        except IngestError:
-            raise
-        except Exception as exc:
-            raise IngestError(f"PDF extraction failed: {exc}") from exc
+            extraction = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "vault_pr.pdf_extract",
+                    str(raw_path),
+                    str(extracted_path),
+                    "--max-pages",
+                    str(max_pdf_pages),
+                    "--max-characters",
+                    str(max_extracted_characters),
+                    "--max-memory-bytes",
+                    str(max_extraction_memory_bytes),
+                    "--cpu-seconds",
+                    str(extraction_timeout_seconds),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=extraction_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise IngestError(
+                f"PDF extraction exceeded {extraction_timeout_seconds} seconds"
+            ) from exc
+        if extraction.returncode != 0 or not extracted_path.is_file():
+            detail = (extraction.stderr.strip() or extraction.stdout.strip())[:2000]
+            raise IngestError(f"PDF extraction failed: {detail}")
+        try:
+            metadata = json.loads(extraction.stdout)
+            title = normalize_title(metadata["title"])
+            extractor_version = str(metadata["extractor_version"])
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise IngestError("PDF extractor returned invalid metadata") from exc
         return ExtractedSource(
-            title=normalize_title(title),
+            title=title,
             raw_filename=raw_filename,
             extracted_filename=extracted_path.name,
             extractor="pypdf",
-            extractor_version=pypdf.__version__,
+            extractor_version=extractor_version,
         )
 
     if is_markdown:
         text = fetched.body.decode("utf-8", errors="replace")
+        if len(text) > max_extracted_characters:
+            raise IngestError(
+                f"Markdown exceeds {max_extracted_characters} extracted characters"
+            )
         extracted_path.write_text(text, encoding="utf-8")
         title = _markdown_title(text) or Path(url_path).stem or "Untitled source"
         return ExtractedSource(
@@ -380,7 +545,7 @@ def extract_source(fetched: FetchedSource, output_dir: Path) -> ExtractedSource:
             raw_filename=raw_filename,
             extracted_filename=extracted_path.name,
             extractor=(
-                "wechat-article-to-markdown"
+                "wechat-markdown-snapshot"
                 if fetched.adapter == "wechat"
                 else "authenticated-snapshot"
                 if fetched.adapter == "authenticated"
@@ -392,25 +557,37 @@ def extract_source(fetched: FetchedSource, output_dir: Path) -> ExtractedSource:
     executable = shutil.which("defuddle")
     if not executable:
         raise IngestError("required tool missing: defuddle")
-    extraction = subprocess.run(
-        [executable, "parse", str(raw_path), "--md", "-o", str(extracted_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        extraction = run_limited_process(
+            [executable, "parse", str(raw_path), "--md", "-o", str(extracted_path)],
+            timeout_seconds=extraction_timeout_seconds,
+            max_memory_bytes=max_extraction_memory_bytes,
+            max_file_bytes=max(max_extracted_characters * 4, 16_384),
+        )
+    except LimitedProcessTimeout as exc:
+        raise IngestError(
+            f"Defuddle extraction exceeded {extraction_timeout_seconds} seconds"
+        ) from exc
     if extraction.returncode != 0 or not extracted_path.is_file():
         detail = extraction.stderr.strip() or extraction.stdout.strip()
         raise IngestError(f"Defuddle extraction failed: {detail}")
+    if extracted_path.stat().st_size > max_extracted_characters * 4:
+        raise IngestError("Defuddle output exceeds the extracted content limit")
     extracted_text = extracted_path.read_text(encoding="utf-8")
+    if len(extracted_text) > max_extracted_characters:
+        raise IngestError("Defuddle output exceeds the extracted content limit")
     if len(extracted_text.strip()) < 100:
         raise IngestError("Defuddle output is too short to trust")
 
-    title_result = subprocess.run(
-        [executable, "parse", str(raw_path), "-p", "title"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        title_result = run_limited_process(
+            [executable, "parse", str(raw_path), "-p", "title"],
+            timeout_seconds=extraction_timeout_seconds,
+            max_memory_bytes=max_extraction_memory_bytes,
+            max_file_bytes=16_384,
+        )
+    except LimitedProcessTimeout:
+        title_result = LimitedProcessResult(1, "", "title extraction timed out")
     raw_text = fetched.body.decode("utf-8", errors="replace")
     title = (
         title_result.stdout.strip()
@@ -424,7 +601,12 @@ def extract_source(fetched: FetchedSource, output_dir: Path) -> ExtractedSource:
         raw_filename=raw_filename,
         extracted_filename=extracted_path.name,
         extractor="defuddle",
-        extractor_version=_defuddle_version(executable),
+        extractor_version=_defuddle_version(
+            executable,
+            extraction_timeout_seconds,
+            max_extraction_memory_bytes,
+            16_384,
+        ),
     )
 
 
@@ -448,13 +630,69 @@ def normalize_title(title: str) -> str:
     return normalized[:200].strip() or "Untitled source"
 
 
-def source_note_path(note_dir: Path, title: str, url: str) -> Path:
-    """Reuse a stable URL-suffixed note even if the extracted title changes."""
+def _source_note_has_id(path: Path, source_id: str) -> bool:
+    try:
+        return source_note_has_id(path, source_id)
+    except CaptureError as exc:
+        raise IngestError(str(exc)) from exc
+
+
+def _source_note_candidates(note_dir: Path, url: str) -> list[Path]:
     url_id = hashlib.sha256(url.encode()).hexdigest()[:8]
-    existing = sorted(note_dir.glob(f"*--{url_id}.md")) if note_dir.is_dir() else []
-    if len(existing) > 1:
-        raise IngestError(f"multiple source notes share URL id {url_id}")
-    return existing[0] if existing else note_dir / safe_note_filename(title, url)
+    if not note_dir.is_dir():
+        return []
+    candidates = sorted(
+        {*note_dir.glob(f"*--{url_id}.md"), *note_dir.glob(f"*--{url_id}--*.md")}
+    )
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_file():
+            raise IngestError(
+                f"source note candidate is not a regular file: {candidate}"
+            )
+    return candidates
+
+
+def _versioned_source_note_path(
+    note_dir: Path, title: str, url: str, version: str
+) -> Path:
+    base = safe_note_filename(title, url).removesuffix(".md")
+    path = note_dir / f"{base}--{version}.md"
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise IngestError(f"versioned source note path is occupied: {path}")
+    return path
+
+
+def source_note_path(
+    note_dir: Path, title: str, url: str, source_id: str | None = None
+) -> Path:
+    """Resolve one visible note per immutable version of a source URL."""
+    url_id = hashlib.sha256(url.encode()).hexdigest()[:8]
+    base_notes = sorted(note_dir.glob(f"*--{url_id}.md")) if note_dir.is_dir() else []
+    if source_id is None:
+        if len(base_notes) > 1:
+            raise IngestError(f"multiple source notes share URL id {url_id}")
+        return (
+            base_notes[0] if base_notes else note_dir / safe_note_filename(title, url)
+        )
+
+    candidates = _source_note_candidates(note_dir, url)
+    matching: list[Path] = []
+    for candidate in candidates:
+        if _source_note_has_id(candidate, source_id):
+            matching.append(candidate)
+    if len(matching) > 1:
+        raise IngestError(f"multiple source notes contain source id {source_id}")
+    if matching:
+        return matching[0]
+    if not candidates:
+        return note_dir / safe_note_filename(title, url)
+    version = source_id.removeprefix("src_")
+    versioned = _versioned_source_note_path(note_dir, title, url, version)
+    if versioned.exists() or versioned.is_symlink():
+        raise IngestError(
+            f"versioned source note path is already occupied: {versioned}"
+        )
+    return versioned
 
 
 def _yaml_string(value: str) -> str:
@@ -544,15 +782,29 @@ def ingest_url(
         max_bytes = int(sources_config.get("max_download_bytes", 10_000_000))
         max_asset_files = int(sources_config.get("max_asset_files", 200))
         max_asset_bytes = int(sources_config.get("max_asset_bytes", 50_000_000))
+        extraction_timeout_seconds = float(
+            sources_config.get("extraction_timeout_seconds", 60)
+        )
+        max_pdf_pages = int(sources_config.get("max_pdf_pages", 500))
+        max_extracted_characters = int(
+            sources_config.get("max_extracted_characters", 2_000_000)
+        )
+        max_extraction_memory_bytes = int(
+            sources_config.get("max_extraction_memory_bytes", 536_870_912)
+        )
     except (AttributeError, TypeError, ValueError) as exc:
-        raise ConfigError("invalid sources timeout or size configuration") from exc
+        raise ConfigError("invalid source fetch or extraction limits") from exc
     if (
         timeout_seconds <= 0
         or max_bytes < 1
         or max_asset_files < 1
         or max_asset_bytes < 1
+        or extraction_timeout_seconds <= 0
+        or max_pdf_pages < 1
+        or max_extracted_characters < 1
+        or max_extraction_memory_bytes < 1
     ):
-        raise ConfigError("source timeout and maximum download size must be positive")
+        raise ConfigError("source fetch and extraction limits must be positive")
     with tempfile.TemporaryDirectory(prefix="vault-pr-ingest-") as temp_dir_string:
         temp_dir = Path(temp_dir_string)
         canonical = canonicalize_url(url)
@@ -569,27 +821,24 @@ def ingest_url(
             )
         if effective_adapter not in {"http", "wechat", "authenticated"}:
             raise IngestError(f"unsupported source adapter: {effective_adapter}")
+        if hostname == "mp.weixin.qq.com" and effective_adapter != "wechat":
+            raise IngestError(
+                "mp.weixin.qq.com sources must use the offline WeChat snapshot adapter"
+            )
+        if effective_adapter == "http" and effective_snapshot is not None:
+            raise IngestError("http adapter does not accept --snapshot")
         if effective_adapter == "authenticated" and effective_snapshot is None:
             raise IngestError("authenticated adapter requires --snapshot")
-        generated_wechat_snapshot = False
-        if effective_adapter == "wechat" and effective_snapshot is None:
+        if effective_adapter == "wechat":
             if hostname != "mp.weixin.qq.com":
                 raise IngestError(
-                    "WeChat network adapter only accepts mp.weixin.qq.com URLs"
+                    "WeChat adapter only accepts mp.weixin.qq.com source URLs"
                 )
-            canonical = require_public_url(canonical)
-            try:
-                wechat_timeout = float(
-                    sources_config.get("wechat_timeout_seconds", 180)
+            if effective_snapshot is None:
+                raise IngestError(
+                    "WeChat adapter requires a local HTML, Markdown, or PDF --snapshot; "
+                    "vault-pr does not invoke URL-fetching converters"
                 )
-            except (AttributeError, TypeError, ValueError) as exc:
-                raise ConfigError("invalid WeChat timeout configuration") from exc
-            if wechat_timeout <= 0:
-                raise ConfigError("WeChat timeout must be positive")
-            effective_snapshot = _wechat_snapshot(
-                canonical, temp_dir, timeout_seconds=wechat_timeout
-            )
-            generated_wechat_snapshot = True
         if effective_snapshot is not None:
             fetched = snapshot_source(
                 url=canonical,
@@ -601,7 +850,19 @@ def ingest_url(
             fetched = fetch_url(
                 canonical, timeout_seconds=timeout_seconds, max_bytes=max_bytes
             )
-        extracted = extract_source(fetched, temp_dir)
+        fetched = replace(
+            fetched,
+            requested_url=canonicalize_url(fetched.requested_url),
+            final_url=canonicalize_url(fetched.final_url),
+        )
+        extracted = extract_source(
+            fetched,
+            temp_dir,
+            extraction_timeout_seconds=extraction_timeout_seconds,
+            max_pdf_pages=max_pdf_pages,
+            max_extracted_characters=max_extracted_characters,
+            max_extraction_memory_bytes=max_extraction_memory_bytes,
+        )
         asset_hashes = (
             _copy_snapshot_assets(
                 effective_snapshot,
@@ -612,25 +873,75 @@ def ingest_url(
             if effective_snapshot is not None and effective_adapter == "wechat"
             else {}
         )
-        if generated_wechat_snapshot:
-            shutil.rmtree(temp_dir / "wechat-adapter")
         title = normalize_title(title_override or extracted.title)
         raw_path = temp_dir / extracted.raw_filename
         extracted_path = temp_dir / extracted.extracted_filename
         raw_sha256 = hashlib.sha256(raw_path.read_bytes()).hexdigest()
         extracted_sha256 = hashlib.sha256(extracted_path.read_bytes()).hexdigest()
-        asset_identity = json.dumps(
-            asset_hashes, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-        source_identity = hashlib.sha256(
-            f"{fetched.requested_url}\0{extracted_sha256}\0{asset_identity}".encode()
-        ).hexdigest()
-        source_id = f"src_{source_identity[:20]}"
-
+        identity_base = {
+            "schema_version": 1,
+            "requested_url": fetched.requested_url,
+            "final_url": fetched.final_url,
+            "adapter": fetched.adapter,
+            "raw_sha256": raw_sha256,
+            "extracted_sha256": extracted_sha256,
+            "asset_sha256": asset_hashes,
+            "domain": domain,
+            "artifacts": {
+                "raw": extracted.raw_filename,
+                "extracted": extracted.extracted_filename,
+            },
+        }
         archive_root = source_archive_dir(config, vault)
-        capture_dir = archive_root / source_id
         note_dir = domain_source_notes_dir(config, vault, domain)
-        note_path = source_note_path(note_dir, title, fetched.requested_url)
+        candidates = _source_note_candidates(note_dir, fetched.requested_url)
+        matched: list[tuple[Path, str, str, dict[str, Any]]] = []
+        for candidate in candidates:
+            candidate_identity = {
+                **identity_base,
+                "artifacts": {
+                    **identity_base["artifacts"],
+                    "source_note": str(candidate.relative_to(vault)),
+                },
+            }
+            candidate_digest = source_identity_digest(candidate_identity)
+            candidate_source_id = f"src_{candidate_digest[:20]}"
+            if _source_note_has_id(candidate, candidate_source_id):
+                matched.append(
+                    (
+                        candidate,
+                        candidate_digest,
+                        candidate_source_id,
+                        candidate_identity,
+                    )
+                )
+            elif (archive_root / candidate_source_id).exists():
+                raise IngestError(
+                    f"source note linkage is invalid for capture: {candidate_source_id}"
+                )
+        if len(matched) > 1:
+            raise IngestError("multiple source notes match the same immutable source")
+        if matched:
+            note_path, source_identity, source_id, identity_payload = matched[0]
+        else:
+            content_version = source_identity_digest(identity_base)[:20]
+            note_path = (
+                note_dir / safe_note_filename(title, fetched.requested_url)
+                if not candidates
+                else _versioned_source_note_path(
+                    note_dir, title, fetched.requested_url, content_version
+                )
+            )
+            identity_payload = {
+                **identity_base,
+                "artifacts": {
+                    **identity_base["artifacts"],
+                    "source_note": str(note_path.relative_to(vault)),
+                },
+            }
+            source_identity = source_identity_digest(identity_payload)
+            source_id = f"src_{source_identity[:20]}"
+        capture_dir = archive_root / source_id
         note_content = build_source_note(
             title=title,
             domain=domain,
@@ -658,16 +969,15 @@ def ingest_url(
             "extractor_version": extracted.extractor_version,
             "adapter": fetched.adapter,
             "asset_sha256": asset_hashes,
-            "artifacts": {
-                "raw": extracted.raw_filename,
-                "extracted": extracted.extracted_filename,
-                "source_note": str(note_path.relative_to(vault)),
-            },
+            "artifacts": identity_payload["artifacts"],
         }
         (temp_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        for staged_file in temp_dir.rglob("*"):
+            if staged_file.is_file():
+                staged_file.chmod(0o644)
 
         result = {
             "status": "planned",
@@ -682,35 +992,106 @@ def ingest_url(
         with vault_write_lock(vault):
             require_clean_git_root(vault)
             if note_path.exists():
-                existing = note_path.read_text(encoding="utf-8")
-                if f'source_id: "{source_id}"' not in existing:
+                if not _source_note_has_id(note_path, source_id):
                     raise IngestError(
                         f"source note already exists for different content: {note_path}"
                     )
-            capture_created = False
-            try:
-                if capture_dir.exists():
-                    existing_manifest = capture_dir / "manifest.json"
-                    if not existing_manifest.is_file():
-                        raise IngestError(
-                            f"capture directory is incomplete: {capture_dir}"
-                        )
-                else:
-                    capture_dir.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(temp_dir, capture_dir)
-                    capture_created = True
+            capture_exists = capture_dir.exists()
+            note_exists = note_path.exists()
+            if capture_exists:
+                try:
+                    load_validated_capture(
+                        capture_dir,
+                        source_id=source_id,
+                        vault=vault,
+                        expected_manifest=manifest,
+                    )
+                except CaptureError as exc:
+                    raise IngestError(str(exc)) from exc
 
-                if not note_path.exists():
-                    note_path.parent.mkdir(parents=True, exist_ok=True)
-                    temporary_note = note_path.with_suffix(note_path.suffix + ".tmp")
-                    temporary_note.write_text(note_content, encoding="utf-8")
-                    temporary_note.replace(note_path)
+            capture_files = [
+                path for path in sorted(temp_dir.rglob("*")) if path.is_file()
+            ]
+            affected: set[Path] = set()
+            final_sha256: dict[Path, str | None] = {}
+            final_mode: dict[Path, str | None] = {}
+            if not capture_exists:
+                for staged_file in capture_files:
+                    destination = capture_dir / staged_file.relative_to(temp_dir)
+                    affected.add(destination)
+                    final_sha256[destination] = hashlib.sha256(
+                        staged_file.read_bytes()
+                    ).hexdigest()
+                    final_mode[destination] = "100644"
+            if not note_exists:
+                affected.add(note_path)
+                final_sha256[note_path] = hashlib.sha256(
+                    note_content.encode("utf-8")
+                ).hexdigest()
+                final_mode[note_path] = "100644"
+            if not affected:
+                result["status"] = "captured"
+                return result
+
+            try:
+                active_dir = prepare_active_transaction(
+                    vault=vault,
+                    git_dir=_git_dir(vault),
+                    transaction_id=f"txn_ingest_{source_id.removeprefix('src_')}",
+                    transaction_sha256=source_identity,
+                    affected=affected,
+                    expected_original_sha256={path: None for path in affected},
+                    expected_original_mode={path: None for path in affected},
+                    final_sha256=final_sha256,
+                    final_mode=final_mode,
+                )
+            except RecoveryError as exc:
+                raise IngestError(str(exc)) from exc
+
+            try:
+                if not capture_exists:
+                    staged_capture = active_dir / "capture-staging"
+                    shutil.copytree(temp_dir, staged_capture)
+                    for staged_file in capture_files:
+                        relative = staged_file.relative_to(temp_dir)
+                        copied = staged_capture / relative
+                        destination = capture_dir / relative
+                        copied_sha256 = hashlib.sha256(copied.read_bytes()).hexdigest()
+                        copied_mode = (
+                            "100755" if copied.stat().st_mode & 0o111 else "100644"
+                        )
+                        if (
+                            copied_sha256 != final_sha256[destination]
+                            or copied_mode != final_mode[destination]
+                        ):
+                            raise IngestError(
+                                f"failed to verify staged capture file: {relative}"
+                            )
+                    capture_dir.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(staged_capture, capture_dir)
+
+                if not note_exists:
+                    _atomic_note_write(
+                        note_path,
+                        note_content,
+                        active_dir / "write-staging" / "source-note",
+                    )
+                mark_active_applied(active_dir)
             except Exception as exc:
-                if capture_created and not note_path.exists():
-                    shutil.rmtree(capture_dir, ignore_errors=True)
+                try:
+                    rollback_active_transaction(vault, active_dir)
+                except RecoveryError as recovery_exc:
+                    raise IngestError(
+                        "ingest failed; durable recovery is required from "
+                        f"{active_dir}: {recovery_exc}"
+                    ) from recovery_exc
                 if isinstance(exc, IngestError):
                     raise
+                if isinstance(exc, RecoveryError):
+                    raise IngestError(str(exc)) from exc
                 raise IngestError(f"failed to write ingest artifacts: {exc}") from exc
 
         result["status"] = "captured"
+        result["transaction_id"] = active_dir.name
+        result["requires_commit"] = True
         return result

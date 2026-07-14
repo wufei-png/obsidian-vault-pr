@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import subprocess
 from contextlib import contextmanager
@@ -40,22 +41,22 @@ def require_clean_git_root(vault: Path) -> None:
 
 @contextmanager
 def vault_write_lock(vault: Path) -> Iterator[None]:
-    """Serialize writers with an untracked lock stored in the Git directory."""
+    """Serialize writers with a kernel-released lock in the Git directory."""
     git_dir_result = run_git(vault, "rev-parse", "--absolute-git-dir")
     if git_dir_result.returncode != 0:
         raise GitSafetyError("unable to resolve vault Git directory")
     lock_path = Path(git_dir_result.stdout.strip()) / "vault-pr.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise GitSafetyError(f"another vault-pr writer holds {lock_path}") from exc
-    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise GitSafetyError(f"another vault-pr writer holds {lock_path}") from exc
+        os.ftruncate(descriptor, 0)
         os.write(descriptor, f"pid={os.getpid()}\n".encode())
-        os.close(descriptor)
         yield
     finally:
         try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
             os.close(descriptor)
-        except OSError:
-            pass
-        lock_path.unlink(missing_ok=True)

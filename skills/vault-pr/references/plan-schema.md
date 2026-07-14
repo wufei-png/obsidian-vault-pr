@@ -48,3 +48,13 @@ conflict. Merge, delete, contradiction, and work-domain plans require an
 independent hash-bound approval. Any plan edit invalidates an earlier approval.
 Approval covers both `plan.json` and every referenced proposed content file;
 editing either after review invalidates the approval.
+
+`vault-pr plan apply` freezes those approved bytes before writing, returns the
+transaction ID with `requires_commit: true`, and leaves a durable applied
+journal. Run `vault-pr commit <transaction-id> --message <message> --config
+<config>` so the CLI stages only journal paths, commits under the vault lock,
+and finalizes before indexing.
+
+Independence is supplied by the orchestrator assigning a separate reviewer
+agent. The local CLI records the declared reviewer and verifies content hashes;
+it does not cryptographically authenticate the reviewer process.

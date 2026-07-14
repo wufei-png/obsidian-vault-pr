@@ -16,6 +16,8 @@ from .ingest import IngestError, ingest_url
 from .plan import PlanError, apply_plan, init_plan, record_review, validate_plan
 from .recovery import (
     RecoveryError,
+    commit_applied_transaction,
+    finalize_applied_transaction,
     list_active_transactions,
     recover_interrupted_transaction,
 )
@@ -51,7 +53,7 @@ def doctor(config_path: Path) -> int:
         active = list_active_transactions(Path(git_dir_result.stdout.strip()))
         if active:
             print(
-                "ERROR interrupted vault-pr transaction requires recovery: "
+                "ERROR active vault-pr transaction requires commit/finalize or recovery: "
                 + ", ".join(path.name for path in active)
             )
             failed = True
@@ -120,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--adapter",
         choices=("auto", "http", "wechat", "authenticated"),
         default="auto",
-        help="source-specific adapter; auto detects WeChat and local snapshots",
+        help="source adapter; WeChat requires a local HTML/Markdown/PDF --snapshot",
     )
     ingest_parser.add_argument(
         "--apply",
@@ -168,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_apply.add_argument("--config", type=Path, default=Path("vault-pr.local.toml"))
 
     review_parser = subparsers.add_parser(
-        "review", help="record an independent decision bound to a plan hash"
+        "review", help="record a reviewer decision bound to plan and content hashes"
     )
     review_parser.add_argument("plan", type=Path)
     review_parser.add_argument("--reviewer", required=True)
@@ -178,9 +180,24 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--notes", default="")
 
     recover_parser = subparsers.add_parser(
-        "recover", help="roll back one interrupted semantic transaction"
+        "recover", help="recover or finalize one interrupted transaction"
     )
     recover_parser.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
+    finalize_parser = subparsers.add_parser(
+        "finalize", help="verify a committed transaction and remove its active journal"
+    )
+    finalize_parser.add_argument("transaction_id")
+    finalize_parser.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
+    commit_parser = subparsers.add_parser(
+        "commit", help="commit exact applied transaction paths and finalize the journal"
+    )
+    commit_parser.add_argument("transaction_id")
+    commit_parser.add_argument("--message", required=True)
+    commit_parser.add_argument(
         "--config", type=Path, default=Path("vault-pr.local.toml")
     )
     return parser
@@ -267,6 +284,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise RecoveryError("unable to resolve vault Git directory")
             result = recover_interrupted_transaction(
                 vault, Path(git_dir.stdout.strip())
+            )
+        except (ConfigError, GitSafetyError, RecoveryError) as exc:
+            print(f"ERROR {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "finalize":
+        try:
+            config = load_config(args.config)
+            vault = load_vault_path(config)
+            git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")
+            if git_dir.returncode != 0:
+                raise RecoveryError("unable to resolve vault Git directory")
+            result = finalize_applied_transaction(
+                vault, Path(git_dir.stdout.strip()), args.transaction_id
+            )
+        except (ConfigError, GitSafetyError, RecoveryError) as exc:
+            print(f"ERROR {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "commit":
+        try:
+            config = load_config(args.config)
+            vault = load_vault_path(config)
+            git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")
+            if git_dir.returncode != 0:
+                raise RecoveryError("unable to resolve vault Git directory")
+            result = commit_applied_transaction(
+                vault,
+                Path(git_dir.stdout.strip()),
+                args.transaction_id,
+                args.message,
             )
         except (ConfigError, GitSafetyError, RecoveryError) as exc:
             print(f"ERROR {exc}", file=sys.stderr)

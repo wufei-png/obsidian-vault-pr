@@ -4,10 +4,12 @@ import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 from vault_pr.config import ConfigError
-from vault_pr.index import reconcile_qmd_collections, update_qmd_index
+from vault_pr.index import IndexUpdateError, reconcile_qmd_collections, update_qmd_index
 
 
 def make_config(vault: Path, *, max_retries: int = 3) -> dict[str, object]:
@@ -215,6 +217,45 @@ class IndexTests(unittest.TestCase):
             self.assertEqual(status["attempts"], 3)
             self.assertEqual(runner.update_calls, 3)
             self.assertTrue(any("embed" in call for call in runner.calls))
+
+    def test_refuses_to_index_before_active_transaction_is_finalized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            active = vault / ".git" / "vault-pr-active" / "txn_fixture"
+            active.mkdir(parents=True)
+            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+
+            with self.assertRaisesRegex(IndexUpdateError, "must be finalized"):
+                update_qmd_index(
+                    make_config(vault),
+                    runner=runner,
+                    sleeper=lambda _: None,
+                    executable="qmd",
+                )
+
+            self.assertEqual(runner.calls, [])
+
+    def test_rechecks_active_transaction_after_acquiring_index_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            active = vault / ".git" / "vault-pr-active" / "txn_race_fixture"
+            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+
+            @contextmanager
+            def raced_lock(_vault: Path):
+                active.mkdir(parents=True)
+                yield
+
+            with patch("vault_pr.index.vault_write_lock", new=raced_lock):
+                with self.assertRaisesRegex(IndexUpdateError, "must be finalized"):
+                    update_qmd_index(
+                        make_config(vault),
+                        runner=runner,
+                        sleeper=lambda _: None,
+                        executable="qmd",
+                    )
+
+            self.assertEqual(runner.calls, [])
 
     def test_stops_after_maximum_retries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

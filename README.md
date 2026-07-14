@@ -20,13 +20,15 @@ private vault content and machine-specific paths must never be committed here.
 The implemented workflow provides:
 
 - `vault-pr doctor` for Git safety and declarative qmd drift checks;
-- URL ingestion through Defuddle, direct Markdown, PDF, WeChat, or an
-  authenticated browser snapshot;
+- URL ingestion through Defuddle, direct Markdown, PDF, local WeChat snapshots,
+  or an authenticated browser snapshot, with bounded extraction time, PDF pages,
+  extracted text, and PDF-worker memory;
 - domain-scoped BM25/vector retrieval for deduplication and semantic planning;
 - hash-bound change plans with a 15-note default limit;
-- independent reviewer approval for merge, delete, contradiction, and work
-  changes;
-- deterministic plan apply with rollback-on-error and an audit archive;
+- hash-bound reviewer records for merge, delete, contradiction, and work changes;
+  the skill orchestration assigns these plans to a separate reviewer agent;
+- deterministic plan apply with rollback-on-error, an audit archive, and a
+  durable `apply -> commit -> finalize` recovery protocol;
 - qmd collection reconciliation, update, and incremental embedding with at most
   three retries after the first attempt.
 
@@ -39,6 +41,9 @@ uv sync
 uv run vault-pr doctor --config vault-pr.local.toml
 uv run vault-pr ingest https://example.com/article \
   --domain tech --config vault-pr.local.toml --apply
+# Commit only the returned transaction's paths and close its journal under lock.
+uv run vault-pr commit txn_ingest_... --message "Ingest source article" \
+  --config vault-pr.local.toml
 uv run vault-pr index --config vault-pr.local.toml
 uv run vault-pr retrieve src_0123456789abcdef0123 \
   --config vault-pr.local.toml
@@ -51,6 +56,22 @@ The local configuration is intentionally ignored by Git.
 Use `vault-pr index --check` for a read-only collection drift report. A normal
 `vault-pr index` repairs only explicitly configured collections, leaves all
 unmanaged collections untouched, and then refreshes lexical and vector indexes.
-If `doctor` reports an interrupted semantic transaction, run
-`vault-pr recover --config vault-pr.local.toml`; it rolls back only after journal,
-backup, file-state, and Git-state verification succeeds.
+An applied ingest or semantic plan returns `requires_commit: true` and keeps its
+recovery journal. Run `vault-pr commit <transaction-id> --message <message>
+--config vault-pr.local.toml`; it holds the vault lock, stages only journal paths,
+verifies staged hashes, commits, and finalizes. Finalization verifies the clean
+worktree, new commit, complete commit-path range, every committed file hash, and
+Git mode, plus the audit record before removing the journal. Retrieval and plan
+validation re-verify the capture identity, complete artifact set, hashes, and
+source-note linkage before consuming it. Indexing refuses to run before this
+step. `vault-pr finalize` remains available when a commit was completed before a
+process interruption.
+If a process stops before finalization, run
+`vault-pr recover --config vault-pr.local.toml`. Recovery auto-finalizes an
+already committed exact result, or rolls back an uncommitted result only after
+journal, backup, file-state, and Git-state verification succeeds.
+
+Reviewer independence is an orchestration guarantee, not a local identity or
+cryptographic boundary. The CLI prevents stale approval by binding the record to
+the exact plan and proposed files; the orchestrator must ensure the planner does
+not review its own risky transaction.

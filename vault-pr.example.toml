@@ -11,9 +11,12 @@ provenance_granularity = "claim"
 public_archive_dir = ".vault-pr/sources/public"
 timeout_seconds = 30
 max_download_bytes = 10000000
-wechat_timeout_seconds = 180
 max_asset_files = 200
 max_asset_bytes = 50000000
+extraction_timeout_seconds = 60
+max_pdf_pages = 500
+max_extracted_characters = 2000000
+max_extraction_memory_bytes = 536870912
 
 [domains.tech]
 root_dir = "knowledgebase"

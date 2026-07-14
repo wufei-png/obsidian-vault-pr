@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from .capture import CaptureError, load_validated_capture, source_note_has_id
 from .config import (
     ConfigError,
     domain_specs,
@@ -25,8 +25,10 @@ from .config import (
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .recovery import (
     RecoveryError,
+    mark_active_applied,
     prepare_active_transaction,
     rollback_active_transaction,
+    worktree_file_mode,
 )
 
 
@@ -72,8 +74,10 @@ def _plan_hash(plan_path: Path) -> str:
     return _sha256_file(plan_path)
 
 
-def _proposed_content_paths(plan_path: Path) -> list[Path]:
-    plan = _read_json(plan_path, "plan")
+def _proposed_content_paths(
+    plan_path: Path, plan: dict[str, Any] | None = None
+) -> list[Path]:
+    plan = plan if plan is not None else _read_json(plan_path, "plan")
     operations = plan.get("operations")
     if not isinstance(operations, list):
         raise PlanError("plan operations must be an array")
@@ -86,18 +90,52 @@ def _proposed_content_paths(plan_path: Path) -> list[Path]:
     return sorted(content_paths)
 
 
-def _transaction_digest(plan_path: Path, content_paths: list[Path]) -> str:
+def _transaction_digest_snapshot(
+    plan_path: Path, plan_bytes: bytes, content: dict[Path, bytes]
+) -> str:
     """Bind review to the exact plan and every proposed content file."""
     digest = hashlib.sha256()
     digest.update(b"plan\0")
-    digest.update(plan_path.read_bytes())
-    for content_path in sorted(set(content_paths)):
+    digest.update(plan_bytes)
+    for content_path in sorted(content):
         relative = str(content_path.relative_to(plan_path.parent.resolve()))
         digest.update(b"file\0")
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(content_path.read_bytes())
+        digest.update(content[content_path])
     return digest.hexdigest()
+
+
+def _transaction_digest(plan_path: Path, content_paths: list[Path]) -> str:
+    plan_bytes = plan_path.read_bytes()
+    content = {path: path.read_bytes() for path in sorted(set(content_paths))}
+    return _transaction_digest_snapshot(plan_path, plan_bytes, content)
+
+
+def _approval_bytes_valid(content: bytes | None, transaction_sha256: str) -> bool:
+    if content is None:
+        return False
+    try:
+        approval = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(approval, dict)
+        and approval.get("decision") == "approve"
+        and approval.get("transaction_sha256") == transaction_sha256
+        and isinstance(approval.get("reviewer"), str)
+        and approval["reviewer"].strip()
+    )
+
+
+def _validated_source_manifest(
+    config: dict[str, Any], vault: Path, source_id: str
+) -> dict[str, Any]:
+    capture = source_archive_dir(config, vault) / source_id
+    try:
+        return load_validated_capture(capture, source_id=source_id, vault=vault)
+    except CaptureError as exc:
+        raise PlanError(f"source capture integrity failed: {exc}") from exc
 
 
 def init_plan(config: dict[str, Any], source_id: str, summary: str) -> dict[str, Any]:
@@ -106,8 +144,7 @@ def init_plan(config: dict[str, Any], source_id: str, summary: str) -> dict[str,
     require_clean_git_root(vault)
     if not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise PlanError("invalid source id")
-    if not (source_archive_dir(config, vault) / source_id / "manifest.json").is_file():
-        raise PlanError(f"unknown source id: {source_id}")
+    _validated_source_manifest(config, vault, source_id)
     summary = " ".join(summary.split()).strip()
     if not summary:
         raise PlanError("plan summary must not be empty")
@@ -209,14 +246,9 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     ):
         raise PlanError("invalid transaction_id")
     source_id = plan.get("source_id")
-    manifest_path = source_archive_dir(config, vault) / str(source_id) / "manifest.json"
-    if (
-        not isinstance(source_id, str)
-        or not SOURCE_ID_PATTERN.fullmatch(source_id)
-        or not manifest_path.is_file()
-    ):
+    if not isinstance(source_id, str) or not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise PlanError("plan source_id does not resolve to a capture")
-    manifest = _read_json(manifest_path, "source manifest")
+    manifest = _validated_source_manifest(config, vault, source_id)
     artifacts = manifest.get("artifacts")
     source_note_raw = (
         artifacts.get("source_note") if isinstance(artifacts, dict) else None
@@ -283,6 +315,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             expected = raw_operation.get("expected_sha256")
             if not isinstance(expected, str) or expected != _sha256_file(source):
                 raise PlanError(f"operation {index} expected_sha256 does not match")
+            operation["expected_sha256"] = expected
 
         if action in {"create", "update"} or (
             action == "rename" and raw_operation.get("content_file")
@@ -294,11 +327,21 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             operation["content_file"] = content_path
         normalized.append(operation)
 
-    if not any(
-        operation["action"] == "update" and operation["path"] == source_note
+    source_updates = [
+        operation
         for operation in normalized
-    ):
+        if operation["action"] == "update" and operation["path"] == source_note
+    ]
+    if not source_updates:
         raise PlanError("plan must update the captured source note")
+    try:
+        preserves_source_id = source_note_has_id(
+            source_updates[0]["content_file"], source_id
+        )
+    except CaptureError as exc:
+        raise PlanError(f"proposed source note is invalid: {exc}") from exc
+    if not preserves_source_id:
+        raise PlanError("proposed source note must preserve its source_id property")
 
     maximum = max_touched_notes(config)
     if len(touched) > maximum:
@@ -362,20 +405,29 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
 def record_review(
     plan_path: Path, reviewer: str, decision: str, notes: str = ""
 ) -> dict[str, Any]:
-    """Bind an independent review decision to the exact plan bytes."""
+    """Bind a reviewer decision to the exact plan and proposed content bytes."""
     plan_path = plan_path.expanduser().resolve()
-    _read_json(plan_path, "plan")
+    try:
+        plan_bytes = plan_path.read_bytes()
+        plan = json.loads(plan_bytes)
+    except FileNotFoundError as exc:
+        raise PlanError(f"plan not found: {plan_path}") from exc
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlanError(f"invalid plan: {plan_path}") from exc
+    if not isinstance(plan, dict):
+        raise PlanError("plan must be a JSON object")
     reviewer = " ".join(reviewer.split()).strip()
     if not reviewer:
         raise PlanError("reviewer must not be empty")
     if decision not in {"approve", "reject"}:
         raise PlanError("review decision must be approve or reject")
-    transaction_sha256 = _transaction_digest(
-        plan_path, _proposed_content_paths(plan_path)
-    )
+    content = {
+        path: path.read_bytes() for path in _proposed_content_paths(plan_path, plan)
+    }
+    transaction_sha256 = _transaction_digest_snapshot(plan_path, plan_bytes, content)
     approval = {
         "schema_version": 1,
-        "plan_sha256": _plan_hash(plan_path),
+        "plan_sha256": _sha256_bytes(plan_bytes),
         "transaction_sha256": transaction_sha256,
         "reviewer": reviewer,
         "decision": decision,
@@ -383,8 +435,9 @@ def record_review(
         "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     approval_path = plan_path.parent / "approval.json"
-    approval_path.write_text(
-        json.dumps(approval, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    _atomic_write(
+        approval_path,
+        (json.dumps(approval, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
     )
     return {"approval": str(approval_path), **approval}
 
@@ -401,6 +454,20 @@ def _atomic_write(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _install_staged(
+    path: Path, content: bytes, staging_path: Path, git_mode: str
+) -> None:
+    """Install bytes atomically from the private active transaction directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        staging_path.write_bytes(content)
+        staging_path.chmod(0o755 if git_mode == "100755" else 0o644)
+        os.replace(staging_path, path)
+    finally:
+        staging_path.unlink(missing_ok=True)
+
+
 def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     """Apply a validated plan atomically and archive its audit record."""
     vault = load_vault_path(config)
@@ -408,18 +475,79 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     with vault_write_lock(vault):
         require_clean_git_root(vault)
         validation = validate_plan(config, plan_path)
-        if validation["approval_required"] and not validation["approval_valid"]:
+        frozen_plan_path = validation["plan_path"]
+        plan_bytes = frozen_plan_path.read_bytes()
+        content_snapshots = {
+            operation["content_file"]: operation["content_file"].read_bytes()
+            for operation in validation["operations"]
+            if operation.get("content_file")
+        }
+        transaction_sha256 = _transaction_digest_snapshot(
+            frozen_plan_path, plan_bytes, content_snapshots
+        )
+        if transaction_sha256 != validation["transaction_sha256"]:
+            raise PlanError("plan or proposed content changed during validation")
+        approval_path = frozen_plan_path.parent / "approval.json"
+        approval_bytes = approval_path.read_bytes() if approval_path.is_file() else None
+        if validation["approval_required"] and not _approval_bytes_valid(
+            approval_bytes, transaction_sha256
+        ):
             raise PlanError(
-                "independent reviewer approval is required for: "
+                "a hash-bound reviewer approval record is required for: "
                 + ", ".join(validation["risks"])
             )
 
         operations = validation["operations"]
-        affected: set[Path] = set()
+        validated_original_mode: dict[Path, str | None] = {}
         for operation in operations:
-            affected.add(operation["path"])
+            action = operation["action"]
+            target = operation["path"]
+            try:
+                if action == "create":
+                    unchanged = not target.exists()
+                    validated_original_mode[target] = None
+                elif action == "rename":
+                    source = operation["from"]
+                    unchanged = (
+                        not target.exists()
+                        and source.is_file()
+                        and _sha256_file(source) == operation["expected_sha256"]
+                    )
+                    validated_original_mode[source] = worktree_file_mode(source)
+                    validated_original_mode[target] = None
+                else:
+                    unchanged = (
+                        target.is_file()
+                        and _sha256_file(target) == operation["expected_sha256"]
+                    )
+                    validated_original_mode[target] = worktree_file_mode(target)
+            except (OSError, RecoveryError):
+                unchanged = False
+            if not unchanged:
+                raise PlanError(
+                    f"operation target changed during validation: {target.relative_to(vault)}"
+                )
+        require_clean_git_root(vault)
+
+        affected: set[Path] = set()
+        expected_original_sha256: dict[Path, str | None] = {}
+        expected_original_mode: dict[Path, str | None] = {}
+        for operation in operations:
+            target = operation["path"]
+            affected.add(target)
             if operation["action"] == "rename":
-                affected.add(operation["from"])
+                source = operation["from"]
+                affected.add(source)
+                expected_original_sha256[source] = operation["expected_sha256"]
+                expected_original_sha256[target] = None
+                expected_original_mode[source] = validated_original_mode[source]
+                expected_original_mode[target] = None
+            elif operation["action"] == "create":
+                expected_original_sha256[target] = None
+                expected_original_mode[target] = None
+            else:
+                expected_original_sha256[target] = operation["expected_sha256"]
+                expected_original_mode[target] = validated_original_mode[target]
         transaction_root = (vault / ".vault-pr" / "transactions").resolve()
         if not transaction_root.is_relative_to(vault):
             raise PlanError("transaction archive directory escapes the vault")
@@ -430,70 +558,123 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         final_sha256 = {
             path: _sha256_file(path) if path.is_file() else None for path in affected
         }
+        final_mode = dict(expected_original_mode)
         for operation in operations:
             action = operation["action"]
             target = operation["path"]
             if action in {"create", "update"}:
-                final_sha256[target] = _sha256_file(operation["content_file"])
+                final_sha256[target] = _sha256_bytes(
+                    content_snapshots[operation["content_file"]]
+                )
+                if action == "create":
+                    final_mode[target] = "100644"
             elif action == "delete":
                 final_sha256[target] = None
+                final_mode[target] = None
             elif action == "rename":
                 source = operation["from"]
                 final_sha256[source] = None
+                final_mode[source] = None
                 final_sha256[target] = (
-                    _sha256_file(operation["content_file"])
+                    _sha256_bytes(content_snapshots[operation["content_file"]])
                     if operation.get("content_file")
                     else _sha256_file(source)
                 )
+                final_mode[target] = validated_original_mode[source]
 
-        active_dir = prepare_active_transaction(
-            vault=vault,
-            git_dir=_git_dir(vault),
-            transaction_id=validation["transaction_id"],
-            transaction_sha256=validation["transaction_sha256"],
-            affected=affected,
-            final_sha256=final_sha256,
+        result = {
+            "schema_version": 1,
+            "transaction_id": validation["transaction_id"],
+            "source_id": validation["source_id"],
+            "plan_sha256": _sha256_bytes(plan_bytes),
+            "transaction_sha256": transaction_sha256,
+            "applied_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "touched_notes": validation["touched_notes"],
+            "risks": validation["risks"],
+        }
+        result_bytes = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode(
+            "utf-8"
         )
+        archive_payloads = {
+            archive / "plan.json": plan_bytes,
+            archive / "result.json": result_bytes,
+        }
+        reserved_audit_paths = {
+            archive / "plan.json",
+            archive / "result.json",
+            archive / "approval.json",
+        }
+        for content_path, content in content_snapshots.items():
+            relative = content_path.relative_to(frozen_plan_path.parent)
+            archived_content = archive / relative
+            if archived_content in reserved_audit_paths:
+                raise PlanError(
+                    f"proposed content uses reserved audit path: {relative}"
+                )
+            archive_payloads[archived_content] = content
+        if approval_bytes is not None:
+            archive_payloads[archive / "approval.json"] = approval_bytes
+        affected.update(archive_payloads)
+        expected_original_sha256.update({path: None for path in archive_payloads})
+        expected_original_mode.update({path: None for path in archive_payloads})
+        final_sha256.update(
+            {path: _sha256_bytes(content) for path, content in archive_payloads.items()}
+        )
+        final_mode.update({path: "100644" for path in archive_payloads})
+
         try:
+            active_dir = prepare_active_transaction(
+                vault=vault,
+                git_dir=_git_dir(vault),
+                transaction_id=validation["transaction_id"],
+                transaction_sha256=validation["transaction_sha256"],
+                affected=affected,
+                expected_original_sha256=expected_original_sha256,
+                expected_original_mode=expected_original_mode,
+                final_sha256=final_sha256,
+                final_mode=final_mode,
+            )
+        except RecoveryError as exc:
+            raise PlanError(str(exc)) from exc
+        try:
+            write_index = 0
             for operation in operations:
                 action = operation["action"]
                 target = operation["path"]
                 if action in {"create", "update"}:
-                    _atomic_write(target, operation["content_file"].read_bytes())
+                    _install_staged(
+                        target,
+                        content_snapshots[operation["content_file"]],
+                        active_dir / "write-staging" / str(write_index),
+                        final_mode[target],
+                    )
+                    write_index += 1
                 elif action == "delete":
                     target.unlink()
                 elif action == "rename":
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(operation["from"], target)
                     if operation.get("content_file"):
-                        _atomic_write(target, operation["content_file"].read_bytes())
-
-            archive.mkdir(parents=True)
-            shutil.copy2(validation["plan_path"], archive / "plan.json")
-            for operation in operations:
-                content_path = operation.get("content_file")
-                if not content_path:
-                    continue
-                relative = content_path.relative_to(validation["plan_path"].parent)
-                archived_content = archive / relative
-                archived_content.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(content_path, archived_content)
-            approval_path = validation["plan_path"].parent / "approval.json"
-            if approval_path.is_file():
-                shutil.copy2(approval_path, archive / "approval.json")
-            result = {
-                "schema_version": 1,
-                "transaction_id": validation["transaction_id"],
-                "source_id": validation["source_id"],
-                "plan_sha256": validation["plan_sha256"],
-                "transaction_sha256": validation["transaction_sha256"],
-                "applied_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "touched_notes": validation["touched_notes"],
-                "risks": validation["risks"],
-            }
-            (archive / "result.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
+                        _install_staged(
+                            target,
+                            content_snapshots[operation["content_file"]],
+                            active_dir / "write-staging" / str(write_index),
+                            final_mode[target],
+                        )
+                        write_index += 1
+                        operation["from"].unlink()
+                    else:
+                        os.replace(operation["from"], target)
+            for archive_path, content in archive_payloads.items():
+                _install_staged(
+                    archive_path,
+                    content,
+                    active_dir / "write-staging" / str(write_index),
+                    final_mode[archive_path],
+                )
+                write_index += 1
+            mark_active_applied(
+                active_dir,
+                str((archive / "result.json").relative_to(vault)),
             )
         except Exception:
             try:
@@ -504,5 +685,4 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                     f"{recovery_exc}"
                 ) from recovery_exc
             raise
-        shutil.rmtree(active_dir)
-        return {"status": "applied", **result}
+        return {"status": "applied", "requires_commit": True, **result}

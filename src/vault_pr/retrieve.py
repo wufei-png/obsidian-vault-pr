@@ -9,6 +9,7 @@ import subprocess
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
+from .capture import CaptureError, load_validated_capture
 from .config import ConfigError, domain_specs, load_vault_path, source_archive_dir
 
 
@@ -26,14 +27,12 @@ def _source_artifacts(
         raise RetrievalError("invalid source id")
     vault = load_vault_path(config)
     capture = source_archive_dir(config, vault) / source_id
-    manifest_path = capture / "manifest.json"
-    extracted_path = capture / "extracted.md"
-    if not manifest_path.is_file() or not extracted_path.is_file():
-        raise RetrievalError(f"source capture is incomplete: {source_id}")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RetrievalError(f"invalid source manifest: {source_id}") from exc
+        manifest = load_validated_capture(capture, source_id=source_id, vault=vault)
+    except CaptureError as exc:
+        raise RetrievalError(f"source capture integrity failed: {exc}") from exc
+    artifacts = manifest["artifacts"]
+    extracted_path = capture / artifacts["extracted"]
     return manifest, extracted_path.read_text(encoding="utf-8")
 
 
