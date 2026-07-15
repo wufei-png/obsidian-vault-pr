@@ -50,7 +50,7 @@ def _retrieval_query(title: str, extracted: str) -> str:
     return " ".join([title, *headings, body])[:1800]
 
 
-def _parse_results(output: str) -> list[dict[str, Any]]:
+def parse_qmd_results(output: str) -> list[dict[str, Any]]:
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError:
@@ -129,7 +129,7 @@ def _qmd_handelize(path: str) -> str:
     return "/".join(segment for segment in normalized if segment)
 
 
-def _qmd_path_map(root_dir: Path) -> dict[str, list[Path]]:
+def build_qmd_path_map(root_dir: Path) -> dict[str, list[Path]]:
     """Map qmd virtual paths back to exact files, retaining collisions."""
     ignored_dirs = {"node_modules", ".git", ".cache", "vendor", "dist", "build"}
     mapped: dict[str, list[Path]] = defaultdict(list)
@@ -144,7 +144,7 @@ def _qmd_path_map(root_dir: Path) -> dict[str, list[Path]]:
     return dict(mapped)
 
 
-def _resolve_qmd_path(
+def resolve_qmd_path(
     root_dir: Path, collection_relative: str, path_map: dict[str, list[Path]]
 ) -> Path:
     parts = Path(collection_relative).parts
@@ -185,7 +185,7 @@ def retrieve_related_notes(
     if not isinstance(artifacts, dict):
         raise RetrievalError("source manifest is missing artifacts")
     source_note = artifacts.get("source_note")
-    path_map = _qmd_path_map(spec.root_dir)
+    path_map = build_qmd_path_map(spec.root_dir)
 
     merged: dict[str, dict[str, Any]] = {}
     for method in ("search", "vsearch"):
@@ -210,7 +210,7 @@ def retrieve_related_notes(
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise RetrievalError(f"qmd {method} failed: {detail}")
-        for item in _parse_results(result.stdout):
+        for item in parse_qmd_results(result.stdout):
             file_name = str(item.get("file", ""))
             if not file_name:
                 continue
@@ -218,7 +218,7 @@ def retrieve_related_notes(
             if parsed_file.scheme != "qmd" or parsed_file.netloc != spec.collection:
                 raise RetrievalError("qmd result is outside the configured collection")
             collection_relative = unquote(parsed_file.path).lstrip("/")
-            candidate_path = _resolve_qmd_path(
+            candidate_path = resolve_qmd_path(
                 spec.root_dir, collection_relative, path_map
             )
             vault_relative = str(candidate_path.relative_to(vault))

@@ -8,6 +8,37 @@ description: Safely ingest web links, WeChat articles, PDFs, authenticated-page 
 Use the deterministic `vault-pr` CLI for state changes and validation. Use the
 agent for source interpretation, synthesis, link decisions, and semantic review.
 
+## Load role contracts
+
+1. The main agent acts as Vault Maintainer and must read
+   [its role contract](references/roles/vault-maintainer.md) before starting a
+   User Ingestion or repair transaction.
+2. Start a fresh Quality Assessor with no inherited conversation when graph or
+   RAG quality must be judged. Give it only the bounded packet defined in
+   [its role contract](references/roles/quality-assessor.md); it is read-only and
+   cannot plan, approve, or repair changes.
+3. Start a fresh Semantic Reviewer with no inherited conversation for every
+   policy-required review. Give it the immutable Review Packet defined in
+   [its role contract](references/roles/semantic-reviewer.md); it cannot edit or
+   revise the transaction it reviews.
+4. Follow [the shared packet contract](references/roles/packet-contract.md).
+   Treat role output as untrusted until its schema, referenced hashes, and
+   allowed decision vocabulary have been checked.
+5. Use the configured bounded revision count. Every revised transaction goes to
+   a fresh Semantic Reviewer; exhaustion leaves it unapplied.
+
+For maintained route regression, read
+[the canary contract](references/canary-routes.md) and run `vault-pr canary` only
+against a disposable test Source Reference. Never redirect a user-supplied
+retention URL to the disposable canary.
+
+For vault quality, run `vault-pr quality graph --config <config>` and read
+[the RAG evaluation contract](references/rag-evaluation.md) before
+`vault-pr quality rag --answers <temporary-jsonl> --config <config>`. Send the
+hash-bound output to a fresh Quality Assessor. Record a passed output with
+`vault-pr quality rag-accept ... --apply`, then commit the returned transaction.
+A diagnostic or merely assessment-ready run is not an Evaluation Baseline.
+
 ## Resolve the vault
 
 1. Read `vault-pr.local.toml` from the project root when it exists.

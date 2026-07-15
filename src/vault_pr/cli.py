@@ -9,12 +9,15 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .canary import CanaryError, run_capture_route_canary
 from .config import ConfigError, load_config, load_vault_path
 from .git import GitSafetyError, require_clean_git_root, run_git
 from .index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
 from .ingest import IngestError, ingest_url
 from .migrate import MigrationError, migrate_captures_v2
 from .plan import PlanError, apply_plan, init_plan, record_review, validate_plan
+from .quality import QualityAuditError, audit_graph
+from .rag_eval import RagEvaluationError, accept_rag_baseline, evaluate_rag
 from .recovery import (
     RecoveryError,
     commit_applied_transaction,
@@ -164,6 +167,53 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=Path, default=Path("vault-pr.local.toml")
     )
 
+    canary_parser = subparsers.add_parser(
+        "canary", help="run a capture route in a disposable synthetic vault"
+    )
+    canary_parser.add_argument("url", help="real HTTP or HTTPS source reference")
+    canary_parser.add_argument(
+        "--snapshot", type=Path, help="local provider-produced snapshot bundle entry"
+    )
+    canary_parser.add_argument(
+        "--adapter",
+        choices=("auto", "http", "wechat", "authenticated"),
+        default="auto",
+    )
+    canary_parser.add_argument("--title")
+
+    quality_parser = subparsers.add_parser(
+        "quality", help="run read-only graph and RAG quality assessments"
+    )
+    quality_subparsers = quality_parser.add_subparsers(
+        dest="quality_command", required=True
+    )
+    quality_graph = quality_subparsers.add_parser(
+        "graph", help="assess durable wikilinks by note role"
+    )
+    quality_graph.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
+    quality_rag = quality_subparsers.add_parser(
+        "rag", help="score a vault-owned RAG evaluation case set"
+    )
+    quality_rag.add_argument("--cases", type=Path)
+    quality_rag.add_argument(
+        "--answers", type=Path, help="temporary JSONL answers to judge semantically"
+    )
+    quality_rag.add_argument("--limit", type=int, default=10)
+    quality_rag.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
+    quality_rag_accept = quality_subparsers.add_parser(
+        "rag-accept", help="record a passed RAG assessment as a Git transaction"
+    )
+    quality_rag_accept.add_argument("--evaluation", type=Path, required=True)
+    quality_rag_accept.add_argument("--assessment", type=Path, required=True)
+    quality_rag_accept.add_argument("--apply", action="store_true")
+    quality_rag_accept.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
+
     retrieve_parser = subparsers.add_parser(
         "retrieve", help="retrieve related notes for a captured source"
     )
@@ -267,6 +317,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                 missing_adapter=args.missing_adapter,
             )
         except (ConfigError, GitSafetyError, MigrationError) as exc:
+            print(f"ERROR {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "canary":
+        try:
+            result = run_capture_route_canary(
+                url=args.url,
+                adapter=args.adapter,
+                snapshot_path=args.snapshot,
+                title=args.title,
+            )
+        except CanaryError as exc:
+            print(f"ERROR {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "quality":
+        try:
+            config = load_config(args.config)
+            if args.quality_command == "graph":
+                result = audit_graph(config)
+            elif args.quality_command == "rag":
+                result = evaluate_rag(
+                    config,
+                    cases_path=args.cases,
+                    answers_path=args.answers,
+                    limit=args.limit,
+                )
+            elif args.quality_command == "rag-accept":
+                result = accept_rag_baseline(
+                    config,
+                    evaluation_path=args.evaluation,
+                    assessment_path=args.assessment,
+                    apply=args.apply,
+                )
+            else:
+                raise AssertionError(
+                    f"unhandled quality command: {args.quality_command}"
+                )
+        except (ConfigError, QualityAuditError, RagEvaluationError) as exc:
             print(f"ERROR {exc}", file=sys.stderr)
             return 2
         print(json.dumps(result, ensure_ascii=False, indent=2))

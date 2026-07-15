@@ -32,7 +32,13 @@ The implemented workflow provides:
 - deterministic plan apply with rollback-on-error, an audit archive, and a
   durable `apply -> commit -> finalize` recovery protocol;
 - qmd collection reconciliation, update, and incremental embedding with at most
-  three retries after the first attempt.
+  three retries after the first attempt;
+- disposable live capture-route canaries for HTML, PDF, provider-assisted
+  WeChat, and environment-gated authenticated snapshots;
+- read-only Note Role graph audits and vault-owned RAG evaluation cases with
+  deterministic retrieval metrics and hash-bound Quality Assessor packets;
+- formal Vault Maintainer, Quality Assessor, and Semantic Reviewer contracts
+  behind one user-facing skill.
 
 ## Capability boundary
 
@@ -67,6 +73,15 @@ uv run vault-pr retrieve src_0123456789abcdef0123 \
   --config vault-pr.local.toml
 uv run vault-pr plan init src_0123456789abcdef0123 \
   --summary "Integrate the source" --config vault-pr.local.toml
+uv run vault-pr canary https://www.rfc-editor.org/rfc/rfc9110.html \
+  --adapter http
+uv run vault-pr quality graph --config vault-pr.local.toml
+uv run vault-pr quality rag --answers /tmp/vault-pr-rag-answers.jsonl \
+  --config vault-pr.local.toml > /tmp/vault-pr-rag-evaluation.json
+uv run vault-pr quality rag-accept \
+  --evaluation /tmp/vault-pr-rag-evaluation.json \
+  --assessment /tmp/vault-pr-rag-assessment.json --apply \
+  --config vault-pr.local.toml
 ```
 
 The local configuration is intentionally ignored by Git.
@@ -77,6 +92,22 @@ hashes, rewrites source-ID references, removes the legacy source-note `domain`
 property, and leaves a recoverable transaction that must be finalized with
 `vault-pr commit`. If a v1 manifest omitted `adapter`, assign it explicitly with
 `--missing-adapter`.
+
+`vault-pr canary` uses a disposable Git and qmd fixture and never writes the
+configured user vault. It validates capture, exact-path commit, indexing, and
+retrieval, then removes the fixture collection; semantic integration remains a
+separate agent judgment. User-supplied retention URLs always go through the real
+configured vault workflow instead of this disposable command.
+
+`vault-pr quality graph` reports durable-link findings by Note Role without
+writing. `vault-pr quality rag` reads human-accepted cases from
+`.vault-pr/quality/rag/cases.jsonl`, scores expected retrieval, and binds a
+temporary JSONL answer file plus bounded note excerpts into the packet a fresh
+Quality Assessor uses to judge claims and provenance. Omitting `--answers`
+creates a discovery-only packet. A passed assessor output must be recorded with
+`quality rag-accept` and finalized with `vault-pr commit`; only that Git-tracked
+Quality Record is a baseline. Runs on a dirty worktree remain diagnostic and
+return `assessment_candidate_eligible: false`.
 
 Use `vault-pr index --check` for a read-only collection drift report. A normal
 `vault-pr index` repairs only explicitly configured collections, leaves all

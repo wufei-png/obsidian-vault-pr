@@ -37,3 +37,12 @@ retry_backoff_seconds = [2, 10, 30]
 [review]
 review_all_semantic_transactions = false
 max_revision_rounds = 2
+
+[quality]
+rag_cases_path = ".vault-pr/quality/rag/cases.jsonl"
+
+[quality.note_roles]
+concept_types = ["note", "concept", "topic"]
+source_types = ["source"]
+index_types = ["index", "moc"]
+excluded_types = ["audit", "prompt-template", "prompt-archive"]
