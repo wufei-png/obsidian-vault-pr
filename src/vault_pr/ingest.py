@@ -458,8 +458,14 @@ def _copy_snapshot_assets(
     total_bytes = sum(path.stat().st_size for path in assets)
     if total_bytes > max_bytes:
         raise IngestError(f"snapshot assets exceed the {max_bytes}-byte limit")
+    if not assets:
+        return {}
     destination = output_dir / "images"
-    shutil.copytree(images, destination)
+    for asset in assets:
+        relative = asset.relative_to(images)
+        copied_asset = destination / relative
+        copied_asset.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(asset, copied_asset)
     hashes: dict[str, str] = {}
     for asset in sorted(path for path in destination.rglob("*") if path.is_file()):
         relative = str(asset.relative_to(output_dir))

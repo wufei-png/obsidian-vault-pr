@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from vault_pr.capture import load_validated_capture
 from vault_pr.config import ConfigError, vault_relative_path
 from vault_pr.ingest import (
     ExtractedSource,
@@ -614,6 +615,34 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(manifest["extractor"], "wechat-markdown-snapshot")
             self.assertIn("images/cover.png", manifest["asset_sha256"])
             self.assertTrue((capture / "images" / "cover.png").is_file())
+
+    def test_wechat_adapter_does_not_copy_empty_image_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            article = root / "article"
+            (article / "images" / "empty").mkdir(parents=True)
+            snapshot = article / "article.md"
+            snapshot.write_text("# WeChat article\n\n" + "content " * 30)
+
+            result = ingest_url(
+                config=make_config(vault),
+                url="https://mp.weixin.qq.com/s/example",
+                domain="tech",
+                apply=True,
+                snapshot_path=snapshot,
+                adapter="wechat",
+            )
+
+            capture = vault / result["capture_dir"]
+            self.assertFalse((capture / "images").exists())
+            load_validated_capture(
+                capture,
+                source_id=result["source_id"],
+                vault=vault,
+            )
 
     def test_wechat_asset_changes_produce_new_source_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
