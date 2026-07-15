@@ -20,9 +20,10 @@ private vault content and machine-specific paths must never be committed here.
 The implemented workflow provides:
 
 - `vault-pr doctor` for Git safety and declarative qmd drift checks;
-- URL ingestion through Defuddle, direct Markdown, PDF, local WeChat snapshots,
-  or an authenticated browser snapshot, with bounded extraction time, PDF pages,
-  extracted text, and PDF-worker memory;
+- URL ingestion through pinned HTTP plus local Defuddle extraction, direct
+  Markdown, PDF, or an agent-selected Capture Provider for WeChat and
+  authenticated pages, with bounded snapshot validation, extraction time, PDF
+  pages, extracted text, and PDF-worker memory;
 - domain-scoped BM25/vector retrieval for deduplication and semantic planning;
 - hash-bound change plans with a 15-note default limit;
 - hash-bound reviewer records for merge, delete, contradiction, and work changes;
@@ -31,6 +32,20 @@ The implemented workflow provides:
   durable `apply -> commit -> finalize` recovery protocol;
 - qmd collection reconciliation, update, and incremental embedding with at most
   three retries after the first attempt.
+
+## Capability boundary
+
+The CLI is a deterministic Governance Kernel, not a registry of agent skills.
+It directly handles ordinary public HTTP sources and accepts untrusted local
+Snapshot Bundles for specialized sources. The agent skill may compose optional
+Capture Providers such as `wechat-article-to-markdown`, but the Python package
+does not depend on those skills or their packages. See
+[the Capture Provider decision](docs/adr/0001-compose-specialized-capture-providers.md)
+and [the provider contract](skills/vault-pr/references/capture-providers.md).
+
+`defuddle` and `qmd` are external executables checked by `vault-pr doctor`;
+`pypdf` and PyYAML are Python package dependencies. The `defuddle` agent skill is
+not a CLI dependency.
 
 ## Local setup
 
