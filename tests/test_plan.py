@@ -23,24 +23,25 @@ def note(title: str, body: str = "Body") -> str:
     return f"---\ntitle: {title}\ntype: concept\ntags: []\naliases: []\n---\n\n# {title}\n\n{body}\n"
 
 
-def make_config(vault: Path, maximum: int = 15) -> dict[str, object]:
+def make_config(
+    vault: Path,
+    maximum: int = 15,
+    *,
+    review_all: bool = False,
+    max_revision_rounds: int = 2,
+) -> dict[str, object]:
     return {
         "vault": {"path": str(vault)},
         "ingest": {"max_touched_notes": maximum},
         "sources": {"public_archive_dir": ".vault-pr/sources/public"},
-        "domains": {
-            "tech": {
-                "root_dir": "knowledgebase",
-                "source_notes_dir": "knowledgebase/sources",
-                "qmd_collection": "notebook-tech",
-            },
-            "work": {
-                "root_dir": "work",
-                "source_notes_dir": "work/sources",
-                "qmd_collection": "notebook-work",
-            },
+        "notes": {
+            "include": ["**/*.md"],
+            "exclude": [".git/**", ".obsidian/**", ".vault-pr/**"],
         },
-        "review": {"independent_for": ["merge", "delete", "contradiction", "work"]},
+        "review": {
+            "review_all_semantic_transactions": review_all,
+            "max_revision_rounds": max_revision_rounds,
+        },
     }
 
 
@@ -146,7 +147,7 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(PlanError, "maximum is 15"):
                 validate_plan(make_config(vault), plan_path)
 
-    def test_work_change_requires_hash_bound_approval(self) -> None:
+    def test_review_all_policy_is_vault_wide_not_folder_based(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             vault, source_id = self.make_vault(root)
@@ -172,21 +173,23 @@ class PlanTests(unittest.TestCase):
                 ],
             )
 
-            checked = validate_plan(make_config(vault), plan_path)
-            self.assertEqual(checked["risks"], ["work"])
+            self.assertEqual(validate_plan(make_config(vault), plan_path)["risks"], [])
+            restricted_config = make_config(vault, review_all=True)
+            checked = validate_plan(restricted_config, plan_path)
+            self.assertEqual(checked["risks"], ["vault_policy"])
             with self.assertRaisesRegex(PlanError, "reviewer approval"):
-                apply_plan(make_config(vault), plan_path)
+                apply_plan(restricted_config, plan_path)
 
-            record_review(plan_path, "reviewer-agent", "approve")
-            checked = validate_plan(make_config(vault), plan_path)
+            record_review(restricted_config, plan_path, "reviewer-agent", "approve")
+            checked = validate_plan(restricted_config, plan_path)
             self.assertTrue(checked["approval_valid"])
             (files / "updated.md").write_text(note("Existing", "Changed after review"))
             checked = validate_plan(make_config(vault), plan_path)
             self.assertFalse(checked["approval_valid"])
             (files / "updated.md").write_text(note("Existing", "Updated"))
-            record_review(plan_path, "reviewer-agent", "approve")
+            record_review(restricted_config, plan_path, "reviewer-agent", "approve")
             plan_path.write_text(plan_path.read_text().replace("fixture", "changed", 1))
-            checked = validate_plan(make_config(vault), plan_path)
+            checked = validate_plan(restricted_config, plan_path)
             self.assertFalse(checked["approval_valid"])
 
     def test_apply_create_and_update_archives_transaction(self) -> None:
@@ -241,6 +244,101 @@ class PlanTests(unittest.TestCase):
                 / "journal.json"
             )
             self.assertEqual(json.loads(journal.read_text())["phase"], "applied")
+
+    def test_review_revision_rounds_are_bounded_and_require_changed_content(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            config = make_config(vault, review_all=True, max_revision_rounds=1)
+            proposed = root / "plan" / "files" / "source.md"
+
+            first = record_review(
+                config, plan_path, "reviewer-1", "reject", notes="revise"
+            )
+            self.assertEqual(first["remaining_revision_rounds"], 1)
+            with self.assertRaisesRegex(PlanError, "must change after rejection"):
+                record_review(config, plan_path, "reviewer-2", "approve")
+
+            proposed.write_text(source_note_text(source_id, "Revision one"))
+            record_review(config, plan_path, "reviewer-2", "reject")
+            proposed.write_text(source_note_text(source_id, "Revision two"))
+            with self.assertRaisesRegex(PlanError, "revision limit exhausted"):
+                record_review(config, plan_path, "reviewer-3", "approve")
+
+    def test_apply_rechecks_revision_limit_with_the_vault_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            proposed = root / "plan" / "files" / "source.md"
+            permissive = make_config(vault, review_all=True, max_revision_rounds=5)
+
+            for revision in range(3):
+                record_review(
+                    permissive,
+                    plan_path,
+                    f"reviewer-{revision}",
+                    "reject",
+                )
+                proposed.write_text(
+                    source_note_text(source_id, f"Revision {revision + 1}")
+                )
+            record_review(permissive, plan_path, "reviewer-final", "approve")
+
+            configured = make_config(vault, review_all=True, max_revision_rounds=2)
+            with self.assertRaisesRegex(PlanError, "revision limit exceeded"):
+                apply_plan(configured, plan_path)
+
+    def test_apply_rejects_approval_for_unchanged_rejected_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            config = make_config(vault, review_all=True)
+            rejected = record_review(config, plan_path, "reviewer-1", "reject")
+            history_path = Path(rejected["review_history"])
+            approval_path = Path(rejected["approval"])
+            history = json.loads(history_path.read_text())
+            forged = {**history[-1], "decision": "approve", "reviewer": "reviewer-2"}
+            history.append(forged)
+            history_path.write_text(json.dumps(history) + "\n")
+            approval_path.write_text(json.dumps(forged) + "\n")
+
+            with self.assertRaisesRegex(PlanError, "already rejected"):
+                apply_plan(config, plan_path)
+
+    def test_rejection_requires_approval_even_when_review_is_not_policy_mandated(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            config = make_config(vault)
+            record_review(config, plan_path, "reviewer-1", "reject")
+
+            checked = validate_plan(config, plan_path)
+            self.assertEqual(checked["risks"], ["review_history"])
+            with self.assertRaisesRegex(PlanError, "reviewer approval"):
+                apply_plan(config, plan_path)
+
+    def test_apply_archives_the_complete_review_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            config = make_config(vault, review_all=True)
+            record_review(config, plan_path, "reviewer-1", "approve")
+
+            result = apply_plan(config, plan_path)
+
+            archive = vault / ".vault-pr" / "transactions" / result["transaction_id"]
+            history = json.loads((archive / "review-history.json").read_text())
+            self.assertEqual(history[0]["reviewer"], "reviewer-1")
+            self.assertEqual(history[0]["decision"], "approve")
 
     def test_apply_rejects_content_changed_after_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -531,9 +629,8 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "hard limit of 15"):
                 validate_plan(make_config(vault, maximum=16), plan_path)
 
-            config = make_config(vault)
-            config["review"] = {"independent_for": []}
-            with self.assertRaisesRegex(ConfigError, "cannot omit mandatory"):
+            config = make_config(vault, max_revision_rounds=6)
+            with self.assertRaisesRegex(ConfigError, "hard limit of 5"):
                 validate_plan(config, plan_path)
 
 

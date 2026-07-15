@@ -15,10 +15,10 @@ import yaml
 
 from .capture import CaptureError, load_validated_capture, source_note_has_id
 from .config import (
-    ConfigError,
-    domain_specs,
     load_vault_path,
     max_touched_notes,
+    note_path_allowed,
+    review_policy,
     source_archive_dir,
     vault_relative_path,
 )
@@ -38,7 +38,6 @@ class PlanError(RuntimeError):
 
 ALLOWED_ACTIONS = {"create", "update", "delete", "rename"}
 ALLOWED_INTENTS = {"integrate", "merge", "split", "rename"}
-MANDATORY_REVIEW_RISKS = {"merge", "delete", "contradiction", "work"}
 SOURCE_ID_PATTERN = re.compile(r"src_[0-9a-f]{20}")
 TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
 
@@ -112,7 +111,11 @@ def _transaction_digest(plan_path: Path, content_paths: list[Path]) -> str:
     return _transaction_digest_snapshot(plan_path, plan_bytes, content)
 
 
-def _approval_bytes_valid(content: bytes | None, transaction_sha256: str) -> bool:
+def _approval_bytes_valid(
+    content: bytes | None,
+    transaction_sha256: str,
+    history: list[dict[str, Any]],
+) -> bool:
     if content is None:
         return False
     try:
@@ -125,6 +128,8 @@ def _approval_bytes_valid(content: bytes | None, transaction_sha256: str) -> boo
         and approval.get("transaction_sha256") == transaction_sha256
         and isinstance(approval.get("reviewer"), str)
         and approval["reviewer"].strip()
+        and history
+        and history[-1] == approval
     )
 
 
@@ -193,17 +198,6 @@ def _frontmatter_ok(content: bytes) -> bool:
     return isinstance(frontmatter, dict)
 
 
-def _domain_for_path(config: dict[str, Any], vault: Path, path: Path) -> str:
-    matches = [
-        name
-        for name, spec in domain_specs(config, vault).items()
-        if path.is_relative_to(spec.root_dir)
-    ]
-    if len(matches) != 1:
-        raise PlanError(f"note path must belong to exactly one domain: {path}")
-    return matches[0]
-
-
 def _content_file(plan_path: Path, operation: dict[str, Any]) -> Path:
     raw_content_file = operation.get("content_file")
     if not isinstance(raw_content_file, str) or not raw_content_file.strip():
@@ -217,18 +211,17 @@ def _content_file(plan_path: Path, operation: dict[str, Any]) -> Path:
 
 
 def _approval_status(
-    plan_path: Path, content_paths: list[Path]
+    plan_path: Path,
+    content_paths: list[Path],
+    history: list[dict[str, Any]],
 ) -> tuple[bool, str | None]:
     approval_path = plan_path.parent / "approval.json"
     if not approval_path.is_file():
         return False, None
-    approval = _read_json(approval_path, "approval")
-    valid = (
-        approval.get("decision") == "approve"
-        and approval.get("transaction_sha256")
-        == _transaction_digest(plan_path, content_paths)
-        and isinstance(approval.get("reviewer"), str)
-        and bool(approval["reviewer"].strip())
+    valid = _approval_bytes_valid(
+        approval_path.read_bytes(),
+        _transaction_digest(plan_path, content_paths),
+        history,
     )
     return valid, str(approval_path)
 
@@ -270,7 +263,6 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
 
     touched: set[Path] = set()
     normalized: list[dict[str, Any]] = []
-    domains: set[str] = set()
     actions: set[str] = set()
     for index, raw_operation in enumerate(operations):
         if not isinstance(raw_operation, dict):
@@ -280,25 +272,29 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             raise PlanError(f"operation {index} has unsupported action: {action}")
         raw_path = raw_operation.get("path")
         target = vault_relative_path(vault, raw_path, f"operations[{index}].path")
-        if target.suffix.lower() != ".md" or ".vault-pr" in target.parts:
-            raise PlanError(f"operation {index} must target a visible Markdown note")
-        domain = _domain_for_path(config, vault, target)
-        domains.add(domain)
+        if target.suffix.lower() != ".md" or not note_path_allowed(
+            config, vault, target
+        ):
+            raise PlanError(
+                f"operation {index} must target an allowed visible Markdown note"
+            )
         actions.add(action)
         if target in touched:
             raise PlanError(f"operation {index} duplicates an affected note path")
         touched.add(target)
-        operation = {"action": action, "path": target, "domain": domain}
+        operation = {"action": action, "path": target}
 
         source = target
         if action == "rename":
             source = vault_relative_path(
                 vault, raw_operation.get("from"), f"operations[{index}].from"
             )
-            if source.suffix.lower() != ".md" or not source.is_file():
+            if (
+                source.suffix.lower() != ".md"
+                or not source.is_file()
+                or not note_path_allowed(config, vault, source)
+            ):
                 raise PlanError(f"operation {index} rename source is invalid")
-            source_domain = _domain_for_path(config, vault, source)
-            domains.add(source_domain)
             if source in touched:
                 raise PlanError(f"operation {index} duplicates an affected note path")
             touched.add(source)
@@ -347,42 +343,28 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     if len(touched) > maximum:
         raise PlanError(f"plan touches {len(touched)} notes; maximum is {maximum}")
 
-    configured_risks = config.get("review", {}).get(
-        "independent_for", ["merge", "delete", "contradiction", "work"]
-    )
-    if not isinstance(configured_risks, list) or not all(
-        isinstance(item, str) for item in configured_risks
-    ):
-        raise ConfigError("review.independent_for must be an array of strings")
-    configured_risk_set = set(configured_risks)
-    missing_risks = MANDATORY_REVIEW_RISKS - configured_risk_set
-    unknown_risks = configured_risk_set - MANDATORY_REVIEW_RISKS
-    if missing_risks:
-        raise ConfigError(
-            "review.independent_for cannot omit mandatory risks: "
-            + ", ".join(sorted(missing_risks))
-        )
-    if unknown_risks:
-        raise ConfigError(
-            "review.independent_for contains unsupported risks: "
-            + ", ".join(sorted(unknown_risks))
-        )
+    policy = review_policy(config)
     risks: list[str] = []
-    if "merge" in configured_risks and intent == "merge":
+    if intent == "merge":
         risks.append("merge")
-    if "delete" in configured_risks and "delete" in actions:
+    if "delete" in actions:
         risks.append("delete")
-    if "contradiction" in configured_risks and contradiction:
+    if contradiction:
         risks.append("contradiction")
-    if "work" in configured_risks and "work" in domains:
-        risks.append("work")
+    if policy.review_all_semantic_transactions and not risks:
+        risks.append("vault_policy")
     content_paths = [
         operation["content_file"]
         for operation in normalized
         if operation.get("content_file")
     ]
     transaction_sha256 = _transaction_digest(plan_path, content_paths)
-    approval_valid, approval_path = _approval_status(plan_path, content_paths)
+    history = _review_history(plan_path.parent / "review-history.json")
+    _, rejection_count = _validate_review_history(history)
+    if history and not risks:
+        risks.append("review_history")
+    revision_limit_exhausted = rejection_count > policy.max_revision_rounds
+    approval_valid, approval_path = _approval_status(plan_path, content_paths, history)
     return {
         "status": "valid",
         "transaction_id": transaction_id,
@@ -391,22 +373,80 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         "transaction_sha256": transaction_sha256,
         "touched_notes": len(touched),
         "maximum_touched_notes": maximum,
-        "domains": sorted(domains),
         "risks": risks,
         "approval_required": bool(risks),
         "approval_valid": approval_valid,
         "approval_path": approval_path,
+        "review_rejections": rejection_count,
+        "revision_limit_exhausted": revision_limit_exhausted,
         "operations": normalized,
         "plan": plan,
         "plan_path": plan_path,
     }
 
 
+def _review_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        history = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlanError(f"invalid review history: {path}") from exc
+    if not isinstance(history, list) or not all(
+        isinstance(entry, dict) for entry in history
+    ):
+        raise PlanError(f"review history must be an array: {path}")
+    return history
+
+
+def _validate_review_history(
+    history: list[dict[str, Any]],
+) -> tuple[set[str], int]:
+    """Validate reviewer decisions and return rejected digests and their count."""
+    rejected_digests: set[str] = set()
+    rejection_count = 0
+    for index, entry in enumerate(history):
+        decision = entry.get("decision")
+        digest = entry.get("transaction_sha256")
+        policy = entry.get("review_policy")
+        if (
+            entry.get("schema_version") != 1
+            or decision not in {"approve", "reject"}
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not isinstance(entry.get("plan_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", entry["plan_sha256"])
+            or not isinstance(entry.get("reviewer"), str)
+            or not entry["reviewer"].strip()
+            or not isinstance(entry.get("reviewed_at"), str)
+            or not entry["reviewed_at"].strip()
+            or not isinstance(policy, dict)
+            or not isinstance(policy.get("review_all_semantic_transactions"), bool)
+            or isinstance(policy.get("max_revision_rounds"), bool)
+            or not isinstance(policy.get("max_revision_rounds"), int)
+            or not 0 <= policy["max_revision_rounds"] <= 5
+        ):
+            raise PlanError(f"review history entry {index} is invalid")
+        if digest in rejected_digests:
+            raise PlanError(
+                "review history reuses plan content that was already rejected"
+            )
+        if decision == "reject":
+            rejected_digests.add(digest)
+            rejection_count += 1
+    return rejected_digests, rejection_count
+
+
 def record_review(
-    plan_path: Path, reviewer: str, decision: str, notes: str = ""
+    config: dict[str, Any],
+    plan_path: Path,
+    reviewer: str,
+    decision: str,
+    notes: str = "",
 ) -> dict[str, Any]:
     """Bind a reviewer decision to the exact plan and proposed content bytes."""
     plan_path = plan_path.expanduser().resolve()
+    validate_plan(config, plan_path)
     try:
         plan_bytes = plan_path.read_bytes()
         plan = json.loads(plan_bytes)
@@ -425,6 +465,16 @@ def record_review(
         path: path.read_bytes() for path in _proposed_content_paths(plan_path, plan)
     }
     transaction_sha256 = _transaction_digest_snapshot(plan_path, plan_bytes, content)
+    policy = review_policy(config)
+    history_path = plan_path.parent / "review-history.json"
+    history = _review_history(history_path)
+    rejected_digests, rejection_count = _validate_review_history(history)
+    if rejection_count > policy.max_revision_rounds:
+        raise PlanError(
+            "review revision limit exhausted; preserve the unapplied plan for inspection"
+        )
+    if transaction_sha256 in rejected_digests:
+        raise PlanError("plan and proposed content must change after rejection")
     approval = {
         "schema_version": 1,
         "plan_sha256": _sha256_bytes(plan_bytes),
@@ -432,14 +482,30 @@ def record_review(
         "reviewer": reviewer,
         "decision": decision,
         "notes": notes.strip(),
+        "review_policy": {
+            "review_all_semantic_transactions": policy.review_all_semantic_transactions,
+            "max_revision_rounds": policy.max_revision_rounds,
+        },
         "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    history.append(approval)
+    _atomic_write(
+        history_path,
+        (json.dumps(history, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+    )
     approval_path = plan_path.parent / "approval.json"
     _atomic_write(
         approval_path,
         (json.dumps(approval, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
     )
-    return {"approval": str(approval_path), **approval}
+    return {
+        "approval": str(approval_path),
+        "review_history": str(history_path),
+        "remaining_revision_rounds": max(
+            0, policy.max_revision_rounds - rejection_count
+        ),
+        **approval,
+    }
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
@@ -489,8 +555,18 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             raise PlanError("plan or proposed content changed during validation")
         approval_path = frozen_plan_path.parent / "approval.json"
         approval_bytes = approval_path.read_bytes() if approval_path.is_file() else None
+        review_history_path = frozen_plan_path.parent / "review-history.json"
+        review_history_bytes = (
+            review_history_path.read_bytes() if review_history_path.is_file() else None
+        )
+        if validation["revision_limit_exhausted"]:
+            raise PlanError(
+                "review revision limit exceeded under the configured vault policy"
+            )
         if validation["approval_required"] and not _approval_bytes_valid(
-            approval_bytes, transaction_sha256
+            approval_bytes,
+            transaction_sha256,
+            _review_history(review_history_path),
         ):
             raise PlanError(
                 "a hash-bound reviewer approval record is required for: "
@@ -603,6 +679,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             archive / "plan.json",
             archive / "result.json",
             archive / "approval.json",
+            archive / "review-history.json",
         }
         for content_path, content in content_snapshots.items():
             relative = content_path.relative_to(frozen_plan_path.parent)
@@ -614,6 +691,8 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             archive_payloads[archived_content] = content
         if approval_bytes is not None:
             archive_payloads[archive / "approval.json"] = approval_bytes
+        if review_history_bytes is not None:
+            archive_payloads[archive / "review-history.json"] = review_history_bytes
         affected.update(archive_payloads)
         expected_original_sha256.update({path: None for path in archive_payloads})
         expected_original_mode.update({path: None for path in archive_payloads})

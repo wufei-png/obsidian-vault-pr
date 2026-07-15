@@ -13,7 +13,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
 from .capture import CaptureError, load_validated_capture
-from .config import ConfigError, domain_specs, load_vault_path, source_archive_dir
+from .config import index_spec, load_vault_path, source_archive_dir
 
 
 class RetrievalError(RuntimeError):
@@ -157,7 +157,7 @@ def _resolve_qmd_path(
         raise RetrievalError("qmd normalized path is ambiguous in the vault")
     candidate = matches[0]
     if not candidate.is_relative_to(root_dir):
-        raise RetrievalError("qmd result path escapes the configured domain")
+        raise RetrievalError("qmd result path escapes the configured index root")
     return candidate
 
 
@@ -169,18 +169,12 @@ def retrieve_related_notes(
     runner: Runner = subprocess.run,
     executable: str | None = None,
 ) -> dict[str, Any]:
-    """Combine BM25 and vector candidates within the source's semantic domain."""
+    """Combine BM25 and vector candidates across the configured vault index."""
     if limit < 1 or limit > 50:
         raise RetrievalError("limit must be between 1 and 50")
     manifest, extracted = _source_artifacts(config, source_id)
-    domain = manifest.get("domain")
-    if not isinstance(domain, str):
-        raise RetrievalError("source manifest is missing domain")
     vault = load_vault_path(config)
-    specs = domain_specs(config, vault)
-    spec = specs.get(domain)
-    if not spec or not spec.qmd_collection:
-        raise ConfigError(f"domain has no qmd collection: {domain}")
+    spec = index_spec(config, vault)
 
     qmd = executable or shutil.which("qmd")
     if not qmd:
@@ -203,7 +197,7 @@ def retrieve_related_notes(
                 method,
                 query,
                 "-c",
-                spec.qmd_collection,
+                spec.collection,
                 "-n",
                 str(limit),
                 "--format",
@@ -221,7 +215,7 @@ def retrieve_related_notes(
             if not file_name:
                 continue
             parsed_file = urlsplit(file_name)
-            if parsed_file.scheme != "qmd" or parsed_file.netloc != spec.qmd_collection:
+            if parsed_file.scheme != "qmd" or parsed_file.netloc != spec.collection:
                 raise RetrievalError("qmd result is outside the configured collection")
             collection_relative = unquote(parsed_file.path).lstrip("/")
             candidate_path = _resolve_qmd_path(
@@ -253,8 +247,7 @@ def retrieve_related_notes(
     )[:limit]
     return {
         "source_id": source_id,
-        "domain": domain,
         "query": query,
-        "collection": spec.qmd_collection,
+        "collection": spec.collection,
         "candidates": candidates,
     }

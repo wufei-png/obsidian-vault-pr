@@ -19,7 +19,7 @@ class RetrievalRunner:
         if method == "search":
             results = [
                 {
-                    "file": "qmd://notebook-tech/ai/agent/rag.md?index=test",
+                    "file": "qmd://fixture-vault/knowledgebase/ai/agent/rag.md?index=test",
                     "title": "RAG",
                     "score": 0.9,
                     "snippet": "retrieval",
@@ -28,13 +28,13 @@ class RetrievalRunner:
         elif method == "vsearch":
             results = [
                 {
-                    "file": "qmd://notebook-tech/ai/agent/rag.md?index=test",
+                    "file": "qmd://fixture-vault/knowledgebase/ai/agent/rag.md?index=test",
                     "title": "RAG",
                     "score": 0.7,
                     "snippet": "semantic",
                 },
                 {
-                    "file": "qmd://notebook-tech/ai/agent/agents.md?index=test",
+                    "file": "qmd://fixture-vault/knowledgebase/ai/agent/agents.md?index=test",
                     "title": "Agents",
                     "score": 0.6,
                     "snippet": "agents",
@@ -51,14 +51,10 @@ class RetrieveTests(unittest.TestCase):
         return {
             "vault": {"path": str(vault)},
             "sources": {"public_archive_dir": ".vault-pr/sources/public"},
-            "domains": {
-                "tech": {
-                    "root_dir": "knowledgebase",
-                    "source_notes_dir": "knowledgebase/sources",
-                    "qmd_collection": "notebook-tech",
-                }
+            "index": {
+                "name": "test",
+                "collection": "fixture-vault",
             },
-            "index": {"name": "test"},
         }
 
     def test_merges_lexical_and_vector_candidates(self) -> None:
@@ -83,7 +79,7 @@ class RetrieveTests(unittest.TestCase):
             self.assertEqual(
                 result["candidates"][0]["path"], "knowledgebase/ai/agent/rag.md"
             )
-            self.assertEqual(result["collection"], "notebook-tech")
+            self.assertEqual(result["collection"], "fixture-vault")
 
     def test_matches_qmd_virtual_path_normalization(self) -> None:
         cases = {
@@ -106,7 +102,7 @@ class RetrieveTests(unittest.TestCase):
                 result = [
                     {
                         "file": (
-                            "qmd://notebook-tech/ai/llms/"
+                            "qmd://fixture-vault/knowledgebase/ai/llms/"
                             "Attention-Residuals.md?index=test"
                         ),
                         "title": "Attention Residuals",
@@ -141,7 +137,7 @@ class RetrieveTests(unittest.TestCase):
             ) -> subprocess.CompletedProcess[str]:
                 result = [
                     {
-                        "file": "qmd://notebook-tech/ai/A-B.md?index=test",
+                        "file": "qmd://fixture-vault/knowledgebase/ai/A-B.md?index=test",
                         "title": "A B",
                         "score": 0.8,
                     }
@@ -172,7 +168,7 @@ class RetrieveTests(unittest.TestCase):
                 result = [
                     {
                         "file": (
-                            "qmd://notebook-tech/sources/"
+                            "qmd://fixture-vault/knowledgebase/sources/"
                             "Article-title-a1b2c3d4.md?index=test"
                         ),
                         "title": "Article title",
@@ -212,7 +208,7 @@ class RetrieveTests(unittest.TestCase):
                     executable="qmd",
                 )
 
-    def test_rejects_tampered_capture_domain_routing(self) -> None:
+    def test_rejects_tampered_capture_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir) / "vault"
             source_id = write_capture(vault)
@@ -220,7 +216,7 @@ class RetrieveTests(unittest.TestCase):
                 vault / ".vault-pr" / "sources" / "public" / source_id / "manifest.json"
             )
             manifest = json.loads(manifest_path.read_text())
-            manifest["domain"] = "work"
+            manifest["final_url"] = "https://example.com/tampered"
             manifest_path.write_text(json.dumps(manifest))
 
             with self.assertRaisesRegex(RetrievalError, "immutable identity"):

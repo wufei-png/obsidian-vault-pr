@@ -9,6 +9,7 @@ provenance_granularity = "claim"
 
 [sources]
 public_archive_dir = ".vault-pr/sources/public"
+visible_notes_dir = "sources"
 timeout_seconds = 30
 max_download_bytes = 10000000
 max_asset_files = 200
@@ -18,32 +19,21 @@ max_pdf_pages = 500
 max_extracted_characters = 2000000
 max_extraction_memory_bytes = 536870912
 
-[domains.tech]
-root_dir = "knowledgebase"
-source_notes_dir = "knowledgebase/sources"
-qmd_collection = "notebook-tech"
-qmd_context = "Technical knowledge, AI, agents, engineering notes, and persistent knowledge-base sources."
-
-[domains.life]
-root_dir = "life"
-source_notes_dir = "life/sources"
-qmd_collection = "notebook-life"
-qmd_context = "Personal life, humanities, science, health, and reading notes."
-
-[domains.work]
-root_dir = "work"
-source_notes_dir = "work/sources"
-qmd_collection = "notebook-work"
-qmd_context = "Work-domain technical notes and project knowledge."
+[notes]
+include = ["**/*.md"]
+exclude = [".git/**", ".obsidian/**", ".vault-pr/**"]
 
 [index]
 backend = "qmd"
 name = "notebook"
+collection = "notebook"
 mask = "**/*.md"
+context = "Notes and source records from this Obsidian vault."
 embed = true
 max_docs_per_batch = 64
 max_retries = 3
 retry_backoff_seconds = [2, 10, 30]
 
 [review]
-independent_for = ["merge", "delete", "contradiction", "work"]
+review_all_semantic_transactions = false
+max_revision_rounds = 2

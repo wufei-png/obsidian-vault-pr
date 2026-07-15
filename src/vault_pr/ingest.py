@@ -30,9 +30,10 @@ from .capture import (
 )
 from .config import (
     ConfigError,
-    domain_source_notes_dir,
     load_vault_path,
+    note_path_allowed,
     source_archive_dir,
+    source_notes_dir,
 )
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .process import (
@@ -708,7 +709,6 @@ def _yaml_string(value: str) -> str:
 def build_source_note(
     *,
     title: str,
-    domain: str,
     source_id: str,
     fetched: FetchedSource,
     extracted: ExtractedSource,
@@ -727,7 +727,6 @@ def build_source_note(
             "---",
             f"title: {_yaml_string(title)}",
             "type: source",
-            f"domain: {_yaml_string(domain)}",
             "status: captured",
             f"source_url: {_yaml_string(fetched.final_url)}",
             f"source_id: {_yaml_string(source_id)}",
@@ -769,7 +768,6 @@ def ingest_url(
     *,
     config: dict[str, Any],
     url: str,
-    domain: str,
     apply: bool,
     title_override: str | None = None,
     snapshot_path: Path | None = None,
@@ -885,21 +883,20 @@ def ingest_url(
         raw_sha256 = hashlib.sha256(raw_path.read_bytes()).hexdigest()
         extracted_sha256 = hashlib.sha256(extracted_path.read_bytes()).hexdigest()
         identity_base = {
-            "schema_version": 1,
+            "schema_version": 2,
             "requested_url": fetched.requested_url,
             "final_url": fetched.final_url,
             "adapter": fetched.adapter,
             "raw_sha256": raw_sha256,
             "extracted_sha256": extracted_sha256,
             "asset_sha256": asset_hashes,
-            "domain": domain,
             "artifacts": {
                 "raw": extracted.raw_filename,
                 "extracted": extracted.extracted_filename,
             },
         }
         archive_root = source_archive_dir(config, vault)
-        note_dir = domain_source_notes_dir(config, vault, domain)
+        note_dir = source_notes_dir(config, vault)
         candidates = _source_note_candidates(note_dir, fetched.requested_url)
         matched: list[tuple[Path, str, str, dict[str, Any]]] = []
         for candidate in candidates:
@@ -947,10 +944,13 @@ def ingest_url(
             }
             source_identity = source_identity_digest(identity_payload)
             source_id = f"src_{source_identity[:20]}"
+        if not note_path_allowed(config, vault, note_path):
+            raise ConfigError(
+                "sources.visible_notes_dir must produce an allowed Markdown note path"
+            )
         capture_dir = archive_root / source_id
         note_content = build_source_note(
             title=title,
-            domain=domain,
             source_id=source_id,
             fetched=fetched,
             extracted=extracted,
@@ -960,7 +960,7 @@ def ingest_url(
             capture_dir=capture_dir,
         )
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "source_id": source_id,
             "requested_url": fetched.requested_url,
             "final_url": fetched.final_url,
@@ -968,7 +968,6 @@ def ingest_url(
             "http_status": fetched.status,
             "response_headers": fetched.headers,
             "title": title,
-            "domain": domain,
             "raw_sha256": raw_sha256,
             "extracted_sha256": extracted_sha256,
             "extractor": extracted.extractor,

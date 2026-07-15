@@ -20,7 +20,6 @@ IDENTITY_FIELDS = (
     "source_id",
     "requested_url",
     "final_url",
-    "domain",
     "raw_sha256",
     "extracted_sha256",
     "adapter",
@@ -51,7 +50,6 @@ def source_identity_payload(manifest: dict[str, Any]) -> dict[str, Any]:
         "raw_sha256": manifest.get("raw_sha256"),
         "extracted_sha256": manifest.get("extracted_sha256"),
         "asset_sha256": manifest.get("asset_sha256"),
-        "domain": manifest.get("domain"),
         "artifacts": manifest.get("artifacts"),
     }
 
@@ -102,7 +100,7 @@ def _read_manifest(capture_dir: Path) -> dict[str, Any]:
         )
     except (OSError, json.JSONDecodeError) as exc:
         raise CaptureError(f"capture directory is incomplete: {capture_dir}") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
         raise CaptureError(f"capture manifest schema is invalid: {capture_dir}")
     return manifest
 

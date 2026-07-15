@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,14 +14,21 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class DomainSpec:
-    """One semantic domain and its physical vault/index mapping."""
+class IndexSpec:
+    """The single qmd collection governed for one configured vault."""
 
-    name: str
     root_dir: Path
-    source_notes_dir: Path
-    qmd_collection: str | None
-    qmd_context: str | None
+    collection: str
+    context: str | None
+    mask: str
+
+
+@dataclass(frozen=True)
+class ReviewPolicy:
+    """Vault-wide semantic review requirements."""
+
+    review_all_semantic_transactions: bool
+    max_revision_rounds: int
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
@@ -59,75 +67,121 @@ def vault_relative_path(vault: Path, raw_path: object, field: str) -> Path:
     return resolved
 
 
-def domain_source_notes_dir(config: dict[str, Any], vault: Path, domain: str) -> Path:
-    """Resolve the visible source-note directory for a domain."""
+def source_notes_dir(config: dict[str, Any], vault: Path) -> Path:
+    """Resolve the visible source-note directory for the configured vault."""
     try:
-        return domain_specs(config, vault)[domain].source_notes_dir
-    except KeyError as exc:
-        raise ConfigError(f"unknown domain: {domain}") from exc
+        raw_path = config["sources"]["visible_notes_dir"]
+    except (KeyError, TypeError) as exc:
+        raise ConfigError("missing sources.visible_notes_dir") from exc
+    return vault_relative_path(vault, raw_path, "sources.visible_notes_dir")
 
 
-def domain_specs(config: dict[str, Any], vault: Path) -> dict[str, DomainSpec]:
-    """Load every configured domain and validate its vault/index mapping."""
-    raw_domains = config.get("domains")
-    if not isinstance(raw_domains, dict) or not raw_domains:
-        raise ConfigError("domains must be a non-empty table")
-
-    specs: dict[str, DomainSpec] = {}
-    collection_names: set[str] = set()
-    for name, raw_domain in raw_domains.items():
-        if (
-            not isinstance(name, str)
-            or not name.strip()
-            or not isinstance(raw_domain, dict)
-        ):
-            raise ConfigError("each domain must be a named table")
-        root_dir = vault_relative_path(
-            vault, raw_domain.get("root_dir"), f"domains.{name}.root_dir"
+def index_spec(config: dict[str, Any], vault: Path) -> IndexSpec:
+    """Load the configured vault-wide qmd collection."""
+    raw_index = config.get("index")
+    if not isinstance(raw_index, dict):
+        raise ConfigError("index must be a table")
+    if "root_dir" in raw_index:
+        raise ConfigError(
+            "index.root_dir is not supported; qmd always indexes the vault root"
         )
-        source_notes_dir = vault_relative_path(
-            vault,
-            raw_domain.get("source_notes_dir"),
-            f"domains.{name}.source_notes_dir",
+    collection = raw_index.get("collection")
+    if not isinstance(collection, str) or not collection.strip():
+        raise ConfigError("index.collection must be a non-empty string")
+    context = raw_index.get("context")
+    if context is not None and (not isinstance(context, str) or not context.strip()):
+        raise ConfigError("index.context must be a non-empty string")
+    mask = raw_index.get("mask", "**/*.md")
+    if not isinstance(mask, str) or not mask.strip():
+        raise ConfigError("index.mask must be a non-empty string")
+    return IndexSpec(
+        root_dir=vault,
+        collection=collection.strip(),
+        context=context.strip() if isinstance(context, str) else None,
+        mask=mask.strip(),
+    )
+
+
+def _path_patterns(config: dict[str, Any], field: str, default: list[str]) -> list[str]:
+    notes = config.get("notes", {})
+    if not isinstance(notes, dict):
+        raise ConfigError("notes must be a table")
+    patterns = notes.get(field, default)
+    if (
+        not isinstance(patterns, list)
+        or not patterns
+        or not all(isinstance(pattern, str) and pattern.strip() for pattern in patterns)
+    ):
+        raise ConfigError(f"notes.{field} must be a non-empty array of strings")
+    normalized = [pattern.strip() for pattern in patterns]
+    if any(
+        Path(pattern).is_absolute() or ".." in Path(pattern).parts
+        for pattern in normalized
+    ):
+        raise ConfigError(f"notes.{field} patterns must stay within the vault")
+    return normalized
+
+
+def note_path_allowed(config: dict[str, Any], vault: Path, path: Path) -> bool:
+    """Return whether a vault-relative Markdown path is eligible for semantic writes."""
+    resolved = path.resolve()
+    if not resolved.is_relative_to(vault):
+        return False
+    relative = resolved.relative_to(vault).as_posix()
+    include = _path_patterns(config, "include", ["**/*.md"])
+    protected = [".git/**", ".obsidian/**", ".vault-pr/**"]
+    exclude = protected + _path_patterns(
+        config,
+        "exclude",
+        protected,
+    )
+
+    return any(
+        _path_pattern_matches(relative, pattern) for pattern in include
+    ) and not any(_path_pattern_matches(relative, pattern) for pattern in exclude)
+
+
+def _path_pattern_matches(relative: str, pattern: str) -> bool:
+    """Match an anchored vault path with segment-aware `*` and recursive `**`."""
+    translated: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            translated.append("(?:.*/)?")
+            index += 3
+        elif pattern.startswith("**", index):
+            translated.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            translated.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            translated.append("[^/]")
+            index += 1
+        else:
+            translated.append(re.escape(pattern[index]))
+            index += 1
+    return re.fullmatch("".join(translated), relative) is not None
+
+
+def review_policy(config: dict[str, Any]) -> ReviewPolicy:
+    """Load review-all behavior and the bounded revision limit."""
+    raw_review = config.get("review", {})
+    if not isinstance(raw_review, dict):
+        raise ConfigError("review must be a table")
+    review_all = raw_review.get("review_all_semantic_transactions", False)
+    if not isinstance(review_all, bool):
+        raise ConfigError("review.review_all_semantic_transactions must be boolean")
+    max_revisions = raw_review.get("max_revision_rounds", 2)
+    if isinstance(max_revisions, bool) or not isinstance(max_revisions, int):
+        raise ConfigError("review.max_revision_rounds must be an integer")
+    if max_revisions < 0:
+        raise ConfigError("review.max_revision_rounds must be non-negative")
+    if max_revisions > 5:
+        raise ConfigError(
+            "review.max_revision_rounds cannot exceed the hard limit of 5"
         )
-        if not source_notes_dir.is_relative_to(root_dir):
-            raise ConfigError(f"domains.{name}.source_notes_dir must be under root_dir")
-
-        collection = raw_domain.get("qmd_collection")
-        if collection is not None:
-            if not isinstance(collection, str) or not collection.strip():
-                raise ConfigError(
-                    f"domains.{name}.qmd_collection must be a non-empty string"
-                )
-            collection = collection.strip()
-            if collection in collection_names:
-                raise ConfigError(f"duplicate qmd collection name: {collection}")
-            collection_names.add(collection)
-
-        context = raw_domain.get("qmd_context")
-        if context is not None and (
-            not isinstance(context, str) or not context.strip()
-        ):
-            raise ConfigError(f"domains.{name}.qmd_context must be a non-empty string")
-
-        specs[name] = DomainSpec(
-            name=name,
-            root_dir=root_dir,
-            source_notes_dir=source_notes_dir,
-            qmd_collection=collection,
-            qmd_context=context.strip() if isinstance(context, str) else None,
-        )
-
-    roots = list(specs.values())
-    for index, left in enumerate(roots):
-        for right in roots[index + 1 :]:
-            if left.root_dir.is_relative_to(
-                right.root_dir
-            ) or right.root_dir.is_relative_to(left.root_dir):
-                raise ConfigError(
-                    f"domain roots must not overlap: {left.name}, {right.name}"
-                )
-    return specs
+    return ReviewPolicy(review_all, max_revisions)
 
 
 def max_touched_notes(config: dict[str, Any]) -> int:

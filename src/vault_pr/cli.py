@@ -11,7 +11,7 @@ from typing import Sequence
 
 from .config import ConfigError, load_config, load_vault_path
 from .git import GitSafetyError, require_clean_git_root, run_git
-from .index import IndexUpdateError, reconcile_qmd_collections, update_qmd_index
+from .index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
 from .ingest import IngestError, ingest_url
 from .plan import PlanError, apply_plan, init_plan, record_review, validate_plan
 from .recovery import (
@@ -75,8 +75,8 @@ def doctor(config_path: Path) -> int:
 
     if shutil.which("qmd"):
         try:
-            alignment = reconcile_qmd_collections(config, check_only=True)
-            print(f"qmd: collections {alignment['status']}")
+            alignment = reconcile_qmd_collection(config, check_only=True)
+            print(f"qmd: collection {alignment['status']}")
             failed = failed or alignment["status"] != "aligned"
         except (ConfigError, IndexUpdateError) as exc:
             print(f"ERROR qmd collection check failed: {exc}")
@@ -103,9 +103,6 @@ def build_parser() -> argparse.ArgumentParser:
         "ingest", help="capture a URL and create an Obsidian source-note draft"
     )
     ingest_parser.add_argument("url", help="public HTTP or HTTPS source URL")
-    ingest_parser.add_argument(
-        "--domain", required=True, help="configured domain for the source note"
-    )
     ingest_parser.add_argument(
         "--config",
         type=Path,
@@ -178,6 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--decision", choices=("approve", "reject"), required=True
     )
     review_parser.add_argument("--notes", default="")
+    review_parser.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
 
     recover_parser = subparsers.add_parser(
         "recover", help="recover or finalize one interrupted transaction"
@@ -214,7 +214,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = ingest_url(
                 config=config,
                 url=args.url,
-                domain=args.domain,
                 apply=args.apply,
                 title_override=args.title,
                 snapshot_path=args.snapshot,
@@ -267,10 +266,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "review":
         try:
+            config = load_config(args.config)
             result = record_review(
-                args.plan, args.reviewer, args.decision, notes=args.notes
+                config, args.plan, args.reviewer, args.decision, notes=args.notes
             )
-        except PlanError as exc:
+        except (ConfigError, PlanError) as exc:
             print(f"ERROR {exc}", file=sys.stderr)
             return 2
         print(json.dumps(result, ensure_ascii=False, indent=2))

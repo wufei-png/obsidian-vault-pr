@@ -44,8 +44,9 @@ and update files must contain valid Obsidian frontmatter.
 
 Set `intent` to `merge`, `split`, or `rename` when applicable. Set
 `contradiction` to true when changing the current synthesis because sources
-conflict. Merge, delete, contradiction, and work-domain plans require an
-independent hash-bound approval. Any plan edit invalidates an earlier approval.
+conflict. Merge, delete, contradiction, and plans governed by a vault-wide
+review-all policy require an independent hash-bound approval. Any plan edit
+invalidates an earlier approval.
 Approval covers both `plan.json` and every referenced proposed content file;
 editing either after review invalidates the approval.
 

@@ -5,8 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vault_pr.cli import doctor
-from vault_pr.config import ConfigError, domain_specs, load_config, load_vault_path
+from vault_pr.cli import build_parser, doctor
+from vault_pr.config import (
+    ConfigError,
+    index_spec,
+    load_config,
+    load_vault_path,
+    note_path_allowed,
+    source_notes_dir,
+)
 
 
 class ConfigTests(unittest.TestCase):
@@ -20,41 +27,88 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(load_vault_path(load_config(config)), vault.resolve())
 
-    def test_rejects_overlapping_domain_roots(self) -> None:
+    def test_ingest_no_longer_accepts_a_domain_argument(self) -> None:
+        parser = build_parser()
+        parsed = parser.parse_args(["ingest", "https://example.com/article"])
+        self.assertFalse(hasattr(parsed, "domain"))
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                ["ingest", "https://example.com/article", "--domain", "tech"]
+            )
+
+    def test_loads_single_vault_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            vault = Path(temp_dir) / "vault"
+            vault = (Path(temp_dir) / "vault").resolve()
             config = {
                 "vault": {"path": str(vault)},
-                "domains": {
-                    "tech": {
-                        "root_dir": "knowledgebase",
-                        "source_notes_dir": "knowledgebase/sources",
-                    },
-                    "nested": {
-                        "root_dir": "knowledgebase/ai",
-                        "source_notes_dir": "knowledgebase/ai/sources",
-                    },
+                "index": {
+                    "collection": "fixture-vault",
                 },
             }
 
-            with self.assertRaisesRegex(ConfigError, "must not overlap"):
-                domain_specs(config, vault.resolve())
+            spec = index_spec(config, vault)
+            self.assertEqual(spec.root_dir, vault)
+            self.assertEqual(spec.collection, "fixture-vault")
 
-    def test_rejects_source_notes_outside_domain_root(self) -> None:
+    def test_rejects_source_notes_outside_vault(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            vault = Path(temp_dir) / "vault"
+            vault = (Path(temp_dir) / "vault").resolve()
             config = {
                 "vault": {"path": str(vault)},
-                "domains": {
-                    "tech": {
-                        "root_dir": "knowledgebase",
-                        "source_notes_dir": "life/sources",
-                    }
-                },
+                "sources": {"visible_notes_dir": "../outside"},
             }
 
-            with self.assertRaisesRegex(ConfigError, "must be under root_dir"):
-                domain_specs(config, vault.resolve())
+            with self.assertRaisesRegex(ConfigError, "escapes the vault"):
+                source_notes_dir(config, vault)
+
+    def test_rejects_configurable_index_subroots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir).resolve()
+            config = {"index": {"collection": "fixture", "root_dir": "notes"}}
+
+            with self.assertRaisesRegex(ConfigError, "always indexes the vault root"):
+                index_spec(config, vault)
+
+    def test_note_write_allowlist_is_vault_wide_and_excludes_internal_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir).resolve()
+            config = {"notes": {"include": ["**/*.md"]}}
+
+            self.assertTrue(note_path_allowed(config, vault, vault / "商汤" / "a.md"))
+            self.assertTrue(note_path_allowed(config, vault, vault / "top.md"))
+            self.assertFalse(
+                note_path_allowed(config, vault, vault / ".obsidian" / "readme.md")
+            )
+            relaxed = {"notes": {"include": ["**/*.md"], "exclude": ["tmp/**"]}}
+            self.assertFalse(
+                note_path_allowed(relaxed, vault, vault / ".vault-pr" / "audit.md")
+            )
+
+            single_level = {"notes": {"include": ["notes/*.md"]}}
+            self.assertTrue(
+                note_path_allowed(single_level, vault, vault / "notes" / "one.md")
+            )
+            self.assertFalse(
+                note_path_allowed(
+                    single_level, vault, vault / "notes" / "private" / "deep.md"
+                )
+            )
+            recursive = {
+                "notes": {
+                    "include": ["notes/**/*.md"],
+                    "exclude": ["notes/private/**"],
+                }
+            }
+            self.assertTrue(
+                note_path_allowed(recursive, vault, vault / "notes" / "one.md")
+            )
+            self.assertFalse(
+                note_path_allowed(
+                    recursive, vault, vault / "notes" / "private" / "deep.md"
+                )
+            )
 
     def test_doctor_rejects_dirty_vault(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

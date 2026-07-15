@@ -43,7 +43,7 @@ use temporary directories or synthetic vaults.
   transactions.
 - Allow create, rewrite, rename, and split automatically after validation.
   Require an independent reviewer agent for merge, delete, contradictions, and
-  work-domain changes.
+  every transaction when the configured vault enables review-all policy.
 - Commit content even if qmd indexing fails. Retry indexing at most 3 times
   after the initial attempt, then record `index_failed` without rolling back the
   content commit.

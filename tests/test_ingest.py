@@ -35,15 +35,9 @@ def make_config(vault: Path) -> dict[str, object]:
         "vault": {"path": str(vault)},
         "sources": {
             "public_archive_dir": ".vault-pr/sources/public",
+            "visible_notes_dir": "knowledgebase/sources",
             "timeout_seconds": 5,
             "max_download_bytes": 1_000_000,
-        },
-        "domains": {
-            "tech": {
-                "root_dir": "knowledgebase",
-                "source_notes_dir": "knowledgebase/sources",
-                "qmd_collection": "notebook-tech",
-            },
         },
     }
 
@@ -340,13 +334,11 @@ class IngestTests(unittest.TestCase):
                 first = ingest_url(
                     config=make_config(vault),
                     url=first_fetch.requested_url,
-                    domain="tech",
                     apply=False,
                 )
                 second = ingest_url(
                     config=make_config(vault),
                     url=first_fetch.requested_url,
-                    domain="tech",
                     apply=False,
                 )
 
@@ -381,7 +373,6 @@ class IngestTests(unittest.TestCase):
                 first = ingest_url(
                     config=make_config(vault),
                     url=first_fetch.requested_url,
-                    domain="tech",
                     apply=True,
                 )
                 commit_applied_transaction(
@@ -393,7 +384,6 @@ class IngestTests(unittest.TestCase):
                 second = ingest_url(
                     config=make_config(vault),
                     url=second_fetch.requested_url,
-                    domain="tech",
                     apply=True,
                 )
 
@@ -412,7 +402,6 @@ class IngestTests(unittest.TestCase):
                 result = ingest_url(
                     config=make_config(vault),
                     url="https://example.com/article.md",
-                    domain="tech",
                     apply=True,
                 )
 
@@ -424,9 +413,11 @@ class IngestTests(unittest.TestCase):
             note = note_path.read_text()
 
             self.assertEqual(manifest["source_id"], result["source_id"])
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertNotIn("domain", manifest)
             self.assertEqual(manifest["extractor"], "direct-markdown")
             self.assertIn("type: source", note)
-            self.assertIn('domain: "tech"', note)
+            self.assertNotIn("domain:", note)
             self.assertIn(result["source_id"], note)
             journal = (
                 vault
@@ -454,7 +445,6 @@ class IngestTests(unittest.TestCase):
                 first = ingest_url(
                     config=make_config(vault),
                     url="https://example.com/article.md",
-                    domain="tech",
                     apply=True,
                 )
             commit_applied_transaction(
@@ -478,7 +468,6 @@ class IngestTests(unittest.TestCase):
                     ingest_url(
                         config=make_config(vault),
                         url="https://example.com/article.md",
-                        domain="tech",
                         apply=True,
                     )
 
@@ -502,7 +491,6 @@ class IngestTests(unittest.TestCase):
                     ingest_url(
                         config=make_config(vault),
                         url="https://example.com/article.md",
-                        domain="tech",
                         apply=False,
                     )
 
@@ -518,7 +506,6 @@ class IngestTests(unittest.TestCase):
                 result = ingest_url(
                     config=make_config(vault),
                     url="https://example.com/article.md",
-                    domain="tech",
                     apply=False,
                 )
 
@@ -538,7 +525,6 @@ class IngestTests(unittest.TestCase):
             result = ingest_url(
                 config=make_config(vault),
                 url="https://internal.example/private",
-                domain="tech",
                 apply=True,
                 snapshot_path=snapshot,
                 adapter="authenticated",
@@ -561,7 +547,6 @@ class IngestTests(unittest.TestCase):
                 ingest_url(
                     config=make_config(vault),
                     url="https://internal.example/private",
-                    domain="tech",
                     apply=False,
                     adapter="authenticated",
                 )
@@ -579,7 +564,6 @@ class IngestTests(unittest.TestCase):
                 ingest_url(
                     config=make_config(vault),
                     url="https://example.com/article",
-                    domain="tech",
                     apply=False,
                     snapshot_path=snapshot,
                     adapter="http",
@@ -603,7 +587,6 @@ class IngestTests(unittest.TestCase):
             result = ingest_url(
                 config=make_config(vault),
                 url="https://mp.weixin.qq.com/s/example",
-                domain="tech",
                 apply=True,
                 snapshot_path=snapshot,
                 adapter="wechat",
@@ -630,7 +613,6 @@ class IngestTests(unittest.TestCase):
             result = ingest_url(
                 config=make_config(vault),
                 url="https://mp.weixin.qq.com/s/example",
-                domain="tech",
                 apply=True,
                 snapshot_path=snapshot,
                 adapter="wechat",
@@ -661,7 +643,6 @@ class IngestTests(unittest.TestCase):
             first = ingest_url(
                 config=make_config(vault),
                 url="https://mp.weixin.qq.com/s/example",
-                domain="tech",
                 apply=False,
                 snapshot_path=snapshot,
                 adapter="wechat",
@@ -670,7 +651,6 @@ class IngestTests(unittest.TestCase):
             second = ingest_url(
                 config=make_config(vault),
                 url="https://mp.weixin.qq.com/s/example",
-                domain="tech",
                 apply=False,
                 snapshot_path=snapshot,
                 adapter="wechat",
@@ -698,7 +678,6 @@ class IngestTests(unittest.TestCase):
                 ingest_url(
                     config=config,
                     url="https://mp.weixin.qq.com/s/example",
-                    domain="tech",
                     apply=False,
                     snapshot_path=snapshot,
                     adapter="wechat",
@@ -714,7 +693,6 @@ class IngestTests(unittest.TestCase):
                 ingest_url(
                     config=make_config(vault),
                     url="http://127.0.0.1/private",
-                    domain="tech",
                     apply=False,
                     adapter="wechat",
                 )
@@ -729,7 +707,6 @@ class IngestTests(unittest.TestCase):
                 ingest_url(
                     config=make_config(vault),
                     url="https://mp.weixin.qq.com/s/example",
-                    domain="tech",
                     apply=False,
                 )
 
@@ -754,7 +731,6 @@ class IngestTests(unittest.TestCase):
                         ingest_url(
                             config=make_config(vault),
                             url="https://mp.weixin.qq.com/s/example",
-                            domain="tech",
                             apply=False,
                             snapshot_path=snapshot_path,
                             adapter=adapter,
@@ -796,7 +772,6 @@ class IngestTests(unittest.TestCase):
                     ingest_url(
                         config=make_config(vault),
                         url="https://example.com/article.md",
-                        domain="tech",
                         apply=True,
                     )
 
@@ -828,7 +803,6 @@ class IngestTests(unittest.TestCase):
                     ingest_url(
                         config=make_config(vault),
                         url="https://example.com/article.md",
-                        domain="tech",
                         apply=True,
                     )
 

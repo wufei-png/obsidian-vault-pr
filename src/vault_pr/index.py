@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import ConfigError, DomainSpec, domain_specs, load_vault_path
+from .config import ConfigError, IndexSpec, index_spec, load_vault_path
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .recovery import list_active_transactions
 
@@ -90,14 +90,11 @@ def _parse_collection_show(output: str) -> CollectionState:
     )
 
 
-def _configured_collections(config: dict[str, Any], vault: Path) -> list[DomainSpec]:
-    specs = [
-        spec for spec in domain_specs(config, vault).values() if spec.qmd_collection
-    ]
-    for spec in specs:
-        if not spec.root_dir.is_dir():
-            raise ConfigError(f"domain root does not exist: {spec.root_dir}")
-    return specs
+def _configured_collection(config: dict[str, Any], vault: Path) -> IndexSpec:
+    spec = index_spec(config, vault)
+    if not spec.root_dir.is_dir():
+        raise ConfigError(f"index root does not exist: {spec.root_dir}")
+    return spec
 
 
 def _root_context(context_output: str, collection: str) -> str | None:
@@ -122,24 +119,20 @@ def _root_context(context_output: str, collection: str) -> str | None:
     return actual or None
 
 
-def reconcile_qmd_collections(
+def reconcile_qmd_collection(
     config: dict[str, Any],
     *,
     check_only: bool = False,
     runner: Runner = subprocess.run,
     executable: str | None = None,
 ) -> dict[str, Any]:
-    """Compare configured collections with qmd and optionally repair drift."""
+    """Compare the configured vault collection with qmd and repair drift."""
     vault = load_vault_path(config)
     index_name = _index_name(config)
     qmd = executable or shutil.which("qmd")
     if not qmd:
         raise IndexUpdateError("required tool missing: qmd")
-    mask = config.get("index", {}).get("mask", "**/*.md")
-    if not isinstance(mask, str) or not mask.strip():
-        raise ConfigError("index.mask must be a non-empty string")
-    mask = mask.strip()
-    specs = _configured_collections(config, vault)
+    spec = _configured_collection(config, vault)
 
     contexts = _run_qmd(runner, qmd, index_name, "context", "list")
     if contexts.returncode != 0:
@@ -147,52 +140,35 @@ def reconcile_qmd_collections(
         raise IndexUpdateError(f"unable to inspect qmd contexts: {detail}")
 
     actions: list[dict[str, str]] = []
-    for spec in specs:
-        assert spec.qmd_collection is not None
-        shown = _run_qmd(
-            runner, qmd, index_name, "collection", "show", spec.qmd_collection
+    shown = _run_qmd(runner, qmd, index_name, "collection", "show", spec.collection)
+    if shown.returncode == 0:
+        state = _parse_collection_show(shown.stdout)
+        definition_ok = state.path == spec.root_dir and state.mask == spec.mask
+        action = "none" if definition_ok else "replace"
+    elif "Collection not found" in (shown.stderr or shown.stdout):
+        action = "create"
+    else:
+        detail = (shown.stderr or shown.stdout).strip()
+        raise IndexUpdateError(
+            f"unable to inspect qmd collection {spec.collection}: {detail}"
         )
-        if shown.returncode == 0:
-            state = _parse_collection_show(shown.stdout)
-            definition_ok = state.path == spec.root_dir and state.mask == mask
-            action = "none" if definition_ok else "replace"
-        elif "Collection not found" in (shown.stderr or shown.stdout):
-            action = "create"
-        else:
-            detail = (shown.stderr or shown.stdout).strip()
-            raise IndexUpdateError(
-                f"unable to inspect qmd collection {spec.qmd_collection}: {detail}"
-            )
 
-        current_context = _root_context(contexts.stdout, spec.qmd_collection)
-        context_ok = not spec.qmd_context or current_context == spec.qmd_context
-        if action != "none":
-            actions.append(
-                {
-                    "action": action,
-                    "collection": spec.qmd_collection,
-                    "domain": spec.name,
-                }
-            )
-        if not context_ok:
-            actions.append(
-                {
-                    "action": "update_context",
-                    "collection": spec.qmd_collection,
-                    "domain": spec.name,
-                }
-            )
+    current_context = _root_context(contexts.stdout, spec.collection)
+    context_ok = not spec.context or current_context == spec.context
+    if action != "none":
+        actions.append({"action": action, "collection": spec.collection})
+    if not context_ok:
+        actions.append({"action": "update_context", "collection": spec.collection})
 
-        if check_only:
-            continue
+    if not check_only:
         if action == "replace":
             removed = _run_qmd(
-                runner, qmd, index_name, "collection", "remove", spec.qmd_collection
+                runner, qmd, index_name, "collection", "remove", spec.collection
             )
             if removed.returncode != 0:
                 detail = (removed.stderr or removed.stdout).strip()
                 raise IndexUpdateError(
-                    f"unable to replace qmd collection {spec.qmd_collection}: {detail}"
+                    f"unable to replace qmd collection {spec.collection}: {detail}"
                 )
         if action in {"create", "replace"}:
             added = _run_qmd(
@@ -203,19 +179,19 @@ def reconcile_qmd_collections(
                 "add",
                 str(spec.root_dir),
                 "--name",
-                spec.qmd_collection,
+                spec.collection,
                 "--mask",
-                mask,
+                spec.mask,
             )
             if added.returncode != 0:
                 detail = (added.stderr or added.stdout).strip()
                 raise IndexUpdateError(
-                    f"unable to create qmd collection {spec.qmd_collection}: {detail}"
+                    f"unable to create qmd collection {spec.collection}: {detail}"
                 )
         should_set_context = bool(
-            spec.qmd_context and (not context_ok or action in {"create", "replace"})
+            spec.context and (not context_ok or action in {"create", "replace"})
         )
-        if should_set_context and spec.qmd_context:
+        if should_set_context and spec.context:
             if action == "none" and current_context is not None:
                 removed_context = _run_qmd(
                     runner,
@@ -223,12 +199,12 @@ def reconcile_qmd_collections(
                     index_name,
                     "context",
                     "rm",
-                    f"qmd://{spec.qmd_collection}",
+                    f"qmd://{spec.collection}",
                 )
                 if removed_context.returncode != 0:
                     detail = (removed_context.stderr or removed_context.stdout).strip()
                     raise IndexUpdateError(
-                        f"unable to replace qmd context {spec.qmd_collection}: {detail}"
+                        f"unable to replace qmd context {spec.collection}: {detail}"
                     )
             context_added = _run_qmd(
                 runner,
@@ -236,19 +212,19 @@ def reconcile_qmd_collections(
                 index_name,
                 "context",
                 "add",
-                f"qmd://{spec.qmd_collection}",
-                spec.qmd_context,
+                f"qmd://{spec.collection}",
+                spec.context,
             )
             if context_added.returncode != 0:
                 detail = (context_added.stderr or context_added.stdout).strip()
                 raise IndexUpdateError(
-                    f"unable to set qmd context {spec.qmd_collection}: {detail}"
+                    f"unable to set qmd context {spec.collection}: {detail}"
                 )
 
     return {
         "status": "drift" if actions else "aligned",
         "index": index_name,
-        "managed_collections": len(specs),
+        "managed_collections": 1,
         "actions": actions,
     }
 
@@ -304,7 +280,7 @@ def update_qmd_index(
                 "active vault-pr transaction must be finalized before indexing: "
                 + ", ".join(path.name for path in active)
             )
-        return reconcile_qmd_collections(
+        return reconcile_qmd_collection(
             config, check_only=True, runner=runner, executable=qmd
         )
 
@@ -319,9 +295,7 @@ def update_qmd_index(
                 "active vault-pr transaction must be finalized before indexing: "
                 + ", ".join(path.name for path in active)
             )
-        reconciliation = reconcile_qmd_collections(
-            config, runner=runner, executable=qmd
-        )
+        reconciliation = reconcile_qmd_collection(config, runner=runner, executable=qmd)
         embed = bool(config.get("index", {}).get("embed", True))
         batch_size = config.get("index", {}).get("max_docs_per_batch", 64)
         try:

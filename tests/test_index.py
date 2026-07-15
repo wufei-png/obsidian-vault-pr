@@ -9,23 +9,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vault_pr.config import ConfigError
-from vault_pr.index import IndexUpdateError, reconcile_qmd_collections, update_qmd_index
+from vault_pr.index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
 
 
 def make_config(vault: Path, *, max_retries: int = 3) -> dict[str, object]:
     return {
         "vault": {"path": str(vault)},
-        "domains": {
-            "tech": {
-                "root_dir": "knowledgebase",
-                "source_notes_dir": "knowledgebase/sources",
-                "qmd_collection": "notebook-tech",
-                "qmd_context": "Technical notes.",
-            }
-        },
         "index": {
             "name": "test-notebook",
+            "collection": "notebook-tech",
             "mask": "**/*.md",
+            "context": "Technical notes.",
             "embed": True,
             "max_docs_per_batch": 64,
             "max_retries": max_retries,
@@ -114,9 +108,9 @@ class IndexTests(unittest.TestCase):
     def test_check_reports_aligned_collection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = self.make_vault(Path(temp_dir))
-            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+            runner = QmdRunner(vault, collection_path=vault)
 
-            result = reconcile_qmd_collections(
+            result = reconcile_qmd_collection(
                 make_config(vault), check_only=True, runner=runner, executable="qmd"
             )
 
@@ -128,14 +122,12 @@ class IndexTests(unittest.TestCase):
             vault = self.make_vault(Path(temp_dir))
             runner = QmdRunner(vault)
 
-            result = reconcile_qmd_collections(
+            result = reconcile_qmd_collection(
                 make_config(vault), runner=runner, executable="qmd"
             )
 
             self.assertEqual(result["status"], "drift")
-            self.assertEqual(
-                runner.collection_path, (vault / "knowledgebase").resolve()
-            )
+            self.assertEqual(runner.collection_path, vault.resolve())
             self.assertEqual(runner.context, "Technical notes.")
 
     def test_reconcile_replaces_wrong_path(self) -> None:
@@ -145,23 +137,21 @@ class IndexTests(unittest.TestCase):
             wrong.mkdir()
             runner = QmdRunner(vault, collection_path=wrong)
 
-            result = reconcile_qmd_collections(
+            result = reconcile_qmd_collection(
                 make_config(vault), runner=runner, executable="qmd"
             )
 
             self.assertEqual(result["actions"][0]["action"], "replace")
-            self.assertEqual(
-                runner.collection_path, (vault / "knowledgebase").resolve()
-            )
+            self.assertEqual(runner.collection_path, vault.resolve())
             self.assertEqual(runner.context, "Technical notes.")
 
     def test_reconcile_updates_drifted_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = self.make_vault(Path(temp_dir))
-            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+            runner = QmdRunner(vault, collection_path=vault)
             runner.context = "Old context."
 
-            result = reconcile_qmd_collections(
+            result = reconcile_qmd_collection(
                 make_config(vault), runner=runner, executable="qmd"
             )
 
@@ -171,10 +161,10 @@ class IndexTests(unittest.TestCase):
     def test_reconcile_adds_missing_context_without_removing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = self.make_vault(Path(temp_dir))
-            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+            runner = QmdRunner(vault, collection_path=vault)
             runner.context = None
 
-            result = reconcile_qmd_collections(
+            result = reconcile_qmd_collection(
                 make_config(vault), runner=runner, executable="qmd"
             )
 
@@ -187,10 +177,10 @@ class IndexTests(unittest.TestCase):
     def test_context_match_is_exact_not_substring(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = self.make_vault(Path(temp_dir))
-            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+            runner = QmdRunner(vault, collection_path=vault)
             runner.context = "Technical notes. Old suffix."
 
-            result = reconcile_qmd_collections(
+            result = reconcile_qmd_collection(
                 make_config(vault), check_only=True, runner=runner, executable="qmd"
             )
 
@@ -202,7 +192,7 @@ class IndexTests(unittest.TestCase):
             vault = self.make_vault(Path(temp_dir))
             runner = QmdRunner(
                 vault,
-                collection_path=vault / "knowledgebase",
+                collection_path=vault,
                 refresh_codes=[1, 1, 0, 0],
             )
 
@@ -223,7 +213,7 @@ class IndexTests(unittest.TestCase):
             vault = self.make_vault(Path(temp_dir))
             active = vault / ".git" / "vault-pr-active" / "txn_fixture"
             active.mkdir(parents=True)
-            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+            runner = QmdRunner(vault, collection_path=vault)
 
             with self.assertRaisesRegex(IndexUpdateError, "must be finalized"):
                 update_qmd_index(
@@ -239,7 +229,7 @@ class IndexTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = self.make_vault(Path(temp_dir))
             active = vault / ".git" / "vault-pr-active" / "txn_race_fixture"
-            runner = QmdRunner(vault, collection_path=vault / "knowledgebase")
+            runner = QmdRunner(vault, collection_path=vault)
 
             @contextmanager
             def raced_lock(_vault: Path):
@@ -262,7 +252,7 @@ class IndexTests(unittest.TestCase):
             vault = self.make_vault(Path(temp_dir))
             runner = QmdRunner(
                 vault,
-                collection_path=vault / "knowledgebase",
+                collection_path=vault,
                 refresh_codes=[1, 1, 1, 1],
             )
 

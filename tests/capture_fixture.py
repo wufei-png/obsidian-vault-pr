@@ -23,20 +23,18 @@ def source_note_text(source_id: str, body: str = "Captured") -> str:
 def write_capture(
     vault: Path,
     *,
-    domain: str = "tech",
     source_note: str = "knowledgebase/sources/source.md",
 ) -> str:
     raw = b"raw source fixture\n"
     extracted = b"# Source Fixture\n\n" + b"knowledge " * 100
     identity = {
-        "schema_version": 1,
+        "schema_version": 2,
         "requested_url": "https://example.com/source",
         "final_url": "https://example.com/source",
         "adapter": "http",
         "raw_sha256": hashlib.sha256(raw).hexdigest(),
         "extracted_sha256": hashlib.sha256(extracted).hexdigest(),
         "asset_sha256": {},
-        "domain": domain,
         "artifacts": {
             "raw": "source.html",
             "extracted": "extracted.md",

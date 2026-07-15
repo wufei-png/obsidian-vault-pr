@@ -24,9 +24,10 @@ The implemented workflow provides:
   Markdown, PDF, or an agent-selected Capture Provider for WeChat and
   authenticated pages, with bounded snapshot validation, extraction time, PDF
   pages, extracted text, and PDF-worker memory;
-- domain-scoped BM25/vector retrieval for deduplication and semantic planning;
+- vault-wide BM25/vector retrieval for deduplication and semantic planning;
 - hash-bound change plans with a 15-note default limit;
-- hash-bound reviewer records for merge, delete, contradiction, and work changes;
+- hash-bound reviewer records for merge, delete, contradiction, or a vault-wide
+  review-all policy;
   the skill orchestration assigns these plans to a separate reviewer agent;
 - deterministic plan apply with rollback-on-error, an audit archive, and a
   durable `apply -> commit -> finalize` recovery protocol;
@@ -55,7 +56,7 @@ cp vault-pr.example.toml vault-pr.local.toml
 uv sync
 uv run vault-pr doctor --config vault-pr.local.toml
 uv run vault-pr ingest https://example.com/article \
-  --domain tech --config vault-pr.local.toml --apply
+  --config vault-pr.local.toml --apply
 # Commit only the returned transaction's paths and close its journal under lock.
 uv run vault-pr commit txn_ingest_... --message "Ingest source article" \
   --config vault-pr.local.toml
