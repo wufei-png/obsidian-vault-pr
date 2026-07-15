@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -420,6 +422,90 @@ class RecoveryTests(unittest.TestCase):
                 text=True,
             ).stdout.split()[0]
             self.assertEqual(mode, "100755")
+
+    def test_commit_validates_content_through_configured_clean_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, _existing = self.make_vault(root)
+            filter_script = root / "filter.py"
+            filter_script.write_text(
+                """import sys
+
+payload = sys.stdin.buffer.read()
+prefix = b"filtered-content\\n"
+if sys.argv[1] == "clean":
+    sys.stdout.buffer.write(prefix + payload)
+elif payload.startswith(prefix):
+    sys.stdout.buffer.write(payload[len(prefix):])
+else:
+    raise SystemExit(2)
+"""
+            )
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(filter_script))}"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "config",
+                    "filter.fixture.clean",
+                    f"{command} clean",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "config",
+                    "filter.fixture.smudge",
+                    f"{command} smudge",
+                ],
+                check=True,
+            )
+            attributes = vault / ".gitattributes"
+            attributes.write_text("*.asset filter=fixture\n")
+            subprocess.run(
+                ["git", "-C", str(vault), "add", ".gitattributes"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "add fixture filter"],
+                check=True,
+            )
+
+            created = vault / "knowledgebase" / "capture.asset"
+            content = b"raw capture bytes\n"
+            active = prepare_active_transaction(
+                vault=vault,
+                git_dir=vault / ".git",
+                transaction_id="txn_filtered_content_fixture",
+                transaction_sha256="4" * 64,
+                affected={created},
+                expected_original_sha256={created: None},
+                expected_original_mode={created: None},
+                final_sha256={created: digest(content)},
+                final_mode={created: "100644"},
+            )
+            created.parent.mkdir(parents=True, exist_ok=True)
+            created.write_bytes(content)
+            mark_active_applied(active)
+
+            result = commit_applied_transaction(
+                vault,
+                vault / ".git",
+                "txn_filtered_content_fixture",
+                "Commit filtered capture",
+            )
+
+            committed = subprocess.run(
+                ["git", "-C", str(vault), "show", "HEAD:knowledgebase/capture.asset"],
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(result["status"], "committed_and_finalized")
+            self.assertEqual(created.read_bytes(), content)
+            self.assertEqual(committed.stdout, b"filtered-content\n" + content)
 
     def test_commit_refuses_unrelated_dirty_path_before_staging(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

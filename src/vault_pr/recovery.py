@@ -78,13 +78,42 @@ def _head_commit(vault: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _git_file_sha256(vault: Path, relative: str) -> str | None:
+def _git_worktree_blob_oid(vault: Path, relative: str) -> str | None:
+    """Return the blob OID Git would stage after applying configured filters."""
+    path = vault / relative
+    if not path.exists():
+        return None
     result = subprocess.run(
-        ["git", "-C", str(vault), "show", f"HEAD:{relative}"],
+        ["git", "-C", str(vault), "hash-object", "--", relative],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RecoveryError(f"unable to hash filtered worktree path: {relative}")
+    oid = result.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", oid):
+        raise RecoveryError(f"unexpected filtered blob metadata: {relative}")
+    return oid
+
+
+def _git_head_file_oid(vault: Path, relative: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(vault), "ls-tree", "-z", "HEAD", "--", relative],
         check=False,
         capture_output=True,
     )
-    return hashlib.sha256(result.stdout).hexdigest() if result.returncode == 0 else None
+    if result.returncode != 0:
+        raise RecoveryError(f"unable to inspect committed blob: {relative}")
+    if not result.stdout:
+        return None
+    records = [record for record in result.stdout.split(b"\0") if record]
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise RecoveryError(f"unexpected committed blob metadata: {relative}")
+    fields = records[0].split(b"\t", 1)[0].split()
+    if len(fields) != 3:
+        raise RecoveryError(f"unexpected committed blob metadata: {relative}")
+    return fields[2].decode("ascii")
 
 
 def _git_head_file_mode(vault: Path, relative: str) -> str | None:
@@ -138,13 +167,23 @@ def _git_status_paths(vault: Path) -> tuple[set[str], set[str]]:
     return dirty, staged
 
 
-def _git_index_file_sha256(vault: Path, relative: str) -> str | None:
+def _git_index_file_oid(vault: Path, relative: str) -> str | None:
     result = subprocess.run(
-        ["git", "-C", str(vault), "show", f":{relative}"],
+        ["git", "-C", str(vault), "ls-files", "--stage", "-z", "--", relative],
         check=False,
         capture_output=True,
     )
-    return hashlib.sha256(result.stdout).hexdigest() if result.returncode == 0 else None
+    if result.returncode != 0:
+        raise RecoveryError(f"unable to inspect staged blob: {relative}")
+    if not result.stdout:
+        return None
+    records = [record for record in result.stdout.split(b"\0") if record]
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise RecoveryError(f"unexpected staged blob metadata: {relative}")
+    fields = records[0].split(b"\t", 1)[0].split()
+    if len(fields) != 3:
+        raise RecoveryError(f"unexpected staged blob metadata: {relative}")
+    return fields[1].decode("ascii")
 
 
 def _git_index_file_mode(vault: Path, relative: str) -> str | None:
@@ -682,7 +721,9 @@ def _finalize_active_transaction_unlocked(
             raise RecoveryError(
                 f"applied path does not match final state: {entry['path']}"
             )
-        if _git_file_sha256(vault, entry["path"]) != final or (
+        if _git_head_file_oid(vault, entry["path"]) != _git_worktree_blob_oid(
+            vault, entry["path"]
+        ) or (
             journal.get("schema_version") == 3
             and _git_head_file_mode(vault, entry["path"]) != final_mode
         ):
@@ -714,9 +755,9 @@ def _finalize_active_transaction_unlocked(
         completion = _lexical_child(
             vault, completion_path, "transaction completion path"
         )
-        if not completion.is_file() or _git_file_sha256(
+        if not completion.is_file() or _git_head_file_oid(
             vault, completion_path
-        ) != _sha256(completion):
+        ) != _git_worktree_blob_oid(vault, completion_path):
             raise RecoveryError(
                 "Git commit does not contain the transaction audit record"
             )
@@ -815,7 +856,9 @@ def commit_applied_transaction(
                 "staged paths do not match transaction journal: " + "; ".join(details)
             )
         for relative, (final, final_mode) in final_by_path.items():
-            if _git_index_file_sha256(vault, relative) != final or (
+            if _git_index_file_oid(vault, relative) != _git_worktree_blob_oid(
+                vault, relative
+            ) or (
                 journal.get("schema_version") == 3
                 and _git_index_file_mode(vault, relative) != final_mode
             ):
