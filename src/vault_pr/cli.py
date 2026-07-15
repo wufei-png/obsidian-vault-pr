@@ -13,6 +13,7 @@ from .config import ConfigError, load_config, load_vault_path
 from .git import GitSafetyError, require_clean_git_root, run_git
 from .index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
 from .ingest import IngestError, ingest_url
+from .migrate import MigrationError, migrate_captures_v2
 from .plan import PlanError, apply_plan, init_plan, record_review, validate_plan
 from .recovery import (
     RecoveryError,
@@ -142,6 +143,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="report collection drift without changing qmd",
     )
 
+    migrate_parser = subparsers.add_parser(
+        "migrate", help="plan or apply a journaled vault-pr data migration"
+    )
+    migrate_subparsers = migrate_parser.add_subparsers(
+        dest="migrate_command", required=True
+    )
+    captures_v2 = migrate_subparsers.add_parser(
+        "captures-v2", help="upgrade every schema-v1 source capture"
+    )
+    captures_v2.add_argument(
+        "--missing-adapter",
+        choices=("http", "wechat", "authenticated"),
+        help="adapter to assign only to legacy manifests that omit it",
+    )
+    captures_v2.add_argument(
+        "--apply", action="store_true", help="write one recoverable migration transaction"
+    )
+    captures_v2.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
+
     retrieve_parser = subparsers.add_parser(
         "retrieve", help="retrieve related notes for a captured source"
     )
@@ -233,6 +255,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] in {"indexed", "aligned"} else 1
+    if args.command == "migrate":
+        try:
+            if args.migrate_command != "captures-v2":
+                raise AssertionError(
+                    f"unhandled migrate command: {args.migrate_command}"
+                )
+            result = migrate_captures_v2(
+                load_config(args.config),
+                apply=args.apply,
+                missing_adapter=args.missing_adapter,
+            )
+        except (ConfigError, GitSafetyError, MigrationError) as exc:
+            print(f"ERROR {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "retrieve":
         try:
             result = retrieve_related_notes(

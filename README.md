@@ -60,6 +60,8 @@ uv run vault-pr ingest https://example.com/article \
 # Commit only the returned transaction's paths and close its journal under lock.
 uv run vault-pr commit txn_ingest_... --message "Ingest source article" \
   --config vault-pr.local.toml
+uv run vault-pr migrate captures-v2 --missing-adapter http \
+  --config vault-pr.local.toml
 uv run vault-pr index --config vault-pr.local.toml
 uv run vault-pr retrieve src_0123456789abcdef0123 \
   --config vault-pr.local.toml
@@ -68,6 +70,13 @@ uv run vault-pr plan init src_0123456789abcdef0123 \
 ```
 
 The local configuration is intentionally ignored by Git.
+
+Use `vault-pr migrate captures-v2` to inspect legacy capture upgrades without
+writing. Add `--apply` only on a clean Vault; the migration validates artifact
+hashes, rewrites source-ID references, removes the legacy source-note `domain`
+property, and leaves a recoverable transaction that must be finalized with
+`vault-pr commit`. If a v1 manifest omitted `adapter`, assign it explicitly with
+`--missing-adapter`.
 
 Use `vault-pr index --check` for a read-only collection drift report. A normal
 `vault-pr index` repairs only explicitly configured collections, leaves all
