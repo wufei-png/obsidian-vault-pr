@@ -9,6 +9,10 @@ existing vault without taking ownership of every way those sources are acquired.
 An address or local handle that identifies material the user wants integrated.
 _Avoid_: Input, URL
 
+**User Ingestion**:
+A Source Reference supplied with the intent that its validated knowledge be retained in the selected real Vault Boundary.
+_Avoid_: Canary, trial import
+
 **Capture Provider**:
 An agent capability that resolves a Source Reference into a local Snapshot Bundle.
 _Avoid_: Downloader, vault adapter
@@ -29,6 +33,10 @@ _Avoid_: Agent, downloader
 One independently opened, configured, indexed, versioned, and governed Obsidian vault whose contents share the same trust and read-access policy.
 _Avoid_: Domain, area, folder scope
 
+**Fixture Vault**:
+A disposable Git-managed vault containing synthetic notes and configuration for repeatable route, policy, and recovery tests.
+_Avoid_: User vault, temporary user vault
+
 **Vault Registry**:
 The local agent-facing list of Vault Boundaries and their routing evidence, configuration paths, and allowed source classes; it selects one vault before a workflow starts.
 _Avoid_: Multi-vault config, domain map
@@ -42,7 +50,7 @@ A bounded, reviewable set of interlinked knowledge changes derived from one Sour
 _Avoid_: Batch edit, import
 
 **Canary Scenario**:
-A repeatable representative source journey used to verify a capture route and its governed knowledge outcome.
+A repeatable representative source journey, normally run against a Fixture Vault, used to verify a capture route and its governed knowledge outcome.
 _Avoid_: Demo, one-off test
 
 **Fixture Canary**:
@@ -50,7 +58,7 @@ A Canary Scenario driven by a deterministic local Snapshot Bundle to verify a ca
 _Avoid_: Live test, mocked success
 
 **Live Canary**:
-A Canary Scenario that exercises a real Source Reference and Capture Provider; it is required before a source route is considered operational.
+A Canary Scenario that exercises a maintained real Source Reference and Capture Provider in a Fixture Vault; it is required before a source route is considered operational.
 _Avoid_: Fixture, production import
 
 **Durable Knowledge Link**:
@@ -70,7 +78,7 @@ The knowledge purpose of a note, which determines the graph and provenance invar
 _Avoid_: Folder, file type
 
 **Quality Record**:
-A versioned vault-owned artifact containing Quality Findings or evaluation outcomes for that vault.
+A versioned, retrieval-excluded artifact under `.vault-pr/quality/` containing Quality Findings or evaluation outcomes for that vault.
 _Avoid_: Temporary report, knowledge note
 
 **Claim Conflict**:
