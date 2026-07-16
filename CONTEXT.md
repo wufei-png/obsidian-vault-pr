@@ -22,12 +22,28 @@ An agent capability that resolves a Source Reference into a local Snapshot Bundl
 _Avoid_: Downloader, vault adapter
 
 **Snapshot Bundle**:
-An untrusted local primary document plus any sibling assets produced by a Capture Provider.
+An untrusted provider-produced directory containing one primary document, a closed manifest, and explicitly declared `asset` or `supplement` files. A single ordinary local file is not a Bundle and needs no manifest.
 _Avoid_: Imported note, capture
 
 **Source Capture**:
-The immutable, identity-bound archive accepted from a direct fetch or Snapshot Bundle. It provides Transaction Evidence and never grants write authority by itself.
+The immutable, identity-bound archive accepted from a direct fetch, Kernel-verified local file, or Snapshot Bundle. Its identity excludes mutable Source Note paths, provider metadata, logical names, extraction output, and capture time. It provides Transaction Evidence and never grants write authority by itself.
 _Avoid_: Download, cache
+
+**Capture Access Kind**:
+The trust context in which source bytes were acquired: `public`, `authenticated`, or `local`. It participates in Source Capture identity so equal bytes from different trust contexts do not silently collapse.
+_Avoid_: Security mode, adapter
+
+**Source Capture Asset**:
+An immutable asset or supplement declared inside a Source Capture and retained as source evidence.
+_Avoid_: Vault attachment
+
+**Vault Asset**:
+A normal attachment managed by the user, Obsidian, or another external tool and referenced by visible notes. Semantic Transactions may validate an existing Vault Asset but do not manage its lifecycle in v2.
+_Avoid_: Capture asset
+
+**Asset Promotion**:
+A future governed operation that would create a Vault Asset from a verified Source Capture Asset. It is intentionally absent from v2 rather than being hidden inside a Markdown operation.
+_Avoid_: Copy attachment, embed creation
 
 **Governance Kernel**:
 The deterministic boundary that validates, plans, applies, commits, recovers, and indexes vault changes.
@@ -52,6 +68,10 @@ _Avoid_: Move, cross-vault transaction
 **Semantic Transaction**:
 A bounded, reviewable set of interlinked knowledge changes containing one Write Authorization Snapshot and zero or more items of Transaction Evidence.
 _Avoid_: Batch edit, import
+
+**Transaction Receipt**:
+A Git-tracked, request-digest-bound record written by the shared Mutation Executor. It proves the exact mutation reached the applied transaction and allows retries to distinguish an active transaction from an already committed request without running a second write state machine.
+_Avoid_: Completion flag, cache marker
 
 **Write Authorization Snapshot**:
 An immutable, transaction-local record of the user request or current Vault policy under which an agent proposes semantic writes. The orchestrator supplies it and the Governance Kernel records and constrains it; it is audit metadata, not an authenticated credential or reusable permission. Deterministic kernel operations such as capture acceptance, migration, evaluation-baseline recording, and index refresh do not acquire one merely because they write state.
@@ -94,7 +114,7 @@ The knowledge purpose of a note, which determines the graph and provenance invar
 _Avoid_: Folder, file type
 
 **Quality Record**:
-A versioned, retrieval-excluded artifact under `.vault-pr/quality/` containing Quality Findings or evaluation outcomes. It may provide Transaction Evidence for autonomous repair but never grants write authority by itself.
+A versioned, retrieval-excluded artifact under `.vault-pr/quality/` containing eligible deterministic Quality Findings or evaluation outcomes. A diagnostic Quality Finding is recorded only when an agent will use it to propose autonomous repair. A Quality Record may provide Transaction Evidence but never grants write authority by itself.
 _Avoid_: Temporary report, knowledge note
 
 **Autonomous Repair Policy**:

@@ -6,14 +6,13 @@ only the task evidence. Role output packets use `maintainer_result`,
 `quality_assessment`, or `semantic_review` and additionally identify the fresh
 instance and its closed-vocabulary decision.
 
-Every input packet contains:
+Every input packet contains the same identity envelope:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": "<packet-family version>",
   "packet_type": "quality_assessment_input | semantic_review_input",
   "packet_id": "pkt_<sha256-prefix>",
-  "created_at": "RFC3339 timestamp",
   "input_sha256": "64 lowercase hexadecimal characters",
   "payload": {
     "evidence": [],
@@ -22,7 +21,12 @@ Every input packet contains:
 }
 ```
 
-`input_sha256` is the SHA-256 of canonical JSON for `payload` alone. The packet
+The current Quality Assessment packet family is v1. The current Semantic
+Review packet and assessment family is v2.
+
+`input_sha256` is the SHA-256 of canonical JSON for `payload` alone. Semantic
+Review Packets intentionally contain no current timestamp, so the Kernel can
+regenerate the exact packet during check, review, and apply. The packet
 ID is derived from the same digest, so a receiver can recompute both using only
 the packet it received.
 
@@ -34,6 +38,7 @@ canonical packet input, prefixed with `pkt_`. Evidence entries use Vault-relativ
 paths, case IDs, source IDs, content hashes, or metric IDs; they never contain
 credentials, full private source text, absolute paths, or hidden conversation.
 
+Each packet family versions independently; Plan v2 does not imply packet v2.
 The orchestrator rejects unknown schema versions, packet types, status values,
 missing hashes, duplicate evidence identities, absolute or escaping paths, and a
 review packet whose content hashes differ from the plan being decided. Packet

@@ -24,7 +24,11 @@ proposed files, or assess the finding that initiated it.
 
 ## Output
 
-Return one `semantic_review` packet containing packet ID, reviewer instance ID,
-`approve` or `reject`, ordered reasons, checked risks, evidence hashes, and
-unassessed items. The Vault Maintainer validates the packet and records the exact
-decision through `vault-pr review`.
+Return one closed `semantic_review` assessment containing packet ID and input
+hash, fresh `instance_id`, `approve` or `reject`, the required judgment map,
+structured reasons with packet evidence references, and explicit `unassessed`
+judgments. Approval must pass every required judgment and leave nothing
+unassessed. Every judgment must give a non-empty reason and cite packet
+evidence. Rejection may stop early, but the assessed and unassessed sets must
+still cover the complete rubric. The Vault Maintainer records the file through
+`vault-pr review <plan> --assessment <file>`.

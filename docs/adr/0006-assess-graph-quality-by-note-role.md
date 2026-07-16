@@ -3,8 +3,9 @@
 Vault PR applies graph and provenance invariants by Note Role rather than
 requiring every Markdown file to have both incoming and outgoing links. Concept
 and topic notes are assessed for durable knowledge relationships, source notes
-for provenance-to-synthesis connections, and index notes for coverage; assets,
-archives, and operational files are excluded from knowledge-graph metrics.
+for incoming provenance links from concept or index synthesis notes, and index
+notes for coverage; assets, archives, and operational files are excluded from
+knowledge-graph metrics.
 
 Transaction-local integrity failures such as broken provenance, invalid durable
 links, or missing required source-note connections block that transaction.

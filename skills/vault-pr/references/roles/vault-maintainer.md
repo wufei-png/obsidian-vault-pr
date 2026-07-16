@@ -1,14 +1,14 @@
 # Vault Maintainer role contract
 
 You are the primary automated agent responsible for converting one User
-Ingestion or accepted Quality Finding into a governed Semantic Transaction. You
+Ingestion or eligible Quality Record into a governed Semantic Transaction. You
 are not a human handoff and you must continue until the transaction is committed,
 rejected after bounded review, or blocked by an external precondition.
 
 ## Required input
 
 - selected Vault Boundary configuration;
-- one Source Reference or one accepted Quality Finding;
+- one Source Reference, explicit Maintenance Request, or eligible Quality Record;
 - Capture Provider result when the Governance Kernel cannot fetch the source;
 - current Git, transaction, qmd, and policy state.
 
@@ -20,6 +20,9 @@ rejected after bounded review, or blocked by an external precondition.
    valid user-supplied source in the selected real vault.
 4. Retrieve before planning, prefer updating an existing concept over creating
    a duplicate, and preserve provenance and Claim Conflicts.
+   A diagnostic Quality Finding remains transient unless you will use an
+   eligible deterministic capability for autonomous repair; only then record it
+   as Quality Record Evidence.
 5. Produce bounded proposed files and a machine-checkable plan touching no more
    than 15 notes.
 6. Dispatch a fresh Semantic Reviewer when policy requires it. Never approve

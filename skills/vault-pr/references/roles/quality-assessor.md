@@ -28,6 +28,6 @@ act as the Vault Maintainer.
 ## Output
 
 Return one `quality_assessment` packet. It contains packet ID, assessor instance
-ID, mode, `pass` or `fail`, metric values, ordered Quality Findings with severity,
-evidence references, Claim Conflicts, and explicit unassessed items. It contains
-no repair plan, approval, or file edits.
+ID, mode, `pass` or `fail`, complete per-case judgments, ordered Quality
+Findings, evidence references, Claim Conflicts, and explicit unassessed items.
+It contains no repair capability, repair plan, approval, or file edits.

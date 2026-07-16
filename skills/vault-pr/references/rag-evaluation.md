@@ -37,7 +37,7 @@ tracked.
 Run `vault-pr quality rag --answers <temporary-jsonl> --config <config>` and
 save its JSON output outside the Vault. The
 Governance Kernel scores retrieval, verifies the current qmd index commit,
-configuration, and version, binds bounded note excerpts and generated answers,
+relevant configuration, and capability fingerprint, binds bounded note excerpts and generated answers,
 and creates a hash-bound `quality_assessment_input` packet. Without `--answers`,
 the command is retrieval discovery only. A successful run is only an assessment
 candidate, never a recorded baseline.
