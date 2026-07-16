@@ -651,16 +651,143 @@ else:
             self.assertTrue(created.exists())
             self.assertTrue(active.exists())
 
-    def test_refuses_staged_affected_path(self) -> None:
+    def test_refuses_incompletely_staged_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault, existing, created, active = self.prepare_interrupted(Path(temp_dir))
             subprocess.run(["git", "-C", str(vault), "add", str(existing)], check=True)
 
-            with self.assertRaisesRegex(RecoveryError, "staged vault changes"):
+            with self.assertRaisesRegex(
+                RecoveryError, "staged paths do not match"
+            ):
                 recover_interrupted_transaction(vault, vault / ".git")
 
             self.assertEqual(existing.read_bytes(), b"updated\n")
             self.assertTrue(created.exists())
+            self.assertTrue(active.exists())
+
+    def test_recovers_exact_transaction_staged_before_commit_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, existing, created, active = self.prepare_interrupted(Path(temp_dir))
+            mark_active_applied(active)
+            subprocess.run(
+                ["git", "-C", str(vault), "add", "--", str(existing), str(created)],
+                check=True,
+            )
+
+            result = recover_interrupted_transaction(vault, vault / ".git")
+
+            self.assertEqual(result["status"], "recovered")
+            self.assertEqual(existing.read_bytes(), b"original\n")
+            self.assertFalse(created.exists())
+            self.assertFalse(active.exists())
+            status = subprocess.run(
+                ["git", "-C", str(vault), "status", "--porcelain=v1"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
+
+    def test_recovers_staged_rename_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, source = self.make_vault(Path(temp_dir))
+            destination = source.with_name("renamed.md")
+            active = prepare_active_transaction(
+                vault=vault,
+                git_dir=vault / ".git",
+                transaction_id="txn_staged_rename_fixture",
+                transaction_sha256="b" * 64,
+                affected={source, destination},
+                expected_original_sha256={
+                    source: digest(b"original\n"),
+                    destination: None,
+                },
+                expected_original_mode={source: "100644", destination: None},
+                final_sha256={
+                    source: None,
+                    destination: digest(b"original\n"),
+                },
+                final_mode={source: None, destination: "100644"},
+            )
+            source.rename(destination)
+            mark_active_applied(active)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "add",
+                    "-A",
+                    "--",
+                    str(source),
+                    str(destination),
+                ],
+                check=True,
+            )
+
+            result = recover_interrupted_transaction(vault, vault / ".git")
+
+            self.assertEqual(result["status"], "recovered")
+            self.assertEqual(source.read_bytes(), b"original\n")
+            self.assertFalse(destination.exists())
+            status = subprocess.run(
+                ["git", "-C", str(vault), "status", "--porcelain=v1"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
+
+    def test_refused_recovery_preserves_exact_transaction_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, existing, created, active = self.prepare_interrupted(Path(temp_dir))
+            mark_active_applied(active)
+            subprocess.run(
+                ["git", "-C", str(vault), "add", "--", str(existing), str(created)],
+                check=True,
+            )
+            (vault / "unrelated.md").write_text("human edit\n")
+
+            with self.assertRaisesRegex(RecoveryError, "unrelated vault changes"):
+                recover_interrupted_transaction(vault, vault / ".git")
+
+            staged = subprocess.run(
+                ["git", "-C", str(vault), "diff", "--cached", "--name-only"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                set(staged.stdout.splitlines()),
+                {"knowledgebase/existing.md", "knowledgebase/created.md"},
+            )
+            self.assertTrue(active.exists())
+
+    def test_failed_commit_unstages_transaction_paths_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, _existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            mark_active_applied(active)
+            hook = vault / ".git" / "hooks" / "pre-commit"
+            hook.write_text("#!/bin/sh\nexit 1\n")
+            hook.chmod(0o755)
+
+            with self.assertRaisesRegex(RecoveryError, "unable to commit"):
+                commit_applied_transaction(
+                    vault,
+                    vault / ".git",
+                    "txn_recovery_fixture",
+                    "Blocked fixture",
+                )
+
+            staged = subprocess.run(
+                ["git", "-C", str(vault), "diff", "--cached", "--name-only"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(staged.stdout, "")
             self.assertTrue(active.exists())
 
     def test_removes_incomplete_prepare_only_when_vault_is_clean(self) -> None:

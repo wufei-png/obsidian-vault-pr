@@ -6,10 +6,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vault_pr.git import vault_write_lock
+from vault_pr.git import GitSafetyError, vault_write_lock
 
 
 class GitLockTests(unittest.TestCase):
+    def test_rejects_symlinked_lock_without_overwriting_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            outside = root / "outside.txt"
+            outside.write_text("preserve\n")
+            (vault / ".git" / "vault-pr.lock").symlink_to(outside)
+
+            with self.assertRaisesRegex(GitSafetyError, "symbolic link"):
+                with vault_write_lock(vault.resolve()):
+                    pass
+
+            self.assertEqual(outside.read_text(), "preserve\n")
+
     def test_kernel_releases_lock_after_writer_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir) / "vault"

@@ -98,6 +98,46 @@ class QmdRunner:
         raise AssertionError(f"unexpected qmd command: {command}")
 
 
+class FailingQmdRunner(QmdRunner):
+    def __init__(
+        self,
+        vault: Path,
+        *,
+        collection_path: Path | None = None,
+        fail_collection_paths: set[Path] | None = None,
+        fail_context_values: set[str] | None = None,
+    ) -> None:
+        super().__init__(vault, collection_path=collection_path)
+        self.fail_collection_paths = {
+            path.resolve() for path in (fail_collection_paths or set())
+        }
+        self.fail_context_values = fail_context_values or set()
+
+    def __call__(
+        self, command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        args = command[3:]
+        if (
+            args[:2] == ["collection", "add"]
+            and Path(args[2]).resolve() in self.fail_collection_paths
+        ):
+            self.calls.append(command)
+            self.collection_path = Path(args[2]).resolve()
+            self.mask = args[args.index("--mask") + 1]
+            return subprocess.CompletedProcess(
+                command, 1, "", f"injected add failure: {args[2]}"
+            )
+        if (
+            args[:2] == ["context", "add"]
+            and args[-1] in self.fail_context_values
+        ):
+            self.calls.append(command)
+            return subprocess.CompletedProcess(
+                command, 1, "", f"injected context failure: {args[-1]}"
+            )
+        return super().__call__(command, **kwargs)
+
+
 class IndexTests(unittest.TestCase):
     def make_vault(self, root: Path) -> Path:
         vault = root / "vault"
@@ -127,7 +167,8 @@ class IndexTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "drift")
-            self.assertEqual(runner.collection_path, vault.resolve())
+            assert runner.collection_path is not None
+            self.assertEqual(runner.collection_path.resolve(), vault.resolve())
             self.assertEqual(runner.context, "Technical notes.")
 
     def test_reconcile_replaces_wrong_path(self) -> None:
@@ -157,6 +198,119 @@ class IndexTests(unittest.TestCase):
 
             self.assertEqual(result["actions"][0]["action"], "update_context")
             self.assertEqual(runner.context, "Technical notes.")
+
+    def test_failed_collection_replace_restores_original_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            wrong = vault / "wrong"
+            wrong.mkdir()
+            runner = FailingQmdRunner(
+                vault,
+                collection_path=wrong,
+                fail_collection_paths={vault},
+            )
+
+            with self.assertRaisesRegex(IndexUpdateError, "injected add failure"):
+                reconcile_qmd_collection(
+                    make_config(vault), runner=runner, executable="qmd"
+                )
+
+            self.assertEqual(runner.collection_path, wrong.resolve())
+            self.assertEqual(runner.mask, "**/*.md")
+            self.assertEqual(runner.context, "Technical notes.")
+
+    def test_failed_collection_create_removes_partial_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            runner = FailingQmdRunner(
+                vault,
+                fail_collection_paths={vault},
+            )
+
+            with self.assertRaisesRegex(IndexUpdateError, "injected add failure"):
+                reconcile_qmd_collection(
+                    make_config(vault), runner=runner, executable="qmd"
+                )
+
+            self.assertIsNone(runner.collection_path)
+            self.assertIsNone(runner.context)
+            self.assertTrue(
+                any(
+                    call[3:6] == ["collection", "remove", "notebook-tech"]
+                    for call in runner.calls
+                )
+            )
+
+    def test_failed_context_replace_restores_original_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            runner = FailingQmdRunner(
+                vault,
+                collection_path=vault,
+                fail_context_values={"Technical notes."},
+            )
+            runner.context = "Old context."
+
+            with self.assertRaisesRegex(IndexUpdateError, "injected context failure"):
+                reconcile_qmd_collection(
+                    make_config(vault), runner=runner, executable="qmd"
+                )
+
+            assert runner.collection_path is not None
+            self.assertEqual(runner.collection_path.resolve(), vault.resolve())
+            self.assertEqual(runner.context, "Old context.")
+
+    def test_failed_new_collection_context_removes_partial_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            runner = FailingQmdRunner(
+                vault,
+                fail_context_values={"Technical notes."},
+            )
+
+            with self.assertRaisesRegex(IndexUpdateError, "injected context failure"):
+                reconcile_qmd_collection(
+                    make_config(vault), runner=runner, executable="qmd"
+                )
+
+            self.assertIsNone(runner.collection_path)
+            self.assertIsNone(runner.context)
+
+    def test_failed_replacement_context_restores_original_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            wrong = vault / "wrong"
+            wrong.mkdir()
+            runner = FailingQmdRunner(
+                vault,
+                collection_path=wrong,
+                fail_context_values={"Technical notes."},
+            )
+            runner.context = "Old context."
+
+            with self.assertRaisesRegex(IndexUpdateError, "injected context failure"):
+                reconcile_qmd_collection(
+                    make_config(vault), runner=runner, executable="qmd"
+                )
+
+            self.assertEqual(runner.collection_path, wrong.resolve())
+            self.assertEqual(runner.context, "Old context.")
+
+    def test_reports_primary_and_compensation_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            wrong = vault / "wrong"
+            wrong.mkdir()
+            runner = FailingQmdRunner(
+                vault,
+                collection_path=wrong,
+                fail_collection_paths={vault, wrong},
+            )
+
+            with self.assertRaisesRegex(IndexUpdateError, "rollback failed"):
+                reconcile_qmd_collection(
+                    make_config(vault), runner=runner, executable="qmd"
+                )
 
     def test_reconcile_adds_missing_context_without_removing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import ConfigError, IndexSpec, index_spec, load_vault_path
+from .files import atomic_replace_text
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .recovery import list_active_transactions
 
@@ -119,6 +120,60 @@ def _root_context(context_output: str, collection: str) -> str | None:
     return actual or None
 
 
+def _qmd_failure(result: subprocess.CompletedProcess[str]) -> str:
+    return (result.stderr or result.stdout).strip()
+
+
+def _restore_qmd_state(
+    *,
+    runner: Runner,
+    qmd: str,
+    index_name: str,
+    collection: str,
+    original_state: CollectionState | None,
+    original_context: str | None,
+    remove_current: bool,
+    restore_collection: bool,
+    restore_context: bool,
+) -> list[str]:
+    """Best-effort compensation for destructive qmd reconciliation steps."""
+    failures: list[str] = []
+    if remove_current:
+        removed = _run_qmd(
+            runner, qmd, index_name, "collection", "remove", collection
+        )
+        if removed.returncode != 0:
+            failures.append("remove replacement: " + _qmd_failure(removed))
+    if restore_collection and original_state is not None:
+        restored = _run_qmd(
+            runner,
+            qmd,
+            index_name,
+            "collection",
+            "add",
+            str(original_state.path),
+            "--name",
+            collection,
+            "--mask",
+            original_state.mask,
+        )
+        if restored.returncode != 0:
+            failures.append("restore collection: " + _qmd_failure(restored))
+    if restore_context and original_context is not None:
+        restored_context = _run_qmd(
+            runner,
+            qmd,
+            index_name,
+            "context",
+            "add",
+            f"qmd://{collection}",
+            original_context,
+        )
+        if restored_context.returncode != 0:
+            failures.append("restore context: " + _qmd_failure(restored_context))
+    return failures
+
+
 def reconcile_qmd_collection(
     config: dict[str, Any],
     *,
@@ -141,9 +196,12 @@ def reconcile_qmd_collection(
 
     actions: list[dict[str, str]] = []
     shown = _run_qmd(runner, qmd, index_name, "collection", "show", spec.collection)
+    original_state: CollectionState | None = None
     if shown.returncode == 0:
-        state = _parse_collection_show(shown.stdout)
-        definition_ok = state.path == spec.root_dir and state.mask == spec.mask
+        original_state = _parse_collection_show(shown.stdout)
+        definition_ok = (
+            original_state.path == spec.root_dir and original_state.mask == spec.mask
+        )
         action = "none" if definition_ok else "replace"
     elif "Collection not found" in (shown.stderr or shown.stdout):
         action = "create"
@@ -161,65 +219,89 @@ def reconcile_qmd_collection(
         actions.append({"action": "update_context", "collection": spec.collection})
 
     if not check_only:
-        if action == "replace":
-            removed = _run_qmd(
-                runner, qmd, index_name, "collection", "remove", spec.collection
-            )
-            if removed.returncode != 0:
-                detail = (removed.stderr or removed.stdout).strip()
-                raise IndexUpdateError(
-                    f"unable to replace qmd collection {spec.collection}: {detail}"
+        original_removed = False
+        collection_add_attempted = False
+        original_context_removed = False
+        try:
+            if action == "replace":
+                removed = _run_qmd(
+                    runner, qmd, index_name, "collection", "remove", spec.collection
                 )
-        if action in {"create", "replace"}:
-            added = _run_qmd(
-                runner,
-                qmd,
-                index_name,
-                "collection",
-                "add",
-                str(spec.root_dir),
-                "--name",
-                spec.collection,
-                "--mask",
-                spec.mask,
-            )
-            if added.returncode != 0:
-                detail = (added.stderr or added.stdout).strip()
-                raise IndexUpdateError(
-                    f"unable to create qmd collection {spec.collection}: {detail}"
+                if removed.returncode != 0:
+                    raise IndexUpdateError(
+                        f"unable to replace qmd collection {spec.collection}: "
+                        f"{_qmd_failure(removed)}"
+                    )
+                original_removed = True
+            if action in {"create", "replace"}:
+                collection_add_attempted = True
+                added = _run_qmd(
+                    runner,
+                    qmd,
+                    index_name,
+                    "collection",
+                    "add",
+                    str(spec.root_dir),
+                    "--name",
+                    spec.collection,
+                    "--mask",
+                    spec.mask,
                 )
-        should_set_context = bool(
-            spec.context and (not context_ok or action in {"create", "replace"})
-        )
-        if should_set_context and spec.context:
-            if action == "none" and current_context is not None:
-                removed_context = _run_qmd(
+                if added.returncode != 0:
+                    raise IndexUpdateError(
+                        f"unable to create qmd collection {spec.collection}: "
+                        f"{_qmd_failure(added)}"
+                    )
+            should_set_context = bool(
+                spec.context and (not context_ok or action in {"create", "replace"})
+            )
+            if should_set_context and spec.context:
+                if action == "none" and current_context is not None:
+                    removed_context = _run_qmd(
+                        runner,
+                        qmd,
+                        index_name,
+                        "context",
+                        "rm",
+                        f"qmd://{spec.collection}",
+                    )
+                    if removed_context.returncode != 0:
+                        raise IndexUpdateError(
+                            f"unable to replace qmd context {spec.collection}: "
+                            f"{_qmd_failure(removed_context)}"
+                        )
+                    original_context_removed = True
+                context_added = _run_qmd(
                     runner,
                     qmd,
                     index_name,
                     "context",
-                    "rm",
+                    "add",
                     f"qmd://{spec.collection}",
+                    spec.context,
                 )
-                if removed_context.returncode != 0:
-                    detail = (removed_context.stderr or removed_context.stdout).strip()
+                if context_added.returncode != 0:
                     raise IndexUpdateError(
-                        f"unable to replace qmd context {spec.collection}: {detail}"
+                        f"unable to set qmd context {spec.collection}: "
+                        f"{_qmd_failure(context_added)}"
                     )
-            context_added = _run_qmd(
-                runner,
-                qmd,
-                index_name,
-                "context",
-                "add",
-                f"qmd://{spec.collection}",
-                spec.context,
+        except IndexUpdateError as exc:
+            rollback_failures = _restore_qmd_state(
+                runner=runner,
+                qmd=qmd,
+                index_name=index_name,
+                collection=spec.collection,
+                original_state=original_state,
+                original_context=current_context,
+                remove_current=collection_add_attempted,
+                restore_collection=original_removed,
+                restore_context=original_removed or original_context_removed,
             )
-            if context_added.returncode != 0:
-                detail = (context_added.stderr or context_added.stdout).strip()
+            if rollback_failures:
                 raise IndexUpdateError(
-                    f"unable to set qmd context {spec.collection}: {detail}"
-                )
+                    f"{exc}; rollback failed: " + "; ".join(rollback_failures)
+                ) from exc
+            raise
 
     return {
         "status": "drift" if actions else "aligned",
@@ -234,11 +316,11 @@ def _write_status(vault: Path, status: dict[str, Any]) -> None:
     if git_dir.returncode != 0:
         raise IndexUpdateError("unable to resolve vault Git directory")
     status_path = Path(git_dir.stdout.strip()) / "vault-pr-index-status.json"
-    temporary_path = status_path.with_suffix(".tmp")
-    temporary_path.write_text(
-        json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    atomic_replace_text(
+        status_path,
+        json.dumps(status, ensure_ascii=False, indent=2) + "\n",
+        mode=0o600,
     )
-    temporary_path.replace(status_path)
 
 
 def _metadata(config: dict[str, Any], vault: Path, qmd_version: str) -> dict[str, str]:

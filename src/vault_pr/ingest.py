@@ -11,10 +11,8 @@ import re
 import shutil
 import socket
 import ssl
-import subprocess
 import sys
 import tempfile
-import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -35,6 +33,7 @@ from .config import (
     source_archive_dir,
     source_notes_dir,
 )
+from .errors import IngestError
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .process import (
     LimitedProcessResult,
@@ -47,10 +46,20 @@ from .recovery import (
     prepare_active_transaction,
     rollback_active_transaction,
 )
-
-
-class IngestError(RuntimeError):
-    """Raised when a source cannot be safely prepared."""
+from .source_files import (
+    copy_snapshot_assets as _copy_snapshot_assets,
+    materialize_regular_tree as _materialize_regular_tree,
+    read_bounded_regular_file as _read_bounded_regular_file,
+    sha256_regular_file_identity as _sha256_regular_file_identity,
+)
+from .source_note import (
+    build_source_note,
+    normalize_title,
+    safe_note_filename,
+    source_note_candidates as _source_note_candidates,
+    source_note_path,
+    versioned_source_note_path as _versioned_source_note_path,
+)
 
 
 def _git_dir(vault: Path) -> Path:
@@ -408,15 +417,12 @@ def snapshot_source(
 ) -> FetchedSource:
     """Load a browser/tool-produced snapshot without storing authentication data."""
     canonical = canonicalize_url(url)
-    expanded_snapshot = snapshot_path.expanduser()
-    if expanded_snapshot.is_symlink():
-        raise IngestError("snapshot file must not be a symbolic link")
-    snapshot = expanded_snapshot.resolve()
-    if not snapshot.is_file():
-        raise IngestError(f"snapshot file does not exist: {snapshot}")
-    body = snapshot.read_bytes()
-    if len(body) > max_bytes:
-        raise IngestError(f"snapshot exceeds {max_bytes} bytes")
+    snapshot = Path(os.path.abspath(snapshot_path.expanduser()))
+    body = _read_bounded_regular_file(
+        snapshot,
+        max_bytes=max_bytes,
+        label="snapshot",
+    )
 
     suffix = snapshot.suffix.lower()
     content_types = {
@@ -438,40 +444,6 @@ def snapshot_source(
         captured_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         adapter=adapter,
     )
-
-
-def _copy_snapshot_assets(
-    snapshot_path: Path,
-    output_dir: Path,
-    *,
-    max_files: int,
-    max_bytes: int,
-) -> dict[str, str]:
-    """Copy a converter's sibling image directory and return content hashes."""
-    images = snapshot_path.parent / "images"
-    if not images.is_dir():
-        return {}
-    if images.is_symlink() or any(path.is_symlink() for path in images.rglob("*")):
-        raise IngestError("snapshot image directory must not contain symlinks")
-    assets = sorted(path for path in images.rglob("*") if path.is_file())
-    if len(assets) > max_files:
-        raise IngestError(f"snapshot assets exceed the {max_files}-file limit")
-    total_bytes = sum(path.stat().st_size for path in assets)
-    if total_bytes > max_bytes:
-        raise IngestError(f"snapshot assets exceed the {max_bytes}-byte limit")
-    if not assets:
-        return {}
-    destination = output_dir / "images"
-    for asset in assets:
-        relative = asset.relative_to(images)
-        copied_asset = destination / relative
-        copied_asset.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(asset, copied_asset)
-    hashes: dict[str, str] = {}
-    for asset in sorted(path for path in destination.rglob("*") if path.is_file()):
-        relative = str(asset.relative_to(output_dir))
-        hashes[relative] = hashlib.sha256(asset.read_bytes()).hexdigest()
-    return hashes
 
 
 def extract_source(
@@ -497,7 +469,7 @@ def extract_source(
 
     if is_pdf:
         try:
-            extraction = subprocess.run(
+            extraction = run_limited_process(
                 [
                     sys.executable,
                     "-m",
@@ -513,12 +485,11 @@ def extract_source(
                     "--cpu-seconds",
                     str(extraction_timeout_seconds),
                 ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=extraction_timeout_seconds,
+                timeout_seconds=extraction_timeout_seconds,
+                max_memory_bytes=max_extraction_memory_bytes,
+                max_file_bytes=max(max_extracted_characters * 4, 16_384),
             )
-        except subprocess.TimeoutExpired as exc:
+        except LimitedProcessTimeout as exc:
             raise IngestError(
                 f"PDF extraction exceeded {extraction_timeout_seconds} seconds"
             ) from exc
@@ -617,24 +588,20 @@ def extract_source(
     )
 
 
-def safe_note_filename(title: str, url: str) -> str:
-    """Create a stable, readable Obsidian filename for a source URL."""
-    normalized = unicodedata.normalize("NFKC", title).strip()
-    normalized = re.sub(r'[\\/:*?"<>|#^\[\]]+', "-", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip(" .-")
-    normalized = normalized[:80].rstrip(" .-") or "Untitled source"
-    url_id = hashlib.sha256(url.encode()).hexdigest()[:8]
-    return f"{normalized}--{url_id}.md"
+def _artifact_relative_path(raw: str, label: str) -> Path:
+    path = Path(raw)
+    if not raw or path.is_absolute() or ".." in path.parts or path == Path("."):
+        raise IngestError(f"{label} path escapes the capture directory")
+    return path
 
 
-def normalize_title(title: str) -> str:
-    """Collapse untrusted title text into one bounded display line."""
-    normalized = unicodedata.normalize("NFKC", title)
-    normalized = " ".join(normalized.split())
-    normalized = "".join(
-        character for character in normalized if character.isprintable()
-    )
-    return normalized[:200].strip() or "Untitled source"
+def _staged_artifact_path(root: Path, relative: Path, label: str) -> Path:
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise IngestError(f"{label} traverses a symbolic link")
+    return current
 
 
 def _source_note_has_id(path: Path, source_id: str) -> bool:
@@ -642,126 +609,6 @@ def _source_note_has_id(path: Path, source_id: str) -> bool:
         return source_note_has_id(path, source_id)
     except CaptureError as exc:
         raise IngestError(str(exc)) from exc
-
-
-def _source_note_candidates(note_dir: Path, url: str) -> list[Path]:
-    url_id = hashlib.sha256(url.encode()).hexdigest()[:8]
-    if not note_dir.is_dir():
-        return []
-    candidates = sorted(
-        {*note_dir.glob(f"*--{url_id}.md"), *note_dir.glob(f"*--{url_id}--*.md")}
-    )
-    for candidate in candidates:
-        if candidate.is_symlink() or not candidate.is_file():
-            raise IngestError(
-                f"source note candidate is not a regular file: {candidate}"
-            )
-    return candidates
-
-
-def _versioned_source_note_path(
-    note_dir: Path, title: str, url: str, version: str
-) -> Path:
-    base = safe_note_filename(title, url).removesuffix(".md")
-    path = note_dir / f"{base}--{version}.md"
-    if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise IngestError(f"versioned source note path is occupied: {path}")
-    return path
-
-
-def source_note_path(
-    note_dir: Path, title: str, url: str, source_id: str | None = None
-) -> Path:
-    """Resolve one visible note per immutable version of a source URL."""
-    url_id = hashlib.sha256(url.encode()).hexdigest()[:8]
-    base_notes = sorted(note_dir.glob(f"*--{url_id}.md")) if note_dir.is_dir() else []
-    if source_id is None:
-        if len(base_notes) > 1:
-            raise IngestError(f"multiple source notes share URL id {url_id}")
-        return (
-            base_notes[0] if base_notes else note_dir / safe_note_filename(title, url)
-        )
-
-    candidates = _source_note_candidates(note_dir, url)
-    matching: list[Path] = []
-    for candidate in candidates:
-        if _source_note_has_id(candidate, source_id):
-            matching.append(candidate)
-    if len(matching) > 1:
-        raise IngestError(f"multiple source notes contain source id {source_id}")
-    if matching:
-        return matching[0]
-    if not candidates:
-        return note_dir / safe_note_filename(title, url)
-    version = source_id.removeprefix("src_")
-    versioned = _versioned_source_note_path(note_dir, title, url, version)
-    if versioned.exists() or versioned.is_symlink():
-        raise IngestError(
-            f"versioned source note path is already occupied: {versioned}"
-        )
-    return versioned
-
-
-def _yaml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
-def build_source_note(
-    *,
-    title: str,
-    source_id: str,
-    fetched: FetchedSource,
-    extracted: ExtractedSource,
-    raw_sha256: str,
-    extracted_sha256: str,
-    note_path: Path,
-    capture_dir: Path,
-) -> str:
-    """Build a valid Obsidian source-note draft with provenance properties."""
-    raw_link = os.path.relpath(capture_dir / extracted.raw_filename, note_path.parent)
-    extracted_link = os.path.relpath(
-        capture_dir / extracted.extracted_filename, note_path.parent
-    )
-    return "\n".join(
-        [
-            "---",
-            f"title: {_yaml_string(title)}",
-            "type: source",
-            "status: captured",
-            f"source_url: {_yaml_string(fetched.final_url)}",
-            f"source_id: {_yaml_string(source_id)}",
-            f"source_sha256: {_yaml_string(raw_sha256)}",
-            f"extracted_sha256: {_yaml_string(extracted_sha256)}",
-            f"captured_at: {_yaml_string(fetched.captured_at)}",
-            f"extractor: {_yaml_string(extracted.extractor)}",
-            f"extractor_version: {_yaml_string(extracted.extractor_version)}",
-            "tags:",
-            "  - source/article",
-            "aliases: []",
-            "---",
-            "",
-            f"# {title}",
-            "",
-            "> [!info] 来源记录",
-            f"> - 原始链接：[{fetched.final_url}]({fetched.final_url})",
-            f"> - 捕获时间：{fetched.captured_at}",
-            f"> - 原始快照：`{raw_link}`",
-            f"> - 提取正文：`{extracted_link}`",
-            "",
-            "## 摘要",
-            "",
-            "> [!todo] 等待 Agent 完成语义整理并更新相关概念笔记。",
-            "",
-            "## 关键观点",
-            "",
-            "- 待整理。",
-            "",
-            "## 与既有知识的关系",
-            "",
-            "- 待检索并建立 wikilink。",
-            "",
-        ]
-    )
 
 
 def ingest_url(
@@ -867,21 +714,59 @@ def ingest_url(
             max_extracted_characters=max_extracted_characters,
             max_extraction_memory_bytes=max_extraction_memory_bytes,
         )
+        raw_relative = _artifact_relative_path(
+            extracted.raw_filename, "raw artifact"
+        )
+        extracted_relative = _artifact_relative_path(
+            extracted.extracted_filename, "extracted artifact"
+        )
+        if raw_relative == extracted_relative:
+            raise IngestError(
+                f"capture has duplicate artifact path: {raw_relative}"
+            )
+        if Path("manifest.json") in {raw_relative, extracted_relative}:
+            raise IngestError("capture artifacts must not occupy manifest.json")
+        extracted = replace(
+            extracted,
+            raw_filename=raw_relative.as_posix(),
+            extracted_filename=extracted_relative.as_posix(),
+        )
+        raw_path = _staged_artifact_path(temp_dir, raw_relative, "raw artifact")
+        extracted_path = _staged_artifact_path(
+            temp_dir, extracted_relative, "extracted artifact"
+        )
+        raw_sha256, raw_identity = _sha256_regular_file_identity(
+            raw_path, "raw artifact"
+        )
+        extracted_sha256, extracted_identity = _sha256_regular_file_identity(
+            extracted_path, "extracted artifact"
+        )
+        if raw_identity == extracted_identity:
+            raise IngestError(
+                "capture has physically duplicate raw and extracted artifacts"
+            )
         asset_hashes = (
             _copy_snapshot_assets(
                 effective_snapshot,
                 temp_dir,
                 max_files=max_asset_files,
                 max_bytes=max_asset_bytes,
+                forbidden_identities={raw_identity, extracted_identity},
             )
             if effective_snapshot is not None and effective_adapter == "wechat"
             else {}
         )
+        duplicate_assets = sorted(
+            str(path)
+            for path in {raw_relative, extracted_relative}
+            if path.as_posix() in asset_hashes
+        )
+        if duplicate_assets:
+            raise IngestError(
+                "capture has duplicate artifact path: "
+                + ", ".join(duplicate_assets)
+            )
         title = normalize_title(title_override or extracted.title)
-        raw_path = temp_dir / extracted.raw_filename
-        extracted_path = temp_dir / extracted.extracted_filename
-        raw_sha256 = hashlib.sha256(raw_path.read_bytes()).hexdigest()
-        extracted_sha256 = hashlib.sha256(extracted_path.read_bytes()).hexdigest()
         identity_base = {
             "schema_version": 2,
             "requested_url": fetched.requested_url,
@@ -976,13 +861,17 @@ def ingest_url(
             "asset_sha256": asset_hashes,
             "artifacts": identity_payload["artifacts"],
         }
-        (temp_dir / "manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        for staged_file in temp_dir.rglob("*"):
-            if staged_file.is_file():
-                staged_file.chmod(0o644)
+        manifest_bytes = (
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+        (temp_dir / "manifest.json").write_bytes(manifest_bytes)
+        staged_hashes = {
+            raw_relative: raw_sha256,
+            extracted_relative: extracted_sha256,
+            **{Path(path): digest for path, digest in asset_hashes.items()},
+            Path("manifest.json"): hashlib.sha256(manifest_bytes).hexdigest(),
+        }
+        _materialize_regular_tree(temp_dir, staged_hashes)
 
         result = {
             "status": "planned",
@@ -1014,9 +903,7 @@ def ingest_url(
                 except CaptureError as exc:
                     raise IngestError(str(exc)) from exc
 
-            capture_files = [
-                path for path in sorted(temp_dir.rglob("*")) if path.is_file()
-            ]
+            capture_files = [temp_dir / path for path in sorted(staged_hashes)]
             affected: set[Path] = set()
             final_sha256: dict[Path, str | None] = {}
             final_mode: dict[Path, str | None] = {}
@@ -1056,22 +943,11 @@ def ingest_url(
             try:
                 if not capture_exists:
                     staged_capture = active_dir / "capture-staging"
-                    shutil.copytree(temp_dir, staged_capture)
-                    for staged_file in capture_files:
-                        relative = staged_file.relative_to(temp_dir)
-                        copied = staged_capture / relative
-                        destination = capture_dir / relative
-                        copied_sha256 = hashlib.sha256(copied.read_bytes()).hexdigest()
-                        copied_mode = (
-                            "100755" if copied.stat().st_mode & 0o111 else "100644"
-                        )
-                        if (
-                            copied_sha256 != final_sha256[destination]
-                            or copied_mode != final_mode[destination]
-                        ):
-                            raise IngestError(
-                                f"failed to verify staged capture file: {relative}"
-                            )
+                    _materialize_regular_tree(
+                        temp_dir,
+                        staged_hashes,
+                        destination=staged_capture,
+                    )
                     capture_dir.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(staged_capture, capture_dir)
 

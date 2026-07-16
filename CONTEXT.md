@@ -13,6 +13,10 @@ _Avoid_: Input, URL
 A Source Reference supplied with the intent that its validated knowledge be retained in the selected real Vault Boundary.
 _Avoid_: Canary, trial import
 
+**Ingestion Request**:
+A user's request to capture one Source Reference and integrate its validated knowledge into a selected Vault Boundary. When semantic writes are proposed, its bounded intent is recorded in the Semantic Transaction's Write Authorization Snapshot; the preceding deterministic capture remains provenance and Transaction Evidence.
+_Avoid_: Capture request, import command
+
 **Capture Provider**:
 An agent capability that resolves a Source Reference into a local Snapshot Bundle.
 _Avoid_: Downloader, vault adapter
@@ -22,7 +26,7 @@ An untrusted local primary document plus any sibling assets produced by a Captur
 _Avoid_: Imported note, capture
 
 **Source Capture**:
-The immutable, identity-bound archive accepted from a direct fetch or Snapshot Bundle.
+The immutable, identity-bound archive accepted from a direct fetch or Snapshot Bundle. It provides Transaction Evidence and never grants write authority by itself.
 _Avoid_: Download, cache
 
 **Governance Kernel**:
@@ -46,8 +50,20 @@ A reviewed, de-identified export from a more restricted Vault Boundary followed 
 _Avoid_: Move, cross-vault transaction
 
 **Semantic Transaction**:
-A bounded, reviewable set of interlinked knowledge changes derived from one Source Capture.
+A bounded, reviewable set of interlinked knowledge changes containing one Write Authorization Snapshot and zero or more items of Transaction Evidence.
 _Avoid_: Batch edit, import
+
+**Write Authorization Snapshot**:
+An immutable, transaction-local record of the user request or current Vault policy under which an agent proposes semantic writes. The orchestrator supplies it and the Governance Kernel records and constrains it; it is audit metadata, not an authenticated credential or reusable permission. Deterministic kernel operations such as capture acceptance, migration, evaluation-baseline recording, and index refresh do not acquire one merely because they write state.
+_Avoid_: Authorization token, permission credential, plan origin
+
+**Transaction Evidence**:
+A bounded, hash-verifiable item used to justify or review a proposed Semantic Transaction. A transaction may cite multiple evidence items, but evidence does not grant write authority.
+_Avoid_: Authorization snapshot, context, prompt
+
+**Maintenance Request**:
+A user's explicit request for an agent to change an existing Vault Boundary. When writes are proposed, it is represented by a minimal intent summary in the transaction's Write Authorization Snapshot rather than by the full conversation.
+_Avoid_: User prompt, chat transcript, repair ticket
 
 **Canary Scenario**:
 A repeatable representative source journey, normally run against a Fixture Vault, used to verify a capture route and its governed knowledge outcome.
@@ -70,7 +86,7 @@ A transient candidate returned by lexical or semantic retrieval that may inform 
 _Avoid_: Related note, graph edge
 
 **Quality Finding**:
-An evidence-backed observation about vault integrity, structure, or retrieval quality that does not by itself authorize a change.
+An evidence-backed observation about vault integrity, structure, or retrieval quality. It may remain diagnostic and does not by itself authorize autonomous repair.
 _Avoid_: Error, repair task
 
 **Note Role**:
@@ -78,8 +94,12 @@ The knowledge purpose of a note, which determines the graph and provenance invar
 _Avoid_: Folder, file type
 
 **Quality Record**:
-A versioned, retrieval-excluded artifact under `.vault-pr/quality/` containing Quality Findings or evaluation outcomes for that vault.
+A versioned, retrieval-excluded artifact under `.vault-pr/quality/` containing Quality Findings or evaluation outcomes. It may provide Transaction Evidence for autonomous repair but never grants write authority by itself.
 _Avoid_: Temporary report, knowledge note
+
+**Autonomous Repair Policy**:
+A current Vault Boundary policy that permits an agent to propose repairs from eligible Git-tracked Quality Records without a new user request. The transaction records the applicable policy in its Write Authorization Snapshot; the referenced Quality Record remains Transaction Evidence.
+_Avoid_: Quality finding authorization, self-approval, automatic fix flag
 
 **Claim Conflict**:
 Two provenance-bound claims that cannot both hold under the same stated scope and time; recording the conflict does not decide which claim is correct.
@@ -102,9 +122,13 @@ A read-only agent role that produces Quality Findings, Claim Conflicts, and RAG 
 _Avoid_: Auditor script, reviewer
 
 **Semantic Reviewer**:
-An independent agent role that approves or rejects an exact risk-bearing Semantic Transaction without planning or editing it.
+An independent agent role that approves or rejects an exact Semantic Transaction without planning or editing it.
 _Avoid_: Editor, second maintainer
 
 **Review Packet**:
 The immutable evidence, plan, proposed content, risk rubric, and identities needed for an independent semantic decision.
 _Avoid_: Prompt context, summary
+
+**Semantic Review Policy**:
+The Vault Boundary rule that either requires independent review for every Semantic Transaction or explicitly trusts the Vault Maintainer for transactions outside the risk-based rubric.
+_Avoid_: Review flag, approval toggle

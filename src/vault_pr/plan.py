@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .files import atomic_replace_bytes
 import yaml
 
 from .capture import CaptureError, load_validated_capture, source_note_has_id
@@ -509,15 +510,7 @@ def record_review(
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".vault-pr-tmp")
-    if temporary.exists():
-        raise PlanError(f"stale transaction temporary file exists: {temporary}")
-    try:
-        temporary.write_bytes(content)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_replace_bytes(path, content)
 
 
 def _install_staged(

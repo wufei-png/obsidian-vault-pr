@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import stat
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -46,14 +47,33 @@ def vault_write_lock(vault: Path) -> Iterator[None]:
     if git_dir_result.returncode != 0:
         raise GitSafetyError("unable to resolve vault Git directory")
     lock_path = Path(git_dir_result.stdout.strip()) / "vault-pr.lock"
-    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
+        existing = lock_path.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise GitSafetyError(f"unable to inspect vault write lock: {lock_path}") from exc
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
+        raise GitSafetyError(f"vault write lock is a symbolic link: {lock_path}")
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise GitSafetyError(f"vault write lock is not a regular file: {lock_path}")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise GitSafetyError(f"unable to open vault write lock: {lock_path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            existing is not None
+            and (existing.st_dev, existing.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise GitSafetyError(f"vault write lock is not a regular file: {lock_path}")
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise GitSafetyError(f"another vault-pr writer holds {lock_path}") from exc
-        os.ftruncate(descriptor, 0)
-        os.write(descriptor, f"pid={os.getpid()}\n".encode())
         yield
     finally:
         try:

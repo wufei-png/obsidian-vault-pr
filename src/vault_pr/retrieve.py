@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
-from .capture import CaptureError, load_validated_capture
+from .capture import CaptureError, load_validated_capture_artifact_text
 from .config import index_spec, load_vault_path, source_archive_dir
 
 
@@ -31,12 +31,14 @@ def _source_artifacts(
     vault = load_vault_path(config)
     capture = source_archive_dir(config, vault) / source_id
     try:
-        manifest = load_validated_capture(capture, source_id=source_id, vault=vault)
+        return load_validated_capture_artifact_text(
+            capture,
+            source_id=source_id,
+            vault=vault,
+            artifact="extracted",
+        )
     except CaptureError as exc:
         raise RetrievalError(f"source capture integrity failed: {exc}") from exc
-    artifacts = manifest["artifacts"]
-    extracted_path = capture / artifacts["extracted"]
-    return manifest, extracted_path.read_text(encoding="utf-8")
 
 
 def _retrieval_query(title: str, extracted: str) -> str:

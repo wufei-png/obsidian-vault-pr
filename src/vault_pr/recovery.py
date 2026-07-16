@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .files import atomic_replace_text
 from .git import run_git, vault_write_lock
 
 
@@ -139,13 +140,11 @@ def _git_is_clean(vault: Path) -> bool:
     return not status.stdout
 
 
-def _git_status_paths(vault: Path) -> tuple[set[str], set[str]]:
-    status = run_git(vault, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    if status.returncode != 0:
-        raise RecoveryError("unable to inspect vault Git status")
+def _parse_git_status_paths(output: str) -> tuple[set[str], set[str]]:
+    """Return dirty and staged paths, including both sides of renames and copies."""
     dirty: set[str] = set()
     staged: set[str] = set()
-    fields = [field for field in status.stdout.split("\0") if field]
+    fields = [field for field in output.split("\0") if field]
     index = 0
     while index < len(fields):
         field = fields[index]
@@ -165,6 +164,13 @@ def _git_status_paths(vault: Path) -> tuple[set[str], set[str]]:
                 staged.add(other_path)
         index += 1
     return dirty, staged
+
+
+def _git_status_paths(vault: Path) -> tuple[set[str], set[str]]:
+    status = run_git(vault, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if status.returncode != 0:
+        raise RecoveryError("unable to inspect vault Git status")
+    return _parse_git_status_paths(status.stdout)
 
 
 def _git_index_file_oid(vault: Path, relative: str) -> str | None:
@@ -200,6 +206,41 @@ def _git_index_file_mode(vault: Path, relative: str) -> str | None:
     if len(records) != 1 or b"\t" not in records[0]:
         raise RecoveryError(f"unexpected staged mode metadata: {relative}")
     return records[0].split(b" ", 1)[0].decode("ascii")
+
+
+def _changed_journal_paths(journal: dict[str, Any]) -> set[str]:
+    mode_aware = journal.get("schema_version") == 3
+    return {
+        entry["path"]
+        for entry in journal["entries"]
+        if entry.get("original_sha256") != entry.get("final_sha256")
+        or (
+            mode_aware
+            and entry.get("original_mode") != entry.get("final_mode")
+        )
+    }
+
+
+def _unstage_paths(vault: Path, paths: set[str]) -> None:
+    """Restore exact verified transaction paths in the index without touching files."""
+    if not paths:
+        return
+    if _head_commit(vault) is None:
+        result = run_git(
+            vault,
+            "rm",
+            "--cached",
+            "--quiet",
+            "--force",
+            "--ignore-unmatch",
+            "--",
+            *sorted(paths),
+        )
+    else:
+        result = run_git(vault, "reset", "--quiet", "HEAD", "--", *sorted(paths))
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RecoveryError(f"unable to unstage transaction paths: {detail}")
 
 
 def _committed_paths(vault: Path, base_commit: str | None, head: str) -> set[str]:
@@ -246,14 +287,11 @@ def _committed_paths(vault: Path, base_commit: str | None, head: str) -> set[str
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    try:
-        temporary.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_replace_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        mode=0o600,
+    )
 
 
 def active_transaction_root(git_dir: Path) -> Path:
@@ -632,33 +670,50 @@ def rollback_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]
     status = run_git(vault, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if status.returncode != 0:
         raise RecoveryError("unable to inspect vault status before recovery")
-    dirty_paths: set[str] = set()
-    staged_paths: list[str] = []
-    fields = [field for field in status.stdout.split("\0") if field]
-    index = 0
-    while index < len(fields):
-        field = fields[index]
-        code = field[:2]
-        path = field[3:]
-        if code[0] not in {" ", "?"}:
-            staged_paths.append(path)
-        dirty_paths.add(path)
-        if "R" in code or "C" in code:
-            index += 1
-            if index >= len(fields):
-                raise RecoveryError("invalid Git rename status during recovery")
-            dirty_paths.add(fields[index])
-        index += 1
-    if staged_paths:
-        raise RecoveryError(
-            "staged vault changes block recovery: " + ", ".join(sorted(staged_paths))
-        )
+    dirty_paths, staged_paths = _parse_git_status_paths(status.stdout)
     unexpected = sorted(path for path in dirty_paths if path not in expected_dirty)
     if unexpected:
         raise RecoveryError(
             "unrelated vault changes block recovery: " + ", ".join(unexpected)
         )
-
+    if staged_paths:
+        changed_paths = _changed_journal_paths(journal)
+        if _head_commit(vault) != journal.get("base_commit"):
+            raise RecoveryError(
+                "staged transaction recovery requires the original base commit"
+            )
+        if staged_paths != changed_paths:
+            extra = sorted(staged_paths - changed_paths)
+            missing = sorted(changed_paths - staged_paths)
+            details = []
+            if extra:
+                details.append("extra=" + ", ".join(extra))
+            if missing:
+                details.append("missing=" + ", ".join(missing))
+            raise RecoveryError(
+                "staged paths do not match the recoverable transaction: "
+                + "; ".join(details)
+            )
+        entry_by_path = {entry["path"]: entry for entry in journal["entries"]}
+        for relative in sorted(staged_paths):
+            entry = entry_by_path[relative]
+            if _git_index_file_oid(vault, relative) != _git_worktree_blob_oid(
+                vault, relative
+            ) or (
+                mode_aware
+                and _git_index_file_mode(vault, relative)
+                != entry.get("final_mode")
+            ):
+                raise RecoveryError(
+                    f"staged state does not match transaction journal: {relative}"
+                )
+        _unstage_paths(vault, staged_paths)
+        _dirty_after_unstage, staged_after_unstage = _git_status_paths(vault)
+        if staged_after_unstage:
+            raise RecoveryError(
+                "transaction paths remain staged after recovery preparation: "
+                + ", ".join(sorted(staged_after_unstage))
+            )
     for entry, path, backup in resolved_entries:
         path = _lexical_child(vault, entry["path"], "recovery journal path")
         if legacy_journal:
@@ -869,6 +924,12 @@ def commit_applied_transaction(
         committed = run_git(vault, "commit", "-m", message)
         if committed.returncode != 0:
             detail = (committed.stderr or committed.stdout).strip()
+            try:
+                _unstage_paths(vault, expected_paths)
+            except RecoveryError as unstage_exc:
+                raise RecoveryError(
+                    f"unable to commit transaction: {detail}; {unstage_exc}"
+                ) from unstage_exc
             raise RecoveryError(f"unable to commit transaction: {detail}")
         finalized = _finalize_active_transaction_unlocked(vault, active_dir)
         return {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -19,6 +20,16 @@ class LimitedProcessResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
+        process.kill()
 
 
 def _resource_limiter(max_memory_bytes: int, cpu_seconds: float, max_file_bytes: int):
@@ -64,19 +75,22 @@ def run_limited_process(
         tempfile.TemporaryFile() as stdout_file,
         tempfile.TemporaryFile() as stderr_file,
     ):
+        process = subprocess.Popen(
+            list(command),
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=os.name == "posix",
+            **kwargs,
+        )
         try:
-            completed = subprocess.run(
-                list(command),
-                check=False,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                timeout=timeout_seconds,
-                **kwargs,
-            )
+            returncode = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
+            _kill_process_group(process)
+            process.wait()
             raise LimitedProcessTimeout(
                 f"process exceeded {timeout_seconds} seconds"
             ) from exc
+        _kill_process_group(process)
         stdout_file.seek(0)
         stderr_file.seek(0)
         stdout = stdout_file.read(max_capture_bytes + 1)
@@ -86,7 +100,7 @@ def run_limited_process(
     if len(stderr) > max_capture_bytes:
         stderr = stderr[:max_capture_bytes] + b"\n[truncated]"
     return LimitedProcessResult(
-        completed.returncode,
+        returncode,
         stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -10,12 +11,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vault_pr.capture import load_validated_capture
+from vault_pr.capture import (
+    CaptureError,
+    load_validated_capture,
+    source_identity_digest,
+    source_note_has_id,
+)
 from vault_pr.config import ConfigError, vault_relative_path
 from vault_pr.ingest import (
     ExtractedSource,
     FetchedSource,
     IngestError,
+    _copy_snapshot_assets,
+    build_source_note,
     canonicalize_url,
     extract_source,
     fetch_url,
@@ -27,7 +35,7 @@ from vault_pr.ingest import (
     snapshot_source,
 )
 from vault_pr.recovery import commit_applied_transaction
-from vault_pr.process import LimitedProcessTimeout
+from vault_pr.process import LimitedProcessResult, LimitedProcessTimeout
 
 
 def make_config(vault: Path) -> dict[str, object]:
@@ -178,18 +186,17 @@ class ExtractionTests(unittest.TestCase):
 
             def run_worker(
                 command: list[str], **_: object
-            ) -> subprocess.CompletedProcess[str]:
+            ) -> LimitedProcessResult:
                 (output_dir / "extracted.md").write_text(
                     "# PDF Title\n\n## Page 1\n\n" + "PDF text " * 30
                 )
-                return subprocess.CompletedProcess(
-                    command,
+                return LimitedProcessResult(
                     0,
                     json.dumps({"title": "PDF Title", "extractor_version": "test"}),
                     "",
                 )
 
-            with patch("vault_pr.ingest.subprocess.run", side_effect=run_worker):
+            with patch("vault_pr.ingest.run_limited_process", side_effect=run_worker):
                 extracted = extract_source(fetched, Path(temp_dir))
 
             self.assertEqual(extracted.extractor, "pypdf")
@@ -252,6 +259,108 @@ class ExtractionTests(unittest.TestCase):
                     max_bytes=10000,
                 )
 
+    def test_snapshot_rejects_large_file_without_unbounded_read_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = Path(temp_dir) / "large.md"
+            with snapshot.open("wb") as file:
+                file.truncate(1_000_000)
+
+            with patch.object(
+                Path, "read_bytes", side_effect=AssertionError("unbounded read")
+            ):
+                with self.assertRaisesRegex(IngestError, "exceeds 100 bytes"):
+                    snapshot_source(
+                        url="https://example.com/article",
+                        snapshot_path=snapshot,
+                        adapter="authenticated",
+                        max_bytes=100,
+                    )
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires nofollow file opens")
+    def test_snapshot_asset_replacement_with_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot = root / "article.md"
+            snapshot.write_text("# Article\n")
+            images = root / "images"
+            images.mkdir()
+            asset = images / "asset.bin"
+            asset.write_bytes(b"original")
+            outside = root / "outside.bin"
+            outside.write_bytes(b"outside secret")
+            output = root / "output"
+            output.mkdir()
+            original_open = os.open
+            replaced = False
+
+            def raced_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal replaced
+                if path == "asset.bin" and dir_fd is not None and not replaced:
+                    replaced = True
+                    asset.unlink()
+                    asset.symlink_to(outside)
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("vault_pr.source_files.os.open", side_effect=raced_open):
+                with self.assertRaisesRegex(IngestError, "changed during capture"):
+                    _copy_snapshot_assets(
+                        snapshot,
+                        output,
+                        max_files=10,
+                        max_bytes=1000,
+                    )
+
+            self.assertEqual(outside.read_bytes(), b"outside secret")
+            self.assertFalse((output / "images").exists())
+
+    def test_snapshot_asset_replacement_with_regular_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot = root / "article.md"
+            snapshot.write_text("# Article\n")
+            images = root / "images"
+            images.mkdir()
+            asset = images / "asset.bin"
+            asset.write_bytes(b"original")
+            outside = root / "outside.bin"
+            outside.write_bytes(b"outside secret")
+            output = root / "output"
+            output.mkdir()
+            original_open = os.open
+            replaced = False
+
+            def raced_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal replaced
+                if path == "asset.bin" and dir_fd is not None and not replaced:
+                    replaced = True
+                    asset.unlink()
+                    os.link(outside, asset)
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("vault_pr.source_files.os.open", side_effect=raced_open):
+                with self.assertRaisesRegex(IngestError, "changed during capture"):
+                    _copy_snapshot_assets(
+                        snapshot,
+                        output,
+                        max_files=10,
+                        max_bytes=1000,
+                    )
+
+            self.assertEqual(outside.read_bytes(), b"outside secret")
+            self.assertFalse((output / "images").exists())
+
 
 class IngestTests(unittest.TestCase):
     def test_normalize_title_removes_newlines_and_controls(self) -> None:
@@ -260,6 +369,194 @@ class IngestTests(unittest.TestCase):
     def test_safe_note_filename_is_stable_and_readable(self) -> None:
         filename = safe_note_filename("A/B: Test?", "https://example.com/article")
         self.assertRegex(filename, r"^A-B- Test--[0-9a-f]{8}\.md$")
+
+    def test_source_note_body_cannot_activate_untrusted_obsidian_syntax(self) -> None:
+        title = "![[Private Note]] [[Other]] #secret ![x](https://bad.example)"
+        fetched = FetchedSource(
+            requested_url="https://example.com/a[[Private]]",
+            final_url="https://example.com/a[[Private]]",
+            status=200,
+            headers={"content-type": "text/markdown"},
+            body=b"# body\n",
+            captured_at="2026-07-15T00:00:00+00:00",
+        )
+        extracted = ExtractedSource(
+            title=title,
+            raw_filename="source` ![[Private]].md",
+            extracted_filename="extracted` #secret.md",
+            extractor="fixture",
+            extractor_version="1",
+        )
+
+        note = build_source_note(
+            title=title,
+            source_id="src_11111111111111111111",
+            fetched=fetched,
+            extracted=extracted,
+            raw_sha256="a" * 64,
+            extracted_sha256="b" * 64,
+            note_path=Path("/vault/knowledgebase/sources/source.md"),
+            capture_dir=Path(
+                "/vault/.vault-pr/sources/public/src_11111111111111111111"
+            ),
+        )
+        body = note.split("---", 2)[2]
+
+        self.assertNotIn("![[", body)
+        self.assertNotIn("[[Private", body)
+        self.assertNotIn("#secret", body)
+        self.assertNotIn("![x](", body)
+        self.assertNotIn("![[Private]]", body)
+        self.assertNotIn("source`", body)
+        self.assertNotIn("extracted`", body)
+        self.assertIn("[打开原始链接]", body)
+        self.assertIn("%5B%5BPrivate%5D%5D", body)
+
+    def test_ingest_rejects_extractor_with_duplicate_artifact_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+
+            def duplicate_extraction(
+                _fetched: FetchedSource, output: Path, **_: object
+            ) -> ExtractedSource:
+                (output / "same.md").write_text("# Same\n")
+                return ExtractedSource(
+                    title="Same",
+                    raw_filename="same.md",
+                    extracted_filename="same.md",
+                    extractor="fixture",
+                    extractor_version="1",
+                )
+
+            with (
+                patch("vault_pr.ingest.fetch_url", return_value=markdown_fetch()),
+                patch(
+                    "vault_pr.ingest.extract_source",
+                    side_effect=duplicate_extraction,
+                ),
+            ):
+                with self.assertRaisesRegex(IngestError, "duplicate artifact path"):
+                    ingest_url(
+                        config=make_config(vault),
+                        url="https://example.com/article.md",
+                        apply=False,
+                    )
+
+    def test_ingest_rejects_physically_duplicate_artifact_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+
+            def hardlinked_extraction(
+                _fetched: FetchedSource, output: Path, **_: object
+            ) -> ExtractedSource:
+                raw = output / "raw.md"
+                raw.write_text("# Same\n")
+                os.link(raw, output / "extracted.md")
+                return ExtractedSource(
+                    title="Same",
+                    raw_filename="raw.md",
+                    extracted_filename="extracted.md",
+                    extractor="fixture",
+                    extractor_version="1",
+                )
+
+            with (
+                patch("vault_pr.ingest.fetch_url", return_value=markdown_fetch()),
+                patch(
+                    "vault_pr.ingest.extract_source",
+                    side_effect=hardlinked_extraction,
+                ),
+            ):
+                with self.assertRaisesRegex(IngestError, "physically duplicate"):
+                    ingest_url(
+                        config=make_config(vault),
+                        url="https://example.com/article.md",
+                        apply=False,
+                    )
+
+    def test_ingest_rejects_undeclared_extractor_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            outside = root / "outside.bin"
+            outside.write_bytes(b"SECRET")
+            outside.chmod(0o600)
+
+            def malicious_extraction(
+                _fetched: FetchedSource, output: Path, **_: object
+            ) -> ExtractedSource:
+                (output / "raw.md").write_text("# Raw\n")
+                (output / "extracted.md").write_text("# Extracted\n")
+                (output / "leak.bin").symlink_to(outside)
+                return ExtractedSource(
+                    title="Malicious",
+                    raw_filename="raw.md",
+                    extracted_filename="extracted.md",
+                    extractor="fixture",
+                    extractor_version="1",
+                )
+
+            with (
+                patch("vault_pr.ingest.fetch_url", return_value=markdown_fetch()),
+                patch(
+                    "vault_pr.ingest.extract_source",
+                    side_effect=malicious_extraction,
+                ),
+            ):
+                with self.assertRaisesRegex(IngestError, "undeclared content"):
+                    ingest_url(
+                        config=make_config(vault),
+                        url="https://example.com/article.md",
+                        apply=False,
+                    )
+
+            self.assertEqual(outside.read_bytes(), b"SECRET")
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o600)
+
+    def test_ingest_rejects_extractor_artifact_through_symlinked_directory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "raw.md").write_text("# Outside\n")
+
+            def symlinked_extraction(
+                _fetched: FetchedSource, output: Path, **_: object
+            ) -> ExtractedSource:
+                (output / "linked").symlink_to(outside, target_is_directory=True)
+                (output / "extracted.md").write_text("# Extracted\n")
+                return ExtractedSource(
+                    title="Linked",
+                    raw_filename="linked/raw.md",
+                    extracted_filename="extracted.md",
+                    extractor="fixture",
+                    extractor_version="1",
+                )
+
+            with (
+                patch("vault_pr.ingest.fetch_url", return_value=markdown_fetch()),
+                patch(
+                    "vault_pr.ingest.extract_source",
+                    side_effect=symlinked_extraction,
+                ),
+            ):
+                with self.assertRaisesRegex(IngestError, "traverses a symbolic link"):
+                    ingest_url(
+                        config=make_config(vault),
+                        url="https://example.com/article.md",
+                        apply=False,
+                    )
 
     def test_source_note_path_reuses_url_suffix_when_title_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -293,6 +590,181 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(
                 source_note_path(note_dir, "Again", url, source_id=second_id), second
             )
+
+    def test_source_id_must_be_in_yaml_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_id = "src_11111111111111111111"
+            body_only = root / "body-only.md"
+            body_only.write_text(
+                "---\ntitle: Body only\n---\n\n"
+                f"source_id: {source_id}\n"
+            )
+            wrong_frontmatter = root / "wrong.md"
+            wrong_frontmatter.write_text(
+                "---\nsource_id: src_22222222222222222222\n---\n\n"
+                f"source_id: {source_id}\n"
+            )
+            correct = root / "correct.md"
+            correct.write_text(f"---\nsource_id: {source_id}\n---\n")
+
+            self.assertFalse(source_note_has_id(body_only, source_id))
+            self.assertFalse(source_note_has_id(wrong_frontmatter, source_id))
+            self.assertTrue(source_note_has_id(correct, source_id))
+
+    def test_capture_rejects_raw_and_extracted_same_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            capture = vault / ".vault-pr" / "sources" / "public" / "pending"
+            capture.mkdir(parents=True)
+            note = vault / "knowledgebase" / "sources" / "source.md"
+            note.parent.mkdir(parents=True)
+            digest = "a" * 64
+            identity = {
+                "schema_version": 2,
+                "requested_url": "https://example.com/article",
+                "final_url": "https://example.com/article",
+                "adapter": "http",
+                "raw_sha256": digest,
+                "extracted_sha256": digest,
+                "asset_sha256": {},
+                "artifacts": {
+                    "raw": "same.md",
+                    "extracted": "same.md",
+                    "source_note": str(note.relative_to(vault)),
+                },
+            }
+            source_id = f"src_{source_identity_digest(identity)[:20]}"
+            final_capture = capture.parent / source_id
+            capture.rename(final_capture)
+            note.write_text(f"---\nsource_id: {source_id}\n---\n")
+            (final_capture / "same.md").write_bytes(b"same")
+            manifest = {
+                **identity,
+                "source_id": source_id,
+                "title": "Same",
+            }
+            (final_capture / "manifest.json").write_text(
+                json.dumps(manifest) + "\n"
+            )
+
+            with self.assertRaisesRegex(CaptureError, "duplicate artifact path"):
+                load_validated_capture(
+                    final_capture,
+                    source_id=source_id,
+                    vault=vault,
+                )
+
+    def test_capture_rejects_physically_duplicate_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            capture = vault / ".vault-pr" / "sources" / "public" / "pending"
+            capture.mkdir(parents=True)
+            note = vault / "knowledgebase" / "sources" / "source.md"
+            note.parent.mkdir(parents=True)
+            digest_value = hashlib.sha256(b"same").hexdigest()
+            identity = {
+                "schema_version": 2,
+                "requested_url": "https://example.com/article",
+                "final_url": "https://example.com/article",
+                "adapter": "http",
+                "raw_sha256": digest_value,
+                "extracted_sha256": digest_value,
+                "asset_sha256": {},
+                "artifacts": {
+                    "raw": "raw.md",
+                    "extracted": "extracted.md",
+                    "source_note": str(note.relative_to(vault)),
+                },
+            }
+            source_id = f"src_{source_identity_digest(identity)[:20]}"
+            final_capture = capture.parent / source_id
+            capture.rename(final_capture)
+            note.write_text(f"---\nsource_id: {source_id}\n---\n")
+            raw = final_capture / "raw.md"
+            raw.write_bytes(b"same")
+            os.link(raw, final_capture / "extracted.md")
+            (final_capture / "manifest.json").write_text(
+                json.dumps({**identity, "source_id": source_id, "title": "Same"})
+                + "\n"
+            )
+
+            with self.assertRaisesRegex(CaptureError, "physically duplicate"):
+                load_validated_capture(
+                    final_capture,
+                    source_id=source_id,
+                    vault=vault,
+                )
+
+    def test_capture_rejects_parent_directory_replaced_by_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault = root / "vault"
+            pending = vault / ".vault-pr" / "sources" / "public" / "pending"
+            images = pending / "images"
+            images.mkdir(parents=True)
+            note = vault / "knowledgebase" / "sources" / "source.md"
+            note.parent.mkdir(parents=True)
+            raw = b"raw"
+            extracted = b"# Extracted\n"
+            asset = b"asset"
+            identity = {
+                "schema_version": 2,
+                "requested_url": "https://example.com/article",
+                "final_url": "https://example.com/article",
+                "adapter": "http",
+                "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                "extracted_sha256": hashlib.sha256(extracted).hexdigest(),
+                "asset_sha256": {
+                    "images/cover.bin": hashlib.sha256(asset).hexdigest()
+                },
+                "artifacts": {
+                    "raw": "raw.bin",
+                    "extracted": "extracted.md",
+                    "source_note": str(note.relative_to(vault)),
+                },
+            }
+            source_id = f"src_{source_identity_digest(identity)[:20]}"
+            capture = pending.parent / source_id
+            pending.rename(capture)
+            images = capture / "images"
+            (capture / "raw.bin").write_bytes(raw)
+            (capture / "extracted.md").write_bytes(extracted)
+            (images / "cover.bin").write_bytes(asset)
+            note.write_text(f"---\nsource_id: {source_id}\n---\n")
+            (capture / "manifest.json").write_text(
+                json.dumps({**identity, "source_id": source_id}) + "\n"
+            )
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "cover.bin").write_bytes(asset)
+            parked = capture / "images-original"
+            original_open = os.open
+            replaced = False
+
+            def raced_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal replaced
+                if path == "images" and dir_fd is not None and not replaced:
+                    replaced = True
+                    images.rename(parked)
+                    images.symlink_to(outside, target_is_directory=True)
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("vault_pr.capture.os.open", side_effect=raced_open):
+                with self.assertRaisesRegex(
+                    CaptureError, "directory changed during validation"
+                ):
+                    load_validated_capture(
+                        capture,
+                        source_id=source_id,
+                        vault=vault,
+                    )
 
     def test_raw_snapshot_changes_produce_new_source_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -674,7 +1146,7 @@ class IngestTests(unittest.TestCase):
             config = make_config(vault)
             config["sources"]["max_asset_files"] = 1
 
-            with self.assertRaisesRegex(IngestError, "1-file limit"):
+            with self.assertRaisesRegex(IngestError, "1-entry limit"):
                 ingest_url(
                     config=config,
                     url="https://mp.weixin.qq.com/s/example",
@@ -791,12 +1263,23 @@ class IngestTests(unittest.TestCase):
             vault = Path(temp_dir) / "vault"
             vault.mkdir()
             subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            from vault_pr.source_files import materialize_regular_tree
+
+            def fail_capture_copy(
+                root: Path,
+                expected_hashes: dict[Path, str],
+                *,
+                destination: Path | None = None,
+            ) -> None:
+                if destination is not None:
+                    raise OSError("injected copy failure")
+                materialize_regular_tree(root, expected_hashes)
 
             with (
                 patch("vault_pr.ingest.fetch_url", return_value=markdown_fetch()),
                 patch(
-                    "vault_pr.ingest.shutil.copytree",
-                    side_effect=OSError("injected copy failure"),
+                    "vault_pr.ingest._materialize_regular_tree",
+                    side_effect=fail_capture_copy,
                 ),
             ):
                 with self.assertRaisesRegex(IngestError, "failed to write"):
