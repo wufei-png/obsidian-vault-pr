@@ -19,12 +19,38 @@ Keep source acquisition and vault governance as separate boundaries.
 | Ordinary public HTML | `vault-pr` pinned HTTP fetch; local Defuddle extraction | URL |
 | Public Markdown or PDF | `vault-pr` pinned HTTP fetch and built-in extractor | URL |
 | Public WeChat article | `wechat-article-to-markdown` when available | Markdown snapshot plus sibling `images/` |
+| Private GitLab issue or anchored note | authenticated `glab` CLI | Markdown snapshot containing the issue and selected note |
 | Authenticated or interactive page | Approved browser or connector | HTML, Markdown, or PDF snapshot |
 | User-provided local material | No network provider | Local snapshot |
 
 `defuddle` the executable is part of the ordinary-HTML CLI route. The separate
 `defuddle` skill is useful for ad hoc reading, but `vault-pr` does not need the
 agent to invoke it during normal ingestion.
+
+### Private GitLab issues
+
+Prefer `glab` over browser capture when the source is a GitLab issue URL. Parse
+the URL into host, namespace/project, issue IID, and optional `#note_<id>`.
+Explicitly set `GITLAB_HOST=<source-host>` for every command; some `glab`
+versions otherwise send a full private-instance URL to the default gitlab.com
+API. First try `glab issue view <iid> -R <namespace/project> --comments --output
+json`. For a note anchor, use the narrower authenticated API calls when
+available:
+
+```shell
+GITLAB_HOST=<host> glab api 'projects/<urlencoded-project>/issues/<iid>'
+GITLAB_HOST=<host> glab api \
+  'projects/<urlencoded-project>/issues/<iid>/notes/<note-id>'
+```
+
+Build one temporary Markdown file containing source metadata, the issue
+description, and only the selected note when an anchor was supplied. Verify the
+note belongs to that issue. Do not include access tokens, cookies, API headers,
+or the intermediate API JSON in the Snapshot Bundle. Pass the original URL and
+Markdown file to `vault-pr ingest --snapshot <file> --adapter authenticated`.
+If `glab` is unavailable or unauthenticated, use an approved authenticated
+browser snapshot; do not weaken the CLI boundary or add a mandatory GitLab
+dependency to the Governance Kernel.
 
 ## Provider contract
 

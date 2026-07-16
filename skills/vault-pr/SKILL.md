@@ -63,7 +63,11 @@ A diagnostic or merely assessment-ready run is not an Evaluation Baseline.
    <path> --adapter wechat`. The CLI forces every `mp.weixin.qq.com` source
    through this offline adapter and validates its local bundle. For authenticated pages, capture
    HTML/Markdown/PDF with the browser and pass `--snapshot <path>` with
-   `--adapter authenticated`; never pass cookies or tokens to the CLI.
+   `--adapter authenticated`; never pass cookies or tokens to the CLI. For a
+   private GitLab issue or anchored note, prefer the authenticated `glab`
+   provider described in the Capture Provider contract, explicitly bind
+   `GITLAB_HOST` to the source host, and pass its temporary Markdown output
+   through the same authenticated adapter.
 4. Read the returned `transaction_id`, then run `vault-pr commit
    <transaction-id> --message <behavior-and-intent> --config <config>`. This
    stages exactly the journal paths, commits them under the vault lock, and
