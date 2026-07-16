@@ -8,20 +8,20 @@ import os
 import re
 import shutil
 import subprocess
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
+from .assessor_schema import AssessorSchemaError, validate_rag_assessment
 from .config import ConfigError, index_spec, load_vault_path, vault_relative_path
-from .git import GitSafetyError, require_clean_git_root, run_git, vault_write_lock
-from .index import IndexUpdateError, reconcile_qmd_collection
-from .recovery import (
-    RecoveryError,
-    mark_active_applied,
-    prepare_active_transaction,
-    rollback_active_transaction,
+from .git import GitSafetyError, run_git
+from .index import IndexUpdateError, validate_qmd_index_freshness
+from .mutation import (
+    MutationError,
+    execute_journaled_mutation,
+    inspect_journaled_mutation,
+    mutation_response,
 )
 from .retrieve import (
     RetrievalError,
@@ -54,61 +54,18 @@ def _canonical_digest(value: Any) -> str:
 def _validate_index_evidence(
     config: dict[str, Any], executable: str
 ) -> dict[str, Any]:
-    vault = load_vault_path(config)
-    head = run_git(vault, "rev-parse", "HEAD")
-    config_sha256 = hashlib.sha256(
-        json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")
-    reasons: list[str] = []
-    status_record: dict[str, Any] = {}
-    status_sha256: str | None = None
-    if git_dir.returncode != 0:
-        reasons.append("index_status_unavailable")
-    else:
-        status_path = Path(git_dir.stdout.strip()) / "vault-pr-index-status.json"
-        try:
-            status_bytes = status_path.read_bytes()
-            parsed = json.loads(status_bytes)
-            if isinstance(parsed, dict):
-                status_record = parsed
-                status_sha256 = hashlib.sha256(status_bytes).hexdigest()
-            else:
-                reasons.append("index_status_invalid")
-        except (OSError, json.JSONDecodeError):
-            reasons.append("index_status_unavailable")
     try:
-        alignment = reconcile_qmd_collection(
-            config, check_only=True, executable=executable
+        return validate_qmd_index_freshness(
+            config,
+            executable=executable,
         )
-    except (ConfigError, IndexUpdateError):
-        alignment = {"status": "unknown"}
-        reasons.append("collection_check_failed")
-    version = subprocess.run(
-        [executable, "--version"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    qmd_version = version.stdout.strip() if version.returncode == 0 else "unknown"
-    expected_commit = head.stdout.strip() if head.returncode == 0 else None
-    checks = {
-        "collection_aligned": alignment.get("status") == "aligned",
-        "index_completed": status_record.get("status") == "indexed",
-        "commit_matches": status_record.get("git_commit") == expected_commit,
-        "config_matches": status_record.get("config_sha256") == config_sha256,
-        "qmd_version_matches": status_record.get("qmd_version") == qmd_version,
-    }
-    reasons.extend(name for name, passed in checks.items() if not passed)
-    return {
-        "eligible": not reasons,
-        "reasons": sorted(set(reasons)),
-        "git_commit": expected_commit,
-        "config_sha256": config_sha256,
-        "qmd_version": qmd_version,
-        "status_sha256": status_sha256,
-        "collection_status": alignment.get("status"),
-    }
+    except IndexUpdateError as exc:
+        return {
+            "schema_version": 1,
+            "eligible": False,
+            "reasons": ["index_freshness_validation_failed"],
+            "error": str(exc),
+        }
 
 
 def _string_list(
@@ -528,7 +485,15 @@ def evaluate_rag(
                 "sha256": index_evidence["status_sha256"],
             }
         )
-    required_judgments = ["answer_claims", "provenance"] if answers else []
+    required_judgments = (
+        [
+            {"case_id": item["case_id"], "kind": kind}
+            for item in results
+            for kind in ("answer_claims", "provenance")
+        ]
+        if answers
+        else []
+    )
     unassessed = (
         ["answer_claims", "provenance"]
         if answers
@@ -625,15 +590,10 @@ def _validated_assessor_packet(
         or assessment.get("input_sha256") != digest
     ):
         raise RagEvaluationError("Quality Assessor output does not match the input")
-    instance_id = assessment.get("instance_id")
-    if not isinstance(instance_id, str) or not instance_id.strip():
-        raise RagEvaluationError("Quality Assessor output has no instance id")
-    status = assessment.get("status")
-    if status not in {"pass", "fail"}:
-        raise RagEvaluationError("Quality Assessor status must be pass or fail")
-    for field in ("findings", "claim_conflicts", "unassessed"):
-        if not isinstance(assessment.get(field), list):
-            raise RagEvaluationError(f"Quality Assessor {field} must be an array")
+    try:
+        validate_rag_assessment(packet, assessment)
+    except AssessorSchemaError as exc:
+        raise RagEvaluationError(str(exc)) from exc
     return packet, payload
 
 
@@ -659,6 +619,61 @@ def accept_rag_baseline(
         raise RagEvaluationError("only a passed Quality Assessor output can be recorded")
     if assessment.get("unassessed"):
         raise RagEvaluationError("Quality Assessor output still has unassessed items")
+    packet_id = str(packet["packet_id"])
+    relative = Path(".vault-pr/quality/rag/baselines") / f"{packet_id}.json"
+    destination = vault / relative
+    record = {
+        "schema_version": 1,
+        "record_type": "rag_evaluation_baseline",
+        "packet_id": packet_id,
+        "input_sha256": packet["input_sha256"],
+        "git_commit_evaluated": payload["git_commit"],
+        "evaluation_sha256": hashlib.sha256(evaluation_bytes).hexdigest(),
+        "assessment_sha256": hashlib.sha256(assessment_bytes).hexdigest(),
+        "evaluation": evaluation,
+        "quality_assessment": assessment,
+    }
+    record_bytes = (
+        json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    planned = {
+        "path": relative.as_posix(),
+        "packet_id": packet_id,
+        "record_sha256": hashlib.sha256(record_bytes).hexdigest(),
+    }
+    transaction_sha256 = str(packet["input_sha256"])
+    request_sha256 = _canonical_digest(
+        {
+            "evaluation_sha256": record["evaluation_sha256"],
+            "assessment_sha256": record["assessment_sha256"],
+        }
+    )
+    transaction_id = f"txn_rag_{transaction_sha256[:16]}"
+    git_dir_result = run_git(vault, "rev-parse", "--absolute-git-dir")
+    if git_dir_result.returncode != 0:
+        raise RagEvaluationError("unable to resolve vault Git directory")
+    git_dir = Path(git_dir_result.stdout.strip())
+    if apply:
+        try:
+            existing = inspect_journaled_mutation(
+                vault=vault,
+                git_dir=git_dir,
+                operation="rag_baseline",
+                transaction_id=transaction_id,
+                transaction_sha256=transaction_sha256,
+                request_sha256=request_sha256,
+            )
+        except MutationError as exc:
+            raise RagEvaluationError(str(exc)) from exc
+        if existing is not None:
+            if existing["status"] == "already_committed" and (
+                not destination.is_file()
+                or destination.read_bytes() != record_bytes
+            ):
+                raise RagEvaluationError(
+                    "committed RAG baseline integrity validation failed"
+                )
+            return mutation_response(existing, applied_status="baseline_applied")
     head = run_git(vault, "rev-parse", "HEAD")
     if head.returncode != 0 or head.stdout.strip() != payload.get("git_commit"):
         raise RagEvaluationError("vault HEAD no longer matches the assessed evaluation")
@@ -794,67 +809,35 @@ def accept_rag_baseline(
     if not _all_paths_tracked(vault, tracked_paths):
         raise RagEvaluationError("RAG baseline evidence must remain Git tracked")
 
-    packet_id = str(packet["packet_id"])
-    relative = Path(".vault-pr/quality/rag/baselines") / f"{packet_id}.json"
-    destination = vault / relative
-    record = {
-        "schema_version": 1,
-        "record_type": "rag_evaluation_baseline",
-        "packet_id": packet_id,
-        "input_sha256": packet["input_sha256"],
-        "git_commit_evaluated": payload["git_commit"],
-        "evaluation_sha256": hashlib.sha256(evaluation_bytes).hexdigest(),
-        "assessment_sha256": hashlib.sha256(assessment_bytes).hexdigest(),
-        "evaluation": evaluation,
-        "quality_assessment": assessment,
-    }
-    record_bytes = (
-        json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    ).encode("utf-8")
-    planned = {
-        "status": "baseline_ready",
-        "path": relative.as_posix(),
-        "packet_id": packet_id,
-        "record_sha256": hashlib.sha256(record_bytes).hexdigest(),
-        "requires_commit": apply,
-    }
     if not apply:
-        return planned
+        return {**planned, "status": "baseline_ready", "requires_commit": False}
     if destination.exists() or destination.is_symlink():
         raise RagEvaluationError("RAG baseline record already exists")
-    transaction_id = f"txn_quality_{uuid.uuid4().hex[:16]}"
+
+    def write(active_dir: Path) -> None:
+        staging = active_dir / "write-staging" / "baseline.json"
+        staging.parent.mkdir(parents=True)
+        staging.write_bytes(record_bytes)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, destination)
+
     try:
-        with vault_write_lock(vault):
-            require_clean_git_root(vault)
-            git_dir_result = run_git(vault, "rev-parse", "--absolute-git-dir")
-            if git_dir_result.returncode != 0:
-                raise RagEvaluationError("unable to resolve vault Git directory")
-            active_dir = prepare_active_transaction(
-                vault=vault,
-                git_dir=Path(git_dir_result.stdout.strip()),
-                transaction_id=transaction_id,
-                transaction_sha256=str(packet["input_sha256"]),
-                affected={destination},
-                expected_original_sha256={destination: None},
-                expected_original_mode={destination: None},
-                final_sha256={destination: planned["record_sha256"]},
-                final_mode={destination: "100644"},
-            )
-            try:
-                staging = active_dir / "write-staging" / "baseline.json"
-                staging.parent.mkdir(parents=True)
-                staging.write_bytes(record_bytes)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(staging, destination)
-                mark_active_applied(active_dir, completion_path=relative.as_posix())
-            except Exception:
-                rollback_active_transaction(vault, active_dir)
-                raise
-    except (GitSafetyError, RecoveryError) as exc:
+        outcome = execute_journaled_mutation(
+            vault=vault,
+            git_dir=git_dir,
+            transaction_id=transaction_id,
+            transaction_sha256=transaction_sha256,
+            request_sha256=request_sha256,
+            operation="rag_baseline",
+            receipt_data=planned,
+            affected={destination},
+            expected_original_sha256={destination: None},
+            expected_original_mode={destination: None},
+            final_sha256={destination: planned["record_sha256"]},
+            final_mode={destination: "100644"},
+            write=write,
+            completion_path=relative.as_posix(),
+        )
+    except (GitSafetyError, MutationError) as exc:
         raise RagEvaluationError(str(exc)) from exc
-    return {
-        **planned,
-        "status": "baseline_applied",
-        "transaction_id": transaction_id,
-        "requires_commit": True,
-    }
+    return mutation_response(outcome, applied_status="baseline_applied")

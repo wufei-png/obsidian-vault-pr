@@ -10,13 +10,57 @@ import re
 import unicodedata
 import urllib.parse
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
-from .capture import CaptureError, source_note_has_id
+import yaml
+
+from .config import source_notes_dir
 from .errors import IngestError
 
-if TYPE_CHECKING:
-    from .ingest import ExtractedSource, FetchedSource
+def source_note_has_id(path: Path, source_id: str) -> bool:
+    """Check the exact source_id property in one visible source note."""
+    if path.is_symlink() or not path.is_file():
+        raise IngestError("source note is not a regular file")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise IngestError("unable to inspect source note") from exc
+    lines = content.splitlines()
+    if not lines or lines[0] != "---":
+        return False
+    end = next(
+        (index for index, line in enumerate(lines[1:], start=1) if line == "---"),
+        None,
+    )
+    if end is None:
+        raise IngestError("source note has unterminated frontmatter")
+    try:
+        frontmatter = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError as exc:
+        raise IngestError("source note has invalid frontmatter") from exc
+    return isinstance(frontmatter, dict) and frontmatter.get("source_id") == source_id
+
+
+def resolve_source_note(
+    config: dict[str, object],
+    vault: Path,
+    source_id: str,
+) -> Path:
+    """Resolve the unique current Source Note independently of Capture identity."""
+    note_dir = source_notes_dir(config, vault)
+    matching: list[Path] = []
+    if note_dir.is_symlink() or not note_dir.is_dir():
+        raise IngestError("source note directory is missing or unsafe")
+    for path in sorted(note_dir.rglob("*.md")):
+        if not path.resolve().is_relative_to(note_dir.resolve()):
+            raise IngestError("source note path escapes the configured directory")
+        if source_note_has_id(path, source_id):
+            matching.append(path)
+    if len(matching) != 1:
+        raise IngestError(
+            f"source_id must resolve to exactly one Source Note: {source_id}"
+        )
+    return matching[0]
 
 
 def safe_note_filename(title: str, url: str) -> str:
@@ -27,6 +71,15 @@ def safe_note_filename(title: str, url: str) -> str:
     normalized = normalized[:80].rstrip(" .-") or "Untitled source"
     url_id = hashlib.sha256(url.encode()).hexdigest()[:8]
     return f"{normalized}--{url_id}.md"
+
+
+def safe_local_note_filename(title: str, source_id: str) -> str:
+    """Create a stable source-note filename without retaining a local path."""
+    normalized = unicodedata.normalize("NFKC", title).strip()
+    normalized = re.sub(r'[\\/:*?"<>|#^\[\]]+', "-", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" .-")
+    normalized = normalized[:80].rstrip(" .-") or "Untitled source"
+    return f"{normalized}--{source_id.removeprefix('src_')[:8]}.md"
 
 
 def normalize_title(title: str) -> str:
@@ -62,7 +115,7 @@ def versioned_source_note_path(
     base = safe_note_filename(title, url).removesuffix(".md")
     path = note_dir / f"{base}--{version}.md"
     if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise IngestError(f"versioned source note path is occupied: {path}")
+        raise IngestError("versioned source note path is occupied")
     return path
 
 
@@ -81,12 +134,9 @@ def source_note_path(
 
     candidates = source_note_candidates(note_dir, url)
     matching: list[Path] = []
-    try:
-        for candidate in candidates:
-            if source_note_has_id(candidate, source_id):
-                matching.append(candidate)
-    except CaptureError as exc:
-        raise IngestError(str(exc)) from exc
+    for candidate in candidates:
+        if source_note_has_id(candidate, source_id):
+            matching.append(candidate)
     if len(matching) > 1:
         raise IngestError(f"multiple source notes contain source id {source_id}")
     if matching:
@@ -133,35 +183,54 @@ def build_source_note(
     *,
     title: str,
     source_id: str,
-    fetched: FetchedSource,
-    extracted: ExtractedSource,
-    raw_sha256: str,
-    extracted_sha256: str,
+    source: dict[str, Any],
+    captured_at: str,
+    acquisition: dict[str, Any],
+    primary: dict[str, Any],
+    extracted: dict[str, Any],
     note_path: Path,
     capture_dir: Path,
 ) -> str:
     """Build a valid Obsidian source-note draft with inert display metadata."""
-    raw_link = os.path.relpath(capture_dir / extracted.raw_filename, note_path.parent)
+    raw_link = os.path.relpath(capture_dir / str(primary["path"]), note_path.parent)
     extracted_link = os.path.relpath(
-        capture_dir / extracted.extracted_filename, note_path.parent
+        capture_dir / str(extracted["path"]), note_path.parent
     )
     raw_display = _inert_obsidian_text(raw_link)
     extracted_display = _inert_obsidian_text(extracted_link)
     display_title = _inert_obsidian_text(title)
-    source_destination = _markdown_url_destination(fetched.final_url)
+    final_url = source.get("final_url")
+    logical_name = source.get("logical_name")
+    source_line = (
+        f"> - 原始链接：[打开原始链接](<{_markdown_url_destination(final_url)}>)"
+        if isinstance(final_url, str)
+        else f"> - 本地来源名称：{_inert_obsidian_text(str(logical_name))}"
+    )
+    source_property = (
+        f"source_url: {_yaml_string(final_url)}"
+        if isinstance(final_url, str)
+        else f"source_name: {_yaml_string(str(logical_name))}"
+    )
+    supersedes = source.get("supersedes")
+    supersedes_property = (
+        [f"supersedes: {_yaml_string(supersedes)}"]
+        if isinstance(supersedes, str)
+        else []
+    )
     return "\n".join(
         [
             "---",
             f"title: {_yaml_string(title)}",
             "type: source",
             "status: captured",
-            f"source_url: {_yaml_string(fetched.final_url)}",
+            source_property,
             f"source_id: {_yaml_string(source_id)}",
-            f"source_sha256: {_yaml_string(raw_sha256)}",
-            f"extracted_sha256: {_yaml_string(extracted_sha256)}",
-            f"captured_at: {_yaml_string(fetched.captured_at)}",
-            f"extractor: {_yaml_string(extracted.extractor)}",
-            f"extractor_version: {_yaml_string(extracted.extractor_version)}",
+            f"access_kind: {_yaml_string(str(source['access_kind']))}",
+            f"source_sha256: {_yaml_string(str(primary['sha256']))}",
+            f"extracted_sha256: {_yaml_string(str(extracted['sha256']))}",
+            f"captured_at: {_yaml_string(captured_at)}",
+            f"extractor: {_yaml_string(str(acquisition['adapter']))}",
+            *supersedes_property,
             "tags:",
             "  - source/article",
             "aliases: []",
@@ -170,8 +239,8 @@ def build_source_note(
             f"# {display_title}",
             "",
             "> [!info] 来源记录",
-            f"> - 原始链接：[打开原始链接](<{source_destination}>)",
-            f"> - 捕获时间：{fetched.captured_at}",
+            source_line,
+            f"> - 捕获时间：{captured_at}",
             f"> - 原始快照：`{raw_display}`",
             f"> - 提取正文：`{extracted_display}`",
             "",

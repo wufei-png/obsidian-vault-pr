@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from vault_pr.assessor_schema import AssessorSchemaError, validate_rag_assessment
 from vault_pr.rag_eval import (
     RagEvaluationError,
     accept_rag_baseline,
@@ -87,6 +88,162 @@ class RagEvaluationTests(unittest.TestCase):
             "status_sha256": "b" * 64,
             "collection_status": "aligned",
         }
+
+    @staticmethod
+    def _passed_assessment(packet: dict[str, object]) -> dict[str, object]:
+        payload = packet["payload"]
+        return {
+            "schema_version": 1,
+            "packet_type": "quality_assessment",
+            "packet_id": packet["packet_id"],
+            "input_sha256": packet["input_sha256"],
+            "instance_id": "assessor-fixture",
+            "mode": "rag_blind",
+            "status": "pass",
+            "case_judgments": [
+                {
+                    "case_id": case["case_id"],
+                    "answer_claims": {
+                        "decision": "pass",
+                        "reason": "Claims are supported",
+                        "evidence_refs": [
+                            f"case:{case['case_id']}",
+                            *[
+                                f"note:{path}"
+                                for path in case["evidence_note_refs"]
+                            ],
+                        ],
+                    },
+                    "provenance": {
+                        "decision": "pass",
+                        "reason": "Provenance is sufficient",
+                        "evidence_refs": [
+                            f"case:{case['case_id']}",
+                            *[
+                                f"note:{path}"
+                                for path in case["evidence_note_refs"]
+                            ],
+                        ],
+                    },
+                }
+                for case in payload["cases"]
+            ],
+            "findings": [],
+            "claim_conflicts": [],
+            "unassessed": [],
+        }
+
+    def test_passed_judgment_requires_reason_and_evidence(self) -> None:
+        packet = {
+            "payload": {
+                "mode": "rag_blind",
+                "cases": [
+                    {
+                        "case_id": "case_one",
+                        "evidence_note_refs": ["knowledgebase/one.md"],
+                    }
+                ],
+                "note_evidence": [{"path": "knowledgebase/one.md"}],
+            }
+        }
+        assessment = {
+            "schema_version": 1,
+            "packet_type": "quality_assessment",
+            "packet_id": "packet_fixture",
+            "input_sha256": "a" * 64,
+            "instance_id": "assessor_fixture",
+            "mode": "rag_blind",
+            "status": "pass",
+            "case_judgments": [
+                {
+                    "case_id": "case_one",
+                    "answer_claims": {
+                        "decision": "pass",
+                        "reason": None,
+                        "evidence_refs": [],
+                    },
+                    "provenance": {
+                        "decision": "pass",
+                        "reason": "Checked",
+                        "evidence_refs": [
+                            "case:case_one",
+                            "note:knowledgebase/one.md",
+                        ],
+                    },
+                }
+            ],
+            "findings": [],
+            "claim_conflicts": [],
+            "unassessed": [],
+        }
+
+        with self.assertRaisesRegex(
+            AssessorSchemaError, "requires a reason and evidence"
+        ):
+            validate_rag_assessment(packet, assessment)
+
+    def test_case_judgment_cannot_cite_another_cases_note(self) -> None:
+        packet = {
+            "payload": {
+                "mode": "rag_blind",
+                "cases": [
+                    {
+                        "case_id": "case_one",
+                        "evidence_note_refs": ["knowledgebase/one.md"],
+                    },
+                    {
+                        "case_id": "case_two",
+                        "evidence_note_refs": ["knowledgebase/two.md"],
+                    },
+                ],
+                "note_evidence": [
+                    {"path": "knowledgebase/one.md"},
+                    {"path": "knowledgebase/two.md"},
+                ],
+            }
+        }
+        assessment = {
+            "schema_version": 1,
+            "packet_type": "quality_assessment",
+            "packet_id": "packet_fixture",
+            "input_sha256": "a" * 64,
+            "instance_id": "assessor_fixture",
+            "mode": "rag_blind",
+            "status": "pass",
+            "case_judgments": [
+                {
+                    "case_id": case_id,
+                    "answer_claims": {
+                        "decision": "pass",
+                        "reason": "Checked",
+                        "evidence_refs": refs,
+                    },
+                    "provenance": {
+                        "decision": "pass",
+                        "reason": "Checked",
+                        "evidence_refs": refs,
+                    },
+                }
+                for case_id, refs in [
+                    (
+                        "case_one",
+                        ["case:case_one", "note:knowledgebase/two.md"],
+                    ),
+                    (
+                        "case_two",
+                        ["case:case_two", "note:knowledgebase/two.md"],
+                    ),
+                ]
+            ],
+            "findings": [],
+            "claim_conflicts": [],
+            "unassessed": [],
+        }
+
+        with self.assertRaisesRegex(
+            AssessorSchemaError, "references unknown evidence"
+        ):
+            validate_rag_assessment(packet, assessment)
 
     def test_scores_retrieval_and_builds_assessor_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -256,17 +413,7 @@ class RagEvaluationTests(unittest.TestCase):
 
             self.assertFalse(result["assessment_candidate_eligible"])
             packet = result["quality_assessor_packet"]
-            assessment = {
-                "schema_version": 1,
-                "packet_type": "quality_assessment",
-                "packet_id": packet["packet_id"],
-                "input_sha256": packet["input_sha256"],
-                "instance_id": "assessor-fixture",
-                "status": "pass",
-                "findings": [],
-                "claim_conflicts": [],
-                "unassessed": [],
-            }
+            assessment = self._passed_assessment(packet)
             evaluation_path = root / "evaluation.json"
             assessment_path = root / "assessment.json"
             evaluation_path.write_text(json.dumps(result), encoding="utf-8")
@@ -373,17 +520,7 @@ class RagEvaluationTests(unittest.TestCase):
                 index_validator=lambda _config, _qmd: evidence,
             )
             packet = evaluation["quality_assessor_packet"]
-            assessment = {
-                "schema_version": 1,
-                "packet_type": "quality_assessment",
-                "packet_id": packet["packet_id"],
-                "input_sha256": packet["input_sha256"],
-                "instance_id": "assessor-fixture",
-                "status": "pass",
-                "findings": [],
-                "claim_conflicts": [],
-                "unassessed": [],
-            }
+            assessment = self._passed_assessment(packet)
             evaluation_path = root / "evaluation.json"
             assessment_path = root / "assessment.json"
             evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
@@ -397,8 +534,21 @@ class RagEvaluationTests(unittest.TestCase):
                 executable="qmd",
                 index_validator=lambda _config, _qmd: evidence,
             )
+            active_retry = accept_rag_baseline(
+                config,
+                evaluation_path=evaluation_path,
+                assessment_path=assessment_path,
+                apply=True,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: evidence,
+            )
 
             self.assertEqual(accepted["status"], "baseline_applied")
+            self.assertEqual(active_retry["status"], "already_active")
+            self.assertEqual(
+                active_retry["transaction_id"], accepted["transaction_id"]
+            )
+            self.assertEqual(active_retry["next_action"], "commit")
             record = vault / accepted["path"]
             self.assertTrue(record.is_file())
             git_dir = Path(
@@ -413,6 +563,18 @@ class RagEvaluationTests(unittest.TestCase):
                 vault, git_dir, accepted["transaction_id"], "Record RAG baseline"
             )
             self.assertEqual(committed["status"], "committed_and_finalized")
+            committed_retry = accept_rag_baseline(
+                config,
+                evaluation_path=evaluation_path,
+                assessment_path=assessment_path,
+                apply=True,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: evidence,
+            )
+            self.assertEqual(committed_retry["status"], "already_committed")
+            self.assertEqual(
+                committed_retry["transaction_id"], accepted["transaction_id"]
+            )
             self.assertFalse(
                 subprocess.run(
                     ["git", "-C", str(vault), "status", "--porcelain=v1"],
@@ -445,17 +607,7 @@ class RagEvaluationTests(unittest.TestCase):
                 index_validator=lambda _config, _qmd: self._index_evidence(),
             )
             packet = evaluation["quality_assessor_packet"]
-            assessment = {
-                "schema_version": 1,
-                "packet_type": "quality_assessment",
-                "packet_id": packet["packet_id"],
-                "input_sha256": packet["input_sha256"],
-                "instance_id": "assessor-fixture",
-                "status": "pass",
-                "findings": [],
-                "claim_conflicts": [],
-                "unassessed": [],
-            }
+            assessment = self._passed_assessment(packet)
             packet["payload"]["limit"] = 49
             evaluation_path = root / "evaluation.json"
             assessment_path = root / "assessment.json"
@@ -499,17 +651,7 @@ class RagEvaluationTests(unittest.TestCase):
                 index_validator=lambda _config, _qmd: evidence,
             )
             packet = evaluation["quality_assessor_packet"]
-            assessment = {
-                "schema_version": 1,
-                "packet_type": "quality_assessment",
-                "packet_id": packet["packet_id"],
-                "input_sha256": packet["input_sha256"],
-                "instance_id": "assessor-fixture",
-                "status": "pass",
-                "findings": [],
-                "claim_conflicts": [],
-                "unassessed": [],
-            }
+            assessment = self._passed_assessment(packet)
             evaluation_path = root / "evaluation.json"
             assessment_path = root / "assessment.json"
             evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
@@ -550,6 +692,7 @@ class RagEvaluationTests(unittest.TestCase):
             )
             packet = evaluation["quality_assessor_packet"]
             packet["payload"]["note_evidence"][0]["path"] = "/dev/zero"
+            packet["payload"]["cases"][0]["evidence_note_refs"] = ["/dev/zero"]
             digest = hashlib.sha256(
                 json.dumps(
                     packet["payload"],
@@ -560,17 +703,7 @@ class RagEvaluationTests(unittest.TestCase):
             ).hexdigest()
             packet["packet_id"] = f"pkt_{digest[:20]}"
             packet["input_sha256"] = digest
-            assessment = {
-                "schema_version": 1,
-                "packet_type": "quality_assessment",
-                "packet_id": packet["packet_id"],
-                "input_sha256": digest,
-                "instance_id": "assessor-fixture",
-                "status": "pass",
-                "findings": [],
-                "claim_conflicts": [],
-                "unassessed": [],
-            }
+            assessment = self._passed_assessment(packet)
             evaluation_path = root / "evaluation.json"
             assessment_path = root / "assessment.json"
             evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
@@ -603,17 +736,7 @@ class RagEvaluationTests(unittest.TestCase):
             )
             self.assertFalse(evaluation["assessment_candidate_eligible"])
             packet = evaluation["quality_assessor_packet"]
-            assessment = {
-                "schema_version": 1,
-                "packet_type": "quality_assessment",
-                "packet_id": packet["packet_id"],
-                "input_sha256": packet["input_sha256"],
-                "instance_id": "assessor-fixture",
-                "status": "pass",
-                "findings": [],
-                "claim_conflicts": [],
-                "unassessed": [],
-            }
+            assessment = self._passed_assessment(packet)
             evaluation_path = root / "evaluation.json"
             assessment_path = root / "assessment.json"
             evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")

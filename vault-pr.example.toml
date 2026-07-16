@@ -1,14 +1,11 @@
 [vault]
 path = "/absolute/path/to/your/obsidian-vault"
-mode = "direct"
 
-[ingest]
+[semantic]
 max_touched_notes = 15
-create_source_note = true
-provenance_granularity = "claim"
 
 [sources]
-public_archive_dir = ".vault-pr/sources/public"
+capture_archive_dir = ".vault-pr/sources"
 visible_notes_dir = "sources"
 timeout_seconds = 30
 max_download_bytes = 10000000
@@ -24,7 +21,6 @@ include = ["**/*.md"]
 exclude = [".git/**", ".obsidian/**", ".vault-pr/**"]
 
 [index]
-backend = "qmd"
 name = "notebook"
 collection = "notebook"
 mask = "**/*.md"
@@ -35,8 +31,11 @@ max_retries = 3
 retry_backoff_seconds = [2, 10, 30]
 
 [review]
-review_all_semantic_transactions = false
+review_all_semantic_transactions = true
 max_revision_rounds = 2
+
+[autonomous_repair]
+enabled = false
 
 [quality]
 rag_cases_path = ".vault-pr/quality/rag/cases.jsonl"

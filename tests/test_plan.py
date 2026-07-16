@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from vault_pr.config import ConfigError
 from vault_pr.plan import PlanError, apply_plan, record_review, validate_plan
-from vault_pr.recovery import prepare_active_transaction
+from vault_pr.recovery import commit_applied_transaction, prepare_active_transaction
+from vault_pr.review import REQUIRED_JUDGMENTS
 
 from tests.capture_fixture import source_note_text, write_capture
 
@@ -32,8 +33,11 @@ def make_config(
 ) -> dict[str, object]:
     return {
         "vault": {"path": str(vault)},
-        "ingest": {"max_touched_notes": maximum},
-        "sources": {"public_archive_dir": ".vault-pr/sources/public"},
+        "semantic": {"max_touched_notes": maximum},
+        "sources": {
+            "capture_archive_dir": ".vault-pr/sources/public",
+            "visible_notes_dir": "knowledgebase/sources",
+        },
         "notes": {
             "include": ["**/*.md"],
             "exclude": [".git/**", ".obsidian/**", ".vault-pr/**"],
@@ -46,11 +50,27 @@ def make_config(
 
 
 class PlanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        freshness = patch(
+            "vault_pr.plan.validate_qmd_index_freshness",
+            return_value={
+                "schema_version": 1,
+                "eligible": True,
+                "reasons": [],
+            },
+        )
+        freshness.start()
+        self.addCleanup(freshness.stop)
+
     def make_vault(self, root: Path) -> tuple[Path, str]:
         vault = root / "vault"
         (vault / "knowledgebase" / "sources").mkdir(parents=True)
         (vault / "work" / "sources").mkdir(parents=True)
         source_id = write_capture(vault)
+        (vault / "knowledgebase" / "concept.md").write_text(
+            note("Concept", "Existing synthesis"),
+            encoding="utf-8",
+        )
         subprocess.run(["git", "init", "-q", str(vault)], check=True)
         subprocess.run(
             ["git", "-C", str(vault), "config", "user.email", "test@example.com"],
@@ -85,22 +105,92 @@ class PlanTests(unittest.TestCase):
             "expected_sha256": sha256(source_note),
             "content_file": "files/source.md",
         }
+        concept_note = root / "vault" / "knowledgebase" / "concept.md"
+        (files / "synthesis.md").write_text(
+            note("Concept", "Integrated from [[sources/source]]"),
+            encoding="utf-8",
+        )
+        synthesis_operation = {
+            "action": "update",
+            "path": "knowledgebase/concept.md",
+            "expected_sha256": sha256(concept_note),
+            "content_file": "files/synthesis.md",
+        }
         plan_path = plan_dir / "plan.json"
         plan_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "transaction_id": "txn_20260715T000000Z_fixture",
-                    "source_id": source_id,
                     "summary": "Integrate fixture",
+                    "authorization": {
+                        "kind": "maintenance_request",
+                        "summary": "Integrate the fixture source",
+                    },
+                    "evidence": [
+                        {"kind": "source_capture", "source_id": source_id}
+                    ],
                     "intent": intent,
+                    "retrieval": {"required": True},
                     "contradiction": contradiction,
-                    "operations": [source_operation, *operations],
+                    "operations": [
+                        source_operation,
+                        synthesis_operation,
+                        *operations,
+                    ],
                 }
             )
             + "\n"
         )
         return plan_path
+
+    def record_assessment(
+        self,
+        config: dict[str, object],
+        plan_path: Path,
+        instance_id: str,
+        status: str,
+        *,
+        reason: str = "Revise the transaction",
+    ) -> dict[str, object]:
+        checked = validate_plan(config, plan_path)
+        packet = checked["semantic_review_packet"]
+        evidence_refs = ["plan", "authorization"]
+        if status == "approve":
+            judgments = {
+                name: {
+                    "status": "pass",
+                    "reason": "Checked",
+                    "evidence_refs": evidence_refs,
+                }
+                for name in REQUIRED_JUDGMENTS
+            }
+            reasons: list[dict[str, object]] = []
+            unassessed: list[str] = []
+        else:
+            judgments = {}
+            reasons = [
+                {
+                    "code": "revision_required",
+                    "message": reason,
+                    "evidence_refs": ["plan"],
+                }
+            ]
+            unassessed = list(REQUIRED_JUDGMENTS)
+        assessment = {
+            "schema_version": 2,
+            "packet_type": "semantic_review",
+            "packet_id": packet["packet_id"],
+            "input_sha256": packet["input_sha256"],
+            "instance_id": instance_id,
+            "status": status,
+            "judgments": judgments,
+            "reasons": reasons,
+            "unassessed": unassessed,
+        }
+        assessment_path = plan_path.parent / f"{instance_id}.json"
+        assessment_path.write_text(json.dumps(assessment) + "\n")
+        return record_review(config, plan_path, assessment_path)
 
     def test_rejects_tampered_source_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -122,8 +212,78 @@ class PlanTests(unittest.TestCase):
                 note("Source", "Drops provenance")
             )
 
-            with self.assertRaisesRegex(PlanError, "preserve its source_id"):
+            with self.assertRaisesRegex(PlanError, "preserve source_id"):
                 validate_plan(make_config(vault), plan_path)
+
+    def test_integration_requires_modified_synthesis_note_linking_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["operations"] = plan["operations"][:1]
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                PlanError,
+                "modified synthesis note",
+            ):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_each_source_requires_a_modified_synthesis_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, first_source_id = self.make_vault(root)
+            second_source_id = write_capture(
+                vault,
+                source_note="knowledgebase/sources/second.md",
+                requested_url="https://example.com/second",
+                title="Second Source",
+            )
+            subprocess.run(["git", "-C", str(vault), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "second source"],
+                check=True,
+            )
+            plan_path = self.write_plan(root, first_source_id, [])
+            files = root / "plan" / "files"
+            second_note = vault / "knowledgebase" / "sources" / "second.md"
+            (files / "second.md").write_text(
+                source_note_text(second_source_id, "Integrated"),
+                encoding="utf-8",
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["evidence"].append(
+                {"kind": "source_capture", "source_id": second_source_id}
+            )
+            plan["operations"].append(
+                {
+                    "action": "update",
+                    "path": "knowledgebase/sources/second.md",
+                    "expected_sha256": sha256(second_note),
+                    "content_file": "files/second.md",
+                }
+            )
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                PlanError,
+                second_source_id,
+            ):
+                validate_plan(make_config(vault), plan_path)
+
+            (files / "synthesis.md").write_text(
+                note(
+                    "Concept",
+                    "Integrated from [[sources/source]] and [[sources/second]]",
+                ),
+                encoding="utf-8",
+            )
+            checked = validate_plan(make_config(vault), plan_path)
+            self.assertEqual(
+                set(checked["source_ids"]),
+                {first_source_id, second_source_id},
+            )
 
     def test_rejects_more_than_configured_note_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -180,17 +340,35 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(PlanError, "reviewer approval"):
                 apply_plan(restricted_config, plan_path)
 
-            record_review(restricted_config, plan_path, "reviewer-agent", "approve")
+            self.record_assessment(
+                restricted_config, plan_path, "reviewer-agent", "approve"
+            )
             checked = validate_plan(restricted_config, plan_path)
             self.assertTrue(checked["approval_valid"])
             (files / "updated.md").write_text(note("Existing", "Changed after review"))
             checked = validate_plan(make_config(vault), plan_path)
             self.assertFalse(checked["approval_valid"])
             (files / "updated.md").write_text(note("Existing", "Updated"))
-            record_review(restricted_config, plan_path, "reviewer-agent", "approve")
+            self.record_assessment(
+                restricted_config, plan_path, "reviewer-agent-2", "approve"
+            )
             plan_path.write_text(plan_path.read_text().replace("fixture", "changed", 1))
             checked = validate_plan(restricted_config, plan_path)
             self.assertFalse(checked["approval_valid"])
+
+    def test_split_requires_review_even_when_review_all_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [], intent="split")
+
+            checked = validate_plan(
+                make_config(vault, review_all=False),
+                plan_path,
+            )
+
+            self.assertIn("split", checked["risks"])
+            self.assertTrue(checked["approval_required"])
 
     def test_apply_create_and_update_archives_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -234,7 +412,7 @@ class PlanTests(unittest.TestCase):
                 vault / ".vault-pr" / "transactions" / "txn_20260715T000000Z_fixture"
             )
             self.assertTrue((archive / "plan.json").is_file())
-            self.assertTrue((archive / "files" / "updated.md").is_file())
+            self.assertFalse((archive / "files" / "updated.md").exists())
             self.assertTrue((archive / "result.json").is_file())
             journal = (
                 vault
@@ -244,6 +422,34 @@ class PlanTests(unittest.TestCase):
                 / "journal.json"
             )
             self.assertEqual(json.loads(journal.read_text())["phase"], "applied")
+
+    def test_apply_retry_returns_active_then_committed_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            config = make_config(vault)
+
+            first = apply_plan(config, plan_path)
+            active_retry = apply_plan(config, plan_path)
+
+            self.assertEqual(active_retry["status"], "already_active")
+            self.assertEqual(active_retry["transaction_id"], first["transaction_id"])
+            self.assertEqual(active_retry["next_action"], "commit")
+            self.assertTrue(active_retry["requires_commit"])
+
+            commit_applied_transaction(
+                vault,
+                vault / ".git",
+                first["transaction_id"],
+                "Apply semantic plan",
+            )
+            committed_retry = apply_plan(config, plan_path)
+            self.assertEqual(committed_retry["status"], "already_committed")
+            self.assertEqual(
+                committed_retry["transaction_id"], first["transaction_id"]
+            )
+            self.assertFalse(committed_retry["requires_commit"])
 
     def test_review_revision_rounds_are_bounded_and_require_changed_content(
         self,
@@ -255,18 +461,24 @@ class PlanTests(unittest.TestCase):
             config = make_config(vault, review_all=True, max_revision_rounds=1)
             proposed = root / "plan" / "files" / "source.md"
 
-            first = record_review(
-                config, plan_path, "reviewer-1", "reject", notes="revise"
+            first = self.record_assessment(
+                config, plan_path, "reviewer-1", "reject", reason="revise"
             )
             self.assertEqual(first["remaining_revision_rounds"], 1)
             with self.assertRaisesRegex(PlanError, "must change after rejection"):
-                record_review(config, plan_path, "reviewer-2", "approve")
+                self.record_assessment(
+                    config, plan_path, "reviewer-2", "approve"
+                )
 
             proposed.write_text(source_note_text(source_id, "Revision one"))
-            record_review(config, plan_path, "reviewer-2", "reject")
+            self.record_assessment(
+                config, plan_path, "reviewer-2", "reject"
+            )
             proposed.write_text(source_note_text(source_id, "Revision two"))
             with self.assertRaisesRegex(PlanError, "revision limit exhausted"):
-                record_review(config, plan_path, "reviewer-3", "approve")
+                self.record_assessment(
+                    config, plan_path, "reviewer-3", "approve"
+                )
 
     def test_apply_rechecks_revision_limit_with_the_vault_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -277,7 +489,7 @@ class PlanTests(unittest.TestCase):
             permissive = make_config(vault, review_all=True, max_revision_rounds=5)
 
             for revision in range(3):
-                record_review(
+                self.record_assessment(
                     permissive,
                     plan_path,
                     f"reviewer-{revision}",
@@ -286,7 +498,9 @@ class PlanTests(unittest.TestCase):
                 proposed.write_text(
                     source_note_text(source_id, f"Revision {revision + 1}")
                 )
-            record_review(permissive, plan_path, "reviewer-final", "approve")
+            self.record_assessment(
+                permissive, plan_path, "reviewer-final", "approve"
+            )
 
             configured = make_config(vault, review_all=True, max_revision_rounds=2)
             with self.assertRaisesRegex(PlanError, "revision limit exceeded"):
@@ -298,14 +512,31 @@ class PlanTests(unittest.TestCase):
             vault, source_id = self.make_vault(root)
             plan_path = self.write_plan(root, source_id, [])
             config = make_config(vault, review_all=True)
-            rejected = record_review(config, plan_path, "reviewer-1", "reject")
+            rejected = self.record_assessment(
+                config, plan_path, "reviewer-1", "reject"
+            )
             history_path = Path(rejected["review_history"])
-            approval_path = Path(rejected["approval"])
+            approval_path = Path(rejected["assessment_path"])
             history = json.loads(history_path.read_text())
-            forged = {**history[-1], "decision": "approve", "reviewer": "reviewer-2"}
+            forged_assessment = {
+                **history[-1]["assessment"],
+                "status": "approve",
+                "instance_id": "reviewer-2",
+                "judgments": {
+                    name: {
+                        "status": "pass",
+                        "reason": "Checked",
+                        "evidence_refs": ["plan"],
+                    }
+                    for name in REQUIRED_JUDGMENTS
+                },
+                "reasons": [],
+                "unassessed": [],
+            }
+            forged = {**history[-1], "assessment": forged_assessment}
             history.append(forged)
             history_path.write_text(json.dumps(history) + "\n")
-            approval_path.write_text(json.dumps(forged) + "\n")
+            approval_path.write_text(json.dumps(forged_assessment) + "\n")
 
             with self.assertRaisesRegex(PlanError, "already rejected"):
                 apply_plan(config, plan_path)
@@ -318,7 +549,7 @@ class PlanTests(unittest.TestCase):
             vault, source_id = self.make_vault(root)
             plan_path = self.write_plan(root, source_id, [])
             config = make_config(vault)
-            record_review(config, plan_path, "reviewer-1", "reject")
+            self.record_assessment(config, plan_path, "reviewer-1", "reject")
 
             checked = validate_plan(config, plan_path)
             self.assertEqual(checked["risks"], ["review_history"])
@@ -331,14 +562,14 @@ class PlanTests(unittest.TestCase):
             vault, source_id = self.make_vault(root)
             plan_path = self.write_plan(root, source_id, [])
             config = make_config(vault, review_all=True)
-            record_review(config, plan_path, "reviewer-1", "approve")
+            self.record_assessment(config, plan_path, "reviewer-1", "approve")
 
             result = apply_plan(config, plan_path)
 
             archive = vault / ".vault-pr" / "transactions" / result["transaction_id"]
             history = json.loads((archive / "review-history.json").read_text())
-            self.assertEqual(history[0]["reviewer"], "reviewer-1")
-            self.assertEqual(history[0]["decision"], "approve")
+            self.assertEqual(history[0]["assessment"]["instance_id"], "reviewer-1")
+            self.assertEqual(history[0]["assessment"]["status"], "approve")
 
     def test_apply_rejects_content_changed_after_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -442,7 +673,7 @@ class PlanTests(unittest.TestCase):
                 return prepare_active_transaction(**kwargs)
 
             with patch(
-                "vault_pr.plan.prepare_active_transaction",
+                "vault_pr.mutation.prepare_active_transaction",
                 side_effect=mutate_during_prepare,
             ):
                 with self.assertRaisesRegex(PlanError, "changed before transaction"):
@@ -493,7 +724,7 @@ class PlanTests(unittest.TestCase):
                 original_unlink(path, *args, **kwargs)
 
             with patch.object(Path, "unlink", new=fail_source_once):
-                with self.assertRaisesRegex(OSError, "injected source delete"):
+                with self.assertRaisesRegex(PlanError, "injected source delete"):
                     apply_plan(make_config(vault), plan_path)
 
             self.assertTrue(source.is_file())
@@ -534,6 +765,182 @@ class PlanTests(unittest.TestCase):
 
             with self.assertRaisesRegex(PlanError, "duplicates"):
                 validate_plan(make_config(vault), plan_path)
+
+    def test_rejects_unknown_normal_operation_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            plan = json.loads(plan_path.read_text())
+            plan["operations"][0]["ignored"] = True
+            plan_path.write_text(json.dumps(plan) + "\n")
+
+            with self.assertRaisesRegex(PlanError, "unknown or missing fields"):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_autonomous_repair_cannot_update_unrelated_note(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, _source_id = self.make_vault(root)
+            owner = vault / "knowledgebase" / "owner.md"
+            unrelated = vault / "knowledgebase" / "unrelated.md"
+            owner.write_text(note("Owner", "Broken [[Missing]]."))
+            unrelated.write_text(note("Unrelated"))
+            subprocess.run(["git", "-C", str(vault), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "quality fixture"],
+                check=True,
+            )
+            plan_dir = root / "autonomous-plan"
+            files = plan_dir / "files"
+            files.mkdir(parents=True)
+            (files / "unrelated.md").write_text(note("Unrelated", "Changed"))
+            record_id = "quality_11111111111111111111"
+            record_path = root / f"{record_id}.json"
+            record_path.write_text("{}\n")
+            plan_path = plan_dir / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "transaction_id": "txn_autonomous_scope",
+                        "summary": "Repair selected quality finding",
+                        "authorization": {
+                            "kind": "autonomous_repair_policy",
+                            "summary": "Apply deterministic quality repair",
+                        },
+                        "evidence": [
+                            {
+                                "kind": "quality_record",
+                                "record_id": record_id,
+                                "finding_ids": ["finding_fixture"],
+                            }
+                        ],
+                        "intent": "maintenance",
+                        "retrieval": {
+                            "required": False,
+                            "reason": "quality record identifies the owner",
+                        },
+                        "contradiction": False,
+                        "operations": [
+                            {
+                                "action": "update",
+                                "path": "knowledgebase/unrelated.md",
+                                "expected_sha256": sha256(unrelated),
+                                "content_file": "files/unrelated.md",
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            finding = {
+                "finding_id": "finding_fixture",
+                "rule_id": "broken_wikilink",
+                "severity": "error",
+                "path": "knowledgebase/owner.md",
+                "owner_sha256": sha256(owner),
+                "target": "Missing",
+                "blocking_scope": "owning_transaction",
+                "autonomous_capability": "repair_broken_wikilink",
+            }
+            config = make_config(vault)
+            config["autonomous_repair"] = {"enabled": True}
+            with (
+                patch(
+                    "vault_pr.plan.load_quality_record",
+                    return_value=({}, record_path),
+                ),
+                patch(
+                    "vault_pr.plan.revalidate_quality_record",
+                    return_value=[finding],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    PlanError, "only update a selected finding owner"
+                ):
+                    validate_plan(config, plan_path)
+
+    def test_autonomous_repair_can_add_incoming_source_synthesis_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            source = vault / "knowledgebase" / "sources" / "source.md"
+            concept = vault / "knowledgebase" / "concept.md"
+            plan_dir = root / "autonomous-source-plan"
+            files = plan_dir / "files"
+            files.mkdir(parents=True)
+            (files / "concept.md").write_text(
+                note("Concept", "Synthesized from [[sources/source]]"),
+                encoding="utf-8",
+            )
+            record_id = "quality_22222222222222222222"
+            record_path = root / f"{record_id}.json"
+            record_path.write_text("{}\n", encoding="utf-8")
+            plan_path = plan_dir / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "transaction_id": "txn_autonomous_source_link",
+                        "summary": "Link source from synthesis",
+                        "authorization": {
+                            "kind": "autonomous_repair_policy",
+                            "summary": "Apply deterministic quality repair",
+                        },
+                        "evidence": [
+                            {
+                                "kind": "quality_record",
+                                "record_id": record_id,
+                                "finding_ids": ["finding_source"],
+                            }
+                        ],
+                        "intent": "maintenance",
+                        "retrieval": {
+                            "required": False,
+                            "reason": "quality record identifies the missing link",
+                        },
+                        "contradiction": False,
+                        "operations": [
+                            {
+                                "action": "update",
+                                "path": "knowledgebase/concept.md",
+                                "expected_sha256": sha256(concept),
+                                "content_file": "files/concept.md",
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            finding = {
+                "finding_id": "finding_source",
+                "rule_id": "source_without_synthesis_link",
+                "severity": "warning",
+                "path": "knowledgebase/sources/source.md",
+                "owner_sha256": sha256(source),
+                "blocking_scope": "none",
+                "autonomous_capability": "repair_source_synthesis_link",
+            }
+            config = make_config(vault)
+            config["autonomous_repair"] = {"enabled": True}
+            with (
+                patch(
+                    "vault_pr.plan.load_quality_record",
+                    return_value=({}, record_path),
+                ),
+                patch(
+                    "vault_pr.plan.revalidate_quality_record",
+                    return_value=[finding],
+                ),
+            ):
+                checked = validate_plan(config, plan_path)
+
+            self.assertEqual(
+                checked["operations"][0]["path"],
+                concept.resolve(),
+            )
 
     def test_rejects_invalid_yaml_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -604,7 +1011,160 @@ class PlanTests(unittest.TestCase):
             plan["operations"] = plan["operations"][1:]
             plan_path.write_text(json.dumps(plan) + "\n")
 
-            with self.assertRaisesRegex(PlanError, "must update the captured source"):
+            with self.assertRaisesRegex(PlanError, "must update source note"):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_maintenance_source_evidence_does_not_require_source_note_update(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            files = root / "plan" / "files"
+            files.mkdir(parents=True)
+            (files / "created.md").write_text(note("Created"), encoding="utf-8")
+            plan_path = self.write_plan(
+                root,
+                source_id,
+                [
+                    {
+                        "action": "create",
+                        "path": "knowledgebase/created.md",
+                        "content_file": "files/created.md",
+                    }
+                ],
+                intent="maintenance",
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["retrieval"] = {
+                "required": False,
+                "reason": "The maintenance request already identifies the target",
+            }
+            plan["operations"] = plan["operations"][1:]
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+            result = validate_plan(make_config(vault), plan_path)
+
+            self.assertEqual(result["plan"]["intent"], "maintenance")
+
+    def test_rejects_retrieval_note_as_persistent_transaction_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            retrieval_note = vault / "knowledgebase" / "sources" / "source.md"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["evidence"].append(
+                {
+                    "kind": "retrieval_note",
+                    "path": "knowledgebase/sources/source.md",
+                    "sha256": sha256(retrieval_note),
+                }
+            )
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(PlanError, "unsupported kind"):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_purge_capture_requires_review_and_deletes_capture_and_source_note(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_dir = root / "purge-plan"
+            plan_dir.mkdir()
+            plan_path = plan_dir / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "transaction_id": "txn_purge_fixture",
+                        "summary": "Purge obsolete capture",
+                        "authorization": {
+                            "kind": "maintenance_request",
+                            "summary": "Remove the obsolete capture and Source Note",
+                        },
+                        "evidence": [],
+                        "intent": "maintenance",
+                        "retrieval": {
+                            "required": False,
+                            "reason": "purge safety is checked by exact references",
+                        },
+                        "contradiction": False,
+                        "operations": [
+                            {
+                                "action": "purge_capture",
+                                "source_id": source_id,
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            checked = validate_plan(make_config(vault), plan_path)
+            self.assertIn("purge_capture", checked["risks"])
+            self.assertTrue(checked["approval_required"])
+            self.record_assessment(
+                make_config(vault), plan_path, "purge-reviewer", "approve"
+            )
+
+            applied = apply_plan(make_config(vault), plan_path)
+
+            self.assertEqual(applied["status"], "applied")
+            self.assertFalse(
+                (
+                    vault / ".vault-pr" / "sources" / "public" / source_id
+                ).exists()
+            )
+            self.assertFalse(
+                (vault / "knowledgebase" / "sources" / "source.md").exists()
+            )
+
+    def test_purge_capture_blocks_remaining_source_id_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            related = vault / "knowledgebase" / "related.md"
+            related.write_text(f"Provenance: {source_id}\n")
+            subprocess.run(["git", "-C", str(vault), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "Add reference"],
+                check=True,
+            )
+            plan_dir = root / "purge-plan"
+            plan_dir.mkdir()
+            plan_path = plan_dir / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "transaction_id": "txn_purge_blocked",
+                        "summary": "Purge referenced capture",
+                        "authorization": {
+                            "kind": "maintenance_request",
+                            "summary": "Remove obsolete source",
+                        },
+                        "evidence": [],
+                        "intent": "maintenance",
+                        "retrieval": {
+                            "required": False,
+                            "reason": "reference scan is deterministic",
+                        },
+                        "contradiction": False,
+                        "operations": [
+                            {
+                                "action": "purge_capture",
+                                "source_id": source_id,
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            with self.assertRaisesRegex(PlanError, "remaining source_id references"):
                 validate_plan(make_config(vault), plan_path)
 
     def test_governance_limits_cannot_be_relaxed_by_config(self) -> None:

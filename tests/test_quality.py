@@ -28,13 +28,14 @@ class GraphQualityTests(unittest.TestCase):
             _git(vault, "config", "user.name", "Fixture")
             _git(vault, "config", "user.email", "fixture@example.com")
             (vault / "concept.md").write_text(
-                "---\ntype: concept\n---\n\n# Concept\n\n[[missing]]\n",
+                "---\ntype: concept\n---\n\n"
+                "# Concept\n\n[[sources/source]]\n\n[[missing]]\n",
                 encoding="utf-8",
             )
             source = vault / "sources" / "source.md"
             source.parent.mkdir()
             source.write_text(
-                "---\ntype: source\n---\n\n# Source\n\n[[../concept]]\n",
+                "---\ntype: source\n---\n\n# Source\n",
                 encoding="utf-8",
             )
             (vault / "index.md").write_text(
@@ -67,10 +68,9 @@ class GraphQualityTests(unittest.TestCase):
             result = audit_graph(config)
 
             self.assertTrue(result["git_clean"])
-            self.assertTrue(result["baseline_eligible"])
             self.assertEqual(result["metrics"]["tracked_notes"], 7)
             self.assertEqual(result["metrics"]["resolved_edges"], 2)
-            finding_ids = {finding["id"] for finding in result["findings"]}
+            finding_ids = {finding["rule_id"] for finding in result["findings"]}
             self.assertIn("broken_wikilink", finding_ids)
             self.assertIn("isolated_concept", finding_ids)
             self.assertIn("unclassified_note_role", finding_ids)
@@ -78,7 +78,7 @@ class GraphQualityTests(unittest.TestCase):
             broken = next(
                 finding
                 for finding in result["findings"]
-                if finding["id"] == "broken_wikilink"
+                if finding["rule_id"] == "broken_wikilink"
             )
             self.assertEqual(broken["blocking_scope"], "owning_transaction")
             packet = result["quality_assessor_packet"]
@@ -87,7 +87,7 @@ class GraphQualityTests(unittest.TestCase):
             broken_targets = {
                 finding.get("target")
                 for finding in result["findings"]
-                if finding["id"] == "broken_wikilink"
+                if finding["rule_id"] == "broken_wikilink"
             }
             self.assertNotIn("inline-example", broken_targets)
             self.assertNotIn("fenced-example", broken_targets)
@@ -116,6 +116,40 @@ class GraphQualityTests(unittest.TestCase):
             self.assertEqual(packet["input_sha256"], packet_sha256)
             self.assertEqual(packet["packet_id"], f"pkt_{packet_sha256[:20]}")
 
+    def test_source_requires_an_incoming_synthesis_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            _git(vault, "init", "-q")
+            _git(vault, "config", "user.name", "Fixture")
+            _git(vault, "config", "user.email", "fixture@example.com")
+            (vault / "concept.md").write_text(
+                "---\ntype: concept\n---\n\n# Concept\n",
+                encoding="utf-8",
+            )
+            source = vault / "sources" / "source.md"
+            source.parent.mkdir()
+            source.write_text(
+                "---\ntype: source\n---\n\n# Source\n\n[[../concept]]\n",
+                encoding="utf-8",
+            )
+            _git(vault, "add", "--all")
+            _git(vault, "commit", "-qm", "Seed graph fixture")
+
+            result = audit_graph(
+                {
+                    "vault": {"path": str(vault)},
+                    "notes": {"include": ["**/*.md"]},
+                }
+            )
+
+            finding = next(
+                item
+                for item in result["findings"]
+                if item["rule_id"] == "source_without_synthesis_link"
+            )
+            self.assertEqual(finding["path"], "sources/source.md")
+
     def test_dirty_graph_audit_cannot_become_a_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir) / "vault"
@@ -134,7 +168,6 @@ class GraphQualityTests(unittest.TestCase):
             )
 
             self.assertFalse(result["git_clean"])
-            self.assertFalse(result["baseline_eligible"])
 
 
 if __name__ == "__main__":

@@ -13,6 +13,48 @@ class ConfigError(ValueError):
     """Raised when the local project configuration is invalid."""
 
 
+_CONFIG_FIELDS: dict[str, set[str]] = {
+    "vault": {"path"},
+    "sources": {
+        "capture_archive_dir",
+        "visible_notes_dir",
+        "timeout_seconds",
+        "max_download_bytes",
+        "max_asset_files",
+        "max_asset_bytes",
+        "extraction_timeout_seconds",
+        "max_pdf_pages",
+        "max_extracted_characters",
+        "max_extraction_memory_bytes",
+    },
+    "semantic": {"max_touched_notes"},
+    "notes": {"include", "exclude"},
+    "index": {
+        "name",
+        "collection",
+        "mask",
+        "context",
+        "embed",
+        "max_docs_per_batch",
+        "max_retries",
+        "retry_backoff_seconds",
+    },
+    "review": {
+        "review_all_semantic_transactions",
+        "max_revision_rounds",
+    },
+    "quality": {"rag_cases_path", "note_roles"},
+    "autonomous_repair": {"enabled"},
+}
+
+_NOTE_ROLE_FIELDS = {
+    "concept_types",
+    "source_types",
+    "index_types",
+    "excluded_types",
+}
+
+
 @dataclass(frozen=True)
 class IndexSpec:
     """The single qmd collection governed for one configured vault."""
@@ -40,7 +82,87 @@ def load_config(config_path: Path) -> dict[str, Any]:
         raise ConfigError(f"config not found: {config_path}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML config: {config_path}") from exc
+    _validate_config_shape(config)
     return config
+
+
+def _validate_config_shape(config: dict[str, Any]) -> None:
+    unknown_tables = sorted(set(config) - set(_CONFIG_FIELDS))
+    if unknown_tables:
+        raise ConfigError("unknown config table: " + ", ".join(unknown_tables))
+    for table, allowed_fields in _CONFIG_FIELDS.items():
+        value = config.get(table)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ConfigError(f"{table} must be a table")
+        unknown_fields = sorted(set(value) - allowed_fields)
+        if unknown_fields:
+            raise ConfigError(
+                f"unknown {table} field: " + ", ".join(unknown_fields)
+            )
+    quality = config.get("quality")
+    if isinstance(quality, dict) and "note_roles" in quality:
+        note_roles = quality["note_roles"]
+        if not isinstance(note_roles, dict):
+            raise ConfigError("quality.note_roles must be a table")
+        unknown_roles = sorted(set(note_roles) - _NOTE_ROLE_FIELDS)
+        if unknown_roles:
+            raise ConfigError(
+                "unknown quality.note_roles field: " + ", ".join(unknown_roles)
+            )
+        for field, values in note_roles.items():
+            if (
+                not isinstance(values, list)
+                or not all(
+                    isinstance(value, str) and value.strip() for value in values
+                )
+            ):
+                raise ConfigError(
+                    f"quality.note_roles.{field} must be an array of strings"
+                )
+    for table, field in (
+        ("review", "review_all_semantic_transactions"),
+        ("autonomous_repair", "enabled"),
+        ("index", "embed"),
+    ):
+        value = config.get(table, {}).get(field)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"{table}.{field} must be boolean")
+    for table, field in (
+        ("sources", "max_download_bytes"),
+        ("sources", "max_asset_files"),
+        ("sources", "max_asset_bytes"),
+        ("sources", "max_pdf_pages"),
+        ("sources", "max_extracted_characters"),
+        ("sources", "max_extraction_memory_bytes"),
+        ("semantic", "max_touched_notes"),
+        ("index", "max_docs_per_batch"),
+        ("index", "max_retries"),
+        ("review", "max_revision_rounds"),
+    ):
+        value = config.get(table, {}).get(field)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            raise ConfigError(f"{table}.{field} must be an integer")
+    for field in ("timeout_seconds", "extraction_timeout_seconds"):
+        value = config.get("sources", {}).get(field)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            raise ConfigError(f"sources.{field} must be a number")
+    backoff = config.get("index", {}).get("retry_backoff_seconds")
+    if backoff is not None and (
+        not isinstance(backoff, list)
+        or not all(
+            not isinstance(value, bool) and isinstance(value, (int, float))
+            for value in backoff
+        )
+    ):
+        raise ConfigError(
+            "index.retry_backoff_seconds must be an array of numbers"
+        )
 
 
 def load_vault_path(config: dict[str, Any]) -> Path:
@@ -124,6 +246,7 @@ def _path_patterns(config: dict[str, Any], field: str, default: list[str]) -> li
 
 def note_path_allowed(config: dict[str, Any], vault: Path, path: Path) -> bool:
     """Return whether a vault-relative Markdown path is eligible for semantic writes."""
+    vault = vault.resolve()
     resolved = path.resolve()
     if not resolved.is_relative_to(vault):
         return False
@@ -169,7 +292,7 @@ def review_policy(config: dict[str, Any]) -> ReviewPolicy:
     raw_review = config.get("review", {})
     if not isinstance(raw_review, dict):
         raise ConfigError("review must be a table")
-    review_all = raw_review.get("review_all_semantic_transactions", False)
+    review_all = raw_review.get("review_all_semantic_transactions", True)
     if not isinstance(review_all, bool):
         raise ConfigError("review.review_all_semantic_transactions must be boolean")
     max_revisions = raw_review.get("max_revision_rounds", 2)
@@ -187,20 +310,22 @@ def review_policy(config: dict[str, Any]) -> ReviewPolicy:
 def max_touched_notes(config: dict[str, Any]) -> int:
     """Return the transaction note limit."""
     try:
-        maximum = int(config.get("ingest", {}).get("max_touched_notes", 15))
+        maximum = int(config.get("semantic", {}).get("max_touched_notes", 15))
     except (AttributeError, TypeError, ValueError) as exc:
-        raise ConfigError("ingest.max_touched_notes must be an integer") from exc
+        raise ConfigError("semantic.max_touched_notes must be an integer") from exc
     if maximum < 1:
-        raise ConfigError("ingest.max_touched_notes must be positive")
+        raise ConfigError("semantic.max_touched_notes must be positive")
     if maximum > 15:
-        raise ConfigError("ingest.max_touched_notes cannot exceed the hard limit of 15")
+        raise ConfigError(
+            "semantic.max_touched_notes cannot exceed the hard limit of 15"
+        )
     return maximum
 
 
 def source_archive_dir(config: dict[str, Any], vault: Path) -> Path:
-    """Resolve the immutable public-source archive directory."""
+    """Resolve the immutable source-capture archive directory."""
     try:
-        raw_path = config["sources"]["public_archive_dir"]
+        raw_path = config["sources"]["capture_archive_dir"]
     except (KeyError, TypeError) as exc:
-        raise ConfigError("missing sources.public_archive_dir") from exc
-    return vault_relative_path(vault, raw_path, "sources.public_archive_dir")
+        raise ConfigError("missing sources.capture_archive_dir") from exc
+    return vault_relative_path(vault, raw_path, "sources.capture_archive_dir")

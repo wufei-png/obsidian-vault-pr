@@ -79,6 +79,83 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse(created.exists())
             self.assertFalse(active.exists())
 
+    def test_prepare_writes_only_schema_v3_entry_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, _existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+
+            journal = json.loads((active / "journal.json").read_text())
+
+            self.assertEqual(journal["schema_version"], 3)
+            self.assertEqual(journal["phase"], "prepared")
+            self.assertNotIn("vault", journal)
+            self.assertRegex(journal["vault_id"], r"^[0-9a-f]{64}$")
+            self.assertNotIn(str(vault), json.dumps(journal))
+            for entry in journal["entries"]:
+                self.assertEqual(
+                    set(entry),
+                    {
+                        "path",
+                        "original_sha256",
+                        "original_mode",
+                        "final_sha256",
+                        "final_mode",
+                        "backup",
+                    },
+                )
+
+    def test_recovery_rejects_v1_and_v2_journals_without_mutation(self) -> None:
+        for schema_version in (1, 2):
+            with self.subTest(schema_version=schema_version):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    vault, existing, created, active = self.prepare_interrupted(
+                        Path(temp_dir)
+                    )
+                    journal_path = active / "journal.json"
+                    journal = json.loads(journal_path.read_text())
+                    journal["schema_version"] = schema_version
+                    journal_path.write_text(json.dumps(journal) + "\n")
+
+                    with self.assertRaisesRegex(
+                        RecoveryError, "unsupported schema version"
+                    ):
+                        recover_interrupted_transaction(vault, vault / ".git")
+
+                    self.assertEqual(existing.read_bytes(), b"updated\n")
+                    self.assertEqual(created.read_bytes(), b"created\n")
+                    self.assertTrue(active.exists())
+
+    def test_recovery_requires_explicit_v3_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, existing, created, active = self.prepare_interrupted(Path(temp_dir))
+            journal_path = active / "journal.json"
+            journal = json.loads(journal_path.read_text())
+            journal.pop("phase")
+            journal_path.write_text(json.dumps(journal) + "\n")
+
+            with self.assertRaisesRegex(RecoveryError, "invalid phase"):
+                recover_interrupted_transaction(vault, vault / ".git")
+
+            self.assertEqual(existing.read_bytes(), b"updated\n")
+            self.assertEqual(created.read_bytes(), b"created\n")
+            self.assertTrue(active.exists())
+
+    def test_mark_applied_rejects_v2_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _vault, _existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            journal_path = active / "journal.json"
+            journal = json.loads(journal_path.read_text())
+            journal["schema_version"] = 2
+            journal_path.write_text(json.dumps(journal) + "\n")
+
+            with self.assertRaisesRegex(RecoveryError, "unsupported schema version"):
+                mark_active_applied(active)
+
+            self.assertEqual(json.loads(journal_path.read_text())["phase"], "prepared")
+
     def test_prepare_rejects_path_changed_from_expected_original(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault, existing = self.make_vault(Path(temp_dir))

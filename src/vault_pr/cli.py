@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import sys
 from pathlib import Path
@@ -13,10 +12,20 @@ from .canary import CanaryError, run_capture_route_canary
 from .config import ConfigError, load_config, load_vault_path
 from .git import GitSafetyError, require_clean_git_root, run_git
 from .index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
-from .ingest import IngestError, ingest_url
-from .migrate import MigrationError, migrate_captures_v2
+from .errors import IngestError
+from .ingest import ingest_source
+from .migrate import MigrationError, migrate_captures_v3
 from .plan import PlanError, apply_plan, init_plan, record_review, validate_plan
+from .protocol import (
+    EXIT_ERROR,
+    EXIT_NOT_ACHIEVED,
+    EXIT_OK,
+    emit,
+    error_envelope,
+    success_envelope,
+)
 from .quality import QualityAuditError, audit_graph
+from .quality_record import QualityRecordError, record_quality_findings
 from .rag_eval import RagEvaluationError, accept_rag_baseline, evaluate_rag
 from .recovery import (
     RecoveryError,
@@ -26,67 +35,150 @@ from .recovery import (
     recover_interrupted_transaction,
 )
 from .retrieve import RetrievalError, retrieve_related_notes
+from .tooling import (
+    ToolProbeError,
+    probe_defuddle_capabilities,
+    probe_qmd_capabilities,
+)
 
 
 def doctor(config_path: Path) -> int:
     """Check whether the configured vault is safe to operate on."""
+    command = "doctor"
     try:
         config = load_config(config_path)
         vault = load_vault_path(config)
     except ConfigError as exc:
-        print(f"ERROR {exc}", file=sys.stderr)
-        return 2
+        emit(
+            error_envelope(command, "invalid_config", str(exc)),
+            stream=sys.stderr,
+        )
+        return EXIT_ERROR
 
     failed = False
-    print(f"vault: {vault}")
+    checks: list[dict[str, object]] = []
 
     if not vault.is_dir():
-        print("ERROR vault path does not exist or is not a directory")
-        return 2
+        emit(
+            error_envelope(
+                command,
+                "invalid_vault",
+                "vault path does not exist or is not a directory",
+            ),
+            stream=sys.stderr,
+        )
+        return EXIT_ERROR
 
     try:
         require_clean_git_root(vault)
-        print("git: repository root verified")
-        print("git: working tree clean")
+        checks.append({"check": "git_clean", "status": "pass"})
     except GitSafetyError as exc:
-        print(f"ERROR {exc}")
+        checks.append(
+            {"check": "git_clean", "status": "fail", "message": str(exc)}
+        )
         failed = True
 
     git_dir_result = run_git(vault, "rev-parse", "--absolute-git-dir")
     if git_dir_result.returncode == 0:
-        active = list_active_transactions(Path(git_dir_result.stdout.strip()))
-        if active:
-            print(
-                "ERROR active vault-pr transaction requires commit/finalize or recovery: "
-                + ", ".join(path.name for path in active)
+        try:
+            active = list_active_transactions(Path(git_dir_result.stdout.strip()))
+        except RecoveryError as exc:
+            checks.append(
+                {
+                    "check": "active_transaction",
+                    "status": "fail",
+                    "message": str(exc),
+                }
+            )
+            failed = True
+        else:
+            if active:
+                checks.append(
+                    {
+                        "check": "active_transaction",
+                        "status": "fail",
+                        "transaction_ids": [path.name for path in active],
+                    }
+                )
+                failed = True
+            else:
+                checks.append({"check": "active_transaction", "status": "pass"})
+
+    tool_paths: dict[str, str] = {}
+    for executable in ("defuddle", "qmd"):
+        path = shutil.which(executable)
+        if path:
+            tool_paths[executable] = path
+        else:
+            checks.append(
+                {
+                    "check": f"tool_{executable}",
+                    "status": "fail",
+                    "message": f"required tool missing: {executable}",
+                }
             )
             failed = True
 
-    backend = config.get("index", {}).get("backend", "qmd")
-    if backend != "qmd":
-        print(f"ERROR unsupported index backend: {backend}")
-        failed = True
-    for executable, required in (("defuddle", True), ("qmd", backend == "qmd")):
-        path = shutil.which(executable)
-        label = "required" if required else "optional"
-        if path:
-            print(f"tool: {executable} found at {path}")
-        else:
-            print(
-                f"{'ERROR' if required else 'WARN'} {label} tool missing: {executable}"
+    for tool, path in tool_paths.items():
+        try:
+            capability = (
+                probe_qmd_capabilities(
+                    path,
+                    index_name=str(config.get("index", {}).get("name", "notebook")),
+                )
+                if tool == "qmd"
+                else probe_defuddle_capabilities(path)
             )
-            failed = failed or required
+            checks.append(
+                {
+                    "check": f"tool_{tool}",
+                    "status": "pass",
+                    "path": path,
+                    "capability": capability,
+                }
+            )
+        except ToolProbeError as exc:
+            checks.append(
+                {
+                    "check": f"tool_{tool}",
+                    "status": "fail",
+                    "path": path,
+                    "message": str(exc),
+                }
+            )
+            failed = True
 
-    if shutil.which("qmd"):
+    if "qmd" in tool_paths:
         try:
             alignment = reconcile_qmd_collection(config, check_only=True)
-            print(f"qmd: collection {alignment['status']}")
+            checks.append(
+                {
+                    "check": "qmd_collection",
+                    "status": (
+                        "pass" if alignment["status"] == "aligned" else "fail"
+                    ),
+                    "data": alignment,
+                }
+            )
             failed = failed or alignment["status"] != "aligned"
         except (ConfigError, IndexUpdateError) as exc:
-            print(f"ERROR qmd collection check failed: {exc}")
+            checks.append(
+                {
+                    "check": "qmd_collection",
+                    "status": "fail",
+                    "message": str(exc),
+                }
+            )
             failed = True
 
-    return 1 if failed else 0
+    emit(
+        success_envelope(
+            command,
+            "unhealthy" if failed else "healthy",
+            {"checks": checks},
+        )
+    )
+    return EXIT_NOT_ACHIEVED if failed else EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,9 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     ingest_parser = subparsers.add_parser(
-        "ingest", help="capture a URL and create an Obsidian source-note draft"
+        "ingest", help="capture a URL, local file, or validated Snapshot Bundle"
     )
-    ingest_parser.add_argument("url", help="public HTTP or HTTPS source URL")
+    ingest_parser.add_argument(
+        "source_reference",
+        help="HTTP(S) URL, or local file when --adapter local_file is used",
+    )
     ingest_parser.add_argument(
         "--config",
         type=Path,
@@ -117,13 +212,21 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "--snapshot",
         type=Path,
-        help="local HTML, Markdown, or PDF snapshot for authenticated/tool-assisted input",
+        help="local primary file or manifest-driven Snapshot Bundle directory",
     )
     ingest_parser.add_argument(
         "--adapter",
-        choices=("auto", "http", "wechat", "authenticated"),
+        choices=("auto", "http", "wechat", "authenticated", "local_file"),
         default="auto",
         help="source adapter; WeChat requires a local HTML/Markdown/PDF --snapshot",
+    )
+    ingest_parser.add_argument(
+        "--logical-name",
+        help="display name for a local file; the absolute path is never persisted",
+    )
+    ingest_parser.add_argument(
+        "--supersedes",
+        help="explicit prior source_id superseded by this immutable capture",
     )
     ingest_parser.add_argument(
         "--apply",
@@ -152,18 +255,13 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_subparsers = migrate_parser.add_subparsers(
         dest="migrate_command", required=True
     )
-    captures_v2 = migrate_subparsers.add_parser(
-        "captures-v2", help="upgrade every schema-v1 source capture"
+    captures_v3 = migrate_subparsers.add_parser(
+        "captures-v3", help="upgrade every schema-v2 source capture"
     )
-    captures_v2.add_argument(
-        "--missing-adapter",
-        choices=("http", "wechat", "authenticated"),
-        help="adapter to assign only to legacy manifests that omit it",
-    )
-    captures_v2.add_argument(
+    captures_v3.add_argument(
         "--apply", action="store_true", help="write one recoverable migration transaction"
     )
-    captures_v2.add_argument(
+    captures_v3.add_argument(
         "--config", type=Path, default=Path("vault-pr.local.toml")
     )
 
@@ -213,6 +311,16 @@ def build_parser() -> argparse.ArgumentParser:
     quality_rag_accept.add_argument(
         "--config", type=Path, default=Path("vault-pr.local.toml")
     )
+    quality_record = quality_subparsers.add_parser(
+        "record-repair-evidence",
+        help="record selected deterministic findings for autonomous repair",
+    )
+    quality_record.add_argument("--audit", type=Path, required=True)
+    quality_record.add_argument("--finding", action="append", required=True)
+    quality_record.add_argument("--apply", action="store_true")
+    quality_record.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
 
     retrieve_parser = subparsers.add_parser(
         "retrieve", help="retrieve related notes for a captured source"
@@ -228,8 +336,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_subparsers = plan_parser.add_subparsers(dest="plan_command", required=True)
     plan_init = plan_subparsers.add_parser("init", help="create a plan template")
-    plan_init.add_argument("source_id")
     plan_init.add_argument("--summary", required=True)
+    plan_init.add_argument(
+        "--authorization-kind",
+        choices=("maintenance_request", "autonomous_repair_policy"),
+        default="maintenance_request",
+    )
+    plan_init.add_argument("--authorization-summary", required=True)
+    plan_init.add_argument("--source-id", action="append", default=[])
+    plan_init.add_argument("--request-ref")
+    plan_init.add_argument("--request-sha256")
+    plan_init.add_argument("--chain-id")
     plan_init.add_argument("--config", type=Path, default=Path("vault-pr.local.toml"))
     plan_check = plan_subparsers.add_parser("check", help="validate a plan")
     plan_check.add_argument("plan", type=Path)
@@ -239,14 +356,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan_apply.add_argument("--config", type=Path, default=Path("vault-pr.local.toml"))
 
     review_parser = subparsers.add_parser(
-        "review", help="record a reviewer decision bound to plan and content hashes"
+        "review", help="validate and record a structured semantic assessment"
     )
     review_parser.add_argument("plan", type=Path)
-    review_parser.add_argument("--reviewer", required=True)
-    review_parser.add_argument(
-        "--decision", choices=("approve", "reject"), required=True
-    )
-    review_parser.add_argument("--notes", default="")
+    review_parser.add_argument("--assessment", type=Path, required=True)
     review_parser.add_argument(
         "--config", type=Path, default=Path("vault-pr.local.toml")
     )
@@ -275,53 +388,140 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _exception_code(exc: Exception) -> str:
+    message = str(exc)
+    if message.startswith("maintenance_request_required"):
+        return "maintenance_request_required"
+    if isinstance(exc, PlanError) and "reviewer approval record is required" in message:
+        return "review_required"
+    if isinstance(exc, PlanError) and "revision limit" in message:
+        return "review_revision_exhausted"
+    if isinstance(exc, ConfigError):
+        return "invalid_config"
+    if isinstance(exc, GitSafetyError):
+        return "git_safety_error"
+    if isinstance(exc, PlanError):
+        return "invalid_plan"
+    if isinstance(exc, RecoveryError):
+        return "recovery_error"
+    if isinstance(exc, IndexUpdateError):
+        return "index_error"
+    if isinstance(exc, IngestError):
+        return "ingest_error"
+    if isinstance(exc, RetrievalError):
+        return "retrieval_error"
+    if isinstance(exc, QualityAuditError):
+        return "quality_error"
+    if isinstance(exc, QualityRecordError):
+        if str(exc) in {
+            "quality_record_refresh_required",
+            "quality_finding_already_satisfied",
+        }:
+            return str(exc)
+        return "quality_record_error"
+    if isinstance(exc, RagEvaluationError):
+        return "rag_evaluation_error"
+    if isinstance(exc, MigrationError):
+        return "migration_error"
+    if isinstance(exc, CanaryError):
+        return "canary_error"
+    return "execution_error"
+
+
+def _emit_failure(command: str, exc: Exception) -> int:
+    code = _exception_code(exc)
+    if code == "quality_finding_already_satisfied":
+        emit(
+            success_envelope(
+                command,
+                "already_satisfied",
+                {"finding_status": code},
+            )
+        )
+        return EXIT_OK
+    emit(error_envelope(command, code, str(exc)), stream=sys.stderr)
+    if code in {
+        "maintenance_request_required",
+        "review_required",
+        "review_revision_exhausted",
+        "quality_record_refresh_required",
+    }:
+        return EXIT_NOT_ACHIEVED
+    return EXIT_ERROR
+
+
+def _emit_success(
+    command: str,
+    result: dict[str, object],
+    *,
+    status: str | None = None,
+    achieved: bool = True,
+) -> int:
+    resolved_status = status or str(result.get("status", "ok"))
+    emit(
+        success_envelope(
+            command,
+            resolved_status,
+            {key: value for key, value in result.items() if key != "status"},
+        )
+    )
+    return EXIT_OK if achieved else EXIT_NOT_ACHIEVED
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI."""
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
         return doctor(args.config)
     if args.command == "ingest":
+        command = "ingest"
         try:
             config = load_config(args.config)
-            result = ingest_url(
+            result = ingest_source(
                 config=config,
-                url=args.url,
+                source_reference=args.source_reference,
                 apply=args.apply,
                 title_override=args.title,
                 snapshot_path=args.snapshot,
                 adapter=args.adapter,
+                logical_name=args.logical_name,
+                supersedes=args.supersedes,
             )
         except (ConfigError, GitSafetyError, IngestError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     if args.command == "index":
+        command = "index.check" if args.check else "index.update"
         try:
             config = load_config(args.config)
             result = update_qmd_index(config, check_only=args.check)
         except (ConfigError, GitSafetyError, IndexUpdateError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result["status"] in {"indexed", "aligned"} else 1
+            return _emit_failure(command, exc)
+        return _emit_success(
+            command,
+            result,
+            achieved=result["status"] in {"indexed", "aligned"},
+        )
     if args.command == "migrate":
+        command = f"migrate.{args.migrate_command.replace('-', '_')}"
         try:
-            if args.migrate_command != "captures-v2":
+            if args.migrate_command != "captures-v3":
                 raise AssertionError(
                     f"unhandled migrate command: {args.migrate_command}"
                 )
-            result = migrate_captures_v2(
+            result = migrate_captures_v3(
                 load_config(args.config),
                 apply=args.apply,
-                missing_adapter=args.missing_adapter,
             )
         except (ConfigError, GitSafetyError, MigrationError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(
+            command,
+            result,
+            achieved=result.get("status") != "dedupe_conflict",
+        )
     if args.command == "canary":
+        command = "canary"
         try:
             result = run_capture_route_canary(
                 url=args.url,
@@ -330,11 +530,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 title=args.title,
             )
         except CanaryError as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     if args.command == "quality":
+        command = f"quality.{args.quality_command.replace('-', '_')}"
         try:
             config = load_config(args.config)
             if args.quality_command == "graph":
@@ -353,30 +552,49 @@ def main(argv: Sequence[str] | None = None) -> int:
                     assessment_path=args.assessment,
                     apply=args.apply,
                 )
+            elif args.quality_command == "record-repair-evidence":
+                result = record_quality_findings(
+                    config,
+                    audit_path=args.audit,
+                    finding_ids=args.finding,
+                    apply=args.apply,
+                )
             else:
                 raise AssertionError(
                     f"unhandled quality command: {args.quality_command}"
                 )
-        except (ConfigError, QualityAuditError, RagEvaluationError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+        except (
+            ConfigError,
+            QualityAuditError,
+            QualityRecordError,
+            RagEvaluationError,
+        ) as exc:
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     if args.command == "retrieve":
+        command = "retrieve"
         try:
             result = retrieve_related_notes(
                 load_config(args.config), args.source_id, limit=args.limit
             )
         except (ConfigError, RetrievalError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     if args.command == "plan":
+        command = f"plan.{args.plan_command}"
         try:
             config = load_config(args.config)
             if args.plan_command == "init":
-                result = init_plan(config, args.source_id, args.summary)
+                result = init_plan(
+                    config,
+                    args.summary,
+                    args.authorization_kind,
+                    args.authorization_summary,
+                    source_ids=args.source_id,
+                    request_ref=args.request_ref,
+                    request_sha256=args.request_sha256,
+                    chain_id=args.chain_id,
+                )
             elif args.plan_command == "check":
                 checked = validate_plan(config, args.plan)
                 result = {
@@ -389,22 +607,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 raise AssertionError(f"unhandled plan command: {args.plan_command}")
         except (ConfigError, GitSafetyError, PlanError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     if args.command == "review":
+        command = "review"
         try:
             config = load_config(args.config)
-            result = record_review(
-                config, args.plan, args.reviewer, args.decision, notes=args.notes
-            )
+            result = record_review(config, args.plan, args.assessment)
         except (ConfigError, PlanError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if args.decision == "approve" else 1
+            return _emit_failure(command, exc)
+        status = result["assessment"]["status"]
+        return _emit_success(
+            command,
+            result,
+            status=f"review_{status}",
+            achieved=status == "approve",
+        )
     if args.command == "recover":
+        command = "recover"
         try:
             config = load_config(args.config)
             vault = load_vault_path(config)
@@ -415,11 +635,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 vault, Path(git_dir.stdout.strip())
             )
         except (ConfigError, GitSafetyError, RecoveryError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     if args.command == "finalize":
+        command = "finalize"
         try:
             config = load_config(args.config)
             vault = load_vault_path(config)
@@ -430,11 +649,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 vault, Path(git_dir.stdout.strip()), args.transaction_id
             )
         except (ConfigError, GitSafetyError, RecoveryError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     if args.command == "commit":
+        command = "commit"
         try:
             config = load_config(args.config)
             vault = load_vault_path(config)
@@ -448,10 +666,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.message,
             )
         except (ConfigError, GitSafetyError, RecoveryError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     raise AssertionError(f"unhandled command: {args.command}")
 
 

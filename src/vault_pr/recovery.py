@@ -21,6 +21,8 @@ class RecoveryError(RuntimeError):
 
 
 TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
+OPERATION_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 GIT_FILE_MODES = {"100644", "100755"}
 
 
@@ -28,14 +30,19 @@ def _sha256(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
+def _vault_id(vault: Path) -> str:
+    """Bind a journal to one configured vault without storing its path."""
+    return hashlib.sha256(str(vault.resolve()).encode("utf-8")).hexdigest()
+
+
 def worktree_file_mode(path: Path) -> str | None:
     """Return the normalized Git mode for a regular worktree file."""
     if path.is_symlink():
-        raise RecoveryError(f"transaction path is a symbolic link: {path}")
+        raise RecoveryError("transaction path is a symbolic link")
     if not path.exists():
         return None
     if not path.is_file():
-        raise RecoveryError(f"transaction path is not a regular file: {path}")
+        raise RecoveryError("transaction path is not a regular file")
     return "100755" if path.stat().st_mode & 0o111 else "100644"
 
 
@@ -209,15 +216,11 @@ def _git_index_file_mode(vault: Path, relative: str) -> str | None:
 
 
 def _changed_journal_paths(journal: dict[str, Any]) -> set[str]:
-    mode_aware = journal.get("schema_version") == 3
     return {
         entry["path"]
         for entry in journal["entries"]
         if entry.get("original_sha256") != entry.get("final_sha256")
-        or (
-            mode_aware
-            and entry.get("original_mode") != entry.get("final_mode")
-        )
+        or entry.get("original_mode") != entry.get("final_mode")
     }
 
 
@@ -322,6 +325,8 @@ def prepare_active_transaction(
     git_dir: Path,
     transaction_id: str,
     transaction_sha256: str,
+    operation: str = "unspecified",
+    request_sha256: str | None = None,
     affected: set[Path],
     expected_original_sha256: dict[Path, str | None],
     expected_original_mode: dict[Path, str | None],
@@ -353,6 +358,13 @@ def prepare_active_transaction(
     }
     if not TRANSACTION_ID_PATTERN.fullmatch(transaction_id):
         raise RecoveryError("invalid transaction id")
+    request_sha256 = request_sha256 or transaction_sha256
+    if not SHA256_PATTERN.fullmatch(transaction_sha256) or not SHA256_PATTERN.fullmatch(
+        request_sha256
+    ):
+        raise RecoveryError("transaction digests must be lowercase SHA-256 values")
+    if not OPERATION_PATTERN.fullmatch(operation):
+        raise RecoveryError("invalid transaction operation")
     if not affected:
         raise RecoveryError("a recovery transaction must affect at least one path")
     if (
@@ -426,7 +438,6 @@ def prepare_active_transaction(
                     or worktree_file_mode(backup_path) != original_mode
                 ):
                     raise RecoveryError(f"failed to verify backup for {relative}")
-            allowed = {original, final_sha256.get(path)}
             entries.append(
                 {
                     "path": relative,
@@ -434,8 +445,6 @@ def prepare_active_transaction(
                     "original_mode": original_mode,
                     "final_sha256": requested_final,
                     "final_mode": requested_final_mode,
-                    "allowed_sha256": sorted(value for value in allowed if value),
-                    "allow_missing": None in allowed,
                     "backup": backup_name,
                 }
             )
@@ -450,7 +459,9 @@ def prepare_active_transaction(
             "schema_version": 3,
             "transaction_id": transaction_id,
             "transaction_sha256": transaction_sha256,
-            "vault": str(vault),
+            "request_sha256": request_sha256,
+            "operation": operation,
+            "vault_id": _vault_id(vault),
             "phase": "prepared",
             "base_commit": _head_commit(vault),
             "created_dirs": [
@@ -472,8 +483,10 @@ def _read_journal(vault: Path, active_dir: Path) -> dict[str, Any]:
     try:
         journal = json.loads((active_dir / "journal.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RecoveryError(f"invalid recovery journal: {active_dir}") from exc
-    if not isinstance(journal, dict) or journal.get("vault") != str(vault):
+        raise RecoveryError(
+            f"invalid recovery journal for transaction {active_dir.name}"
+        ) from exc
+    if not isinstance(journal, dict) or journal.get("vault_id") != _vault_id(vault):
         raise RecoveryError("recovery journal does not match the configured vault")
     transaction_id = journal.get("transaction_id")
     if (
@@ -485,12 +498,109 @@ def _read_journal(vault: Path, active_dir: Path) -> dict[str, Any]:
     entries = journal.get("entries")
     if not isinstance(entries, list) or not entries:
         raise RecoveryError("recovery journal has no affected paths")
-    if journal.get("schema_version") not in {1, 2, 3}:
+    if journal.get("schema_version") != 3:
         raise RecoveryError("recovery journal has an unsupported schema version")
-    phase = journal.get("phase", "prepared")
+    if not isinstance(journal.get("transaction_sha256"), str) or not SHA256_PATTERN.fullmatch(
+        journal["transaction_sha256"]
+    ):
+        raise RecoveryError("recovery journal has an invalid transaction digest")
+    request_sha256 = journal.get(
+        "request_sha256", journal.get("transaction_sha256")
+    )
+    if not isinstance(request_sha256, str) or not SHA256_PATTERN.fullmatch(
+        request_sha256
+    ):
+        raise RecoveryError("recovery journal has an invalid request digest")
+    operation = journal.get("operation", "unspecified")
+    if not isinstance(operation, str) or not OPERATION_PATTERN.fullmatch(operation):
+        raise RecoveryError("recovery journal has an invalid operation")
+    journal["request_sha256"] = request_sha256
+    journal["operation"] = operation
+    phase = journal.get("phase")
     if phase not in {"prepared", "applied"}:
         raise RecoveryError("recovery journal has an invalid phase")
     return journal
+
+
+def inspect_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]:
+    """Validate one active journal and return its mutation identity and next step."""
+    vault = vault.resolve()
+    active_dir = active_dir.resolve()
+    journal = _read_journal(vault, active_dir)
+    entries = _validated_entries(vault, active_dir, journal)
+    for entry, path, _backup in entries:
+        current = (_sha256(path), worktree_file_mode(path))
+        original = (entry.get("original_sha256"), entry.get("original_mode"))
+        final = (entry.get("final_sha256"), entry.get("final_mode"))
+        if journal["phase"] == "applied":
+            if current != final:
+                raise RecoveryError(
+                    f"applied transaction path changed: {entry['path']}"
+                )
+        elif current not in {original, final}:
+            raise RecoveryError(
+                f"prepared transaction path has an unexpected state: {entry['path']}"
+            )
+    commit_observed = (
+        journal["phase"] == "applied"
+        and _git_is_clean(vault)
+        and _head_commit(vault) != journal.get("base_commit")
+    )
+    return {
+        "transaction_id": journal["transaction_id"],
+        "transaction_sha256": journal["transaction_sha256"],
+        "request_sha256": journal["request_sha256"],
+        "operation": journal["operation"],
+        "phase": journal["phase"],
+        "commit_observed": commit_observed,
+        "completion_path": journal.get("completion_path"),
+    }
+
+
+def committed_path_matches_state(
+    vault: Path,
+    path: Path,
+    expected_sha256: str | None,
+    expected_mode: str | None,
+) -> bool:
+    """Return whether one safe path has the expected state in worktree and HEAD."""
+    vault = vault.resolve()
+    lexical = Path(os.path.abspath(path.expanduser()))
+    if not lexical.is_relative_to(vault) or lexical == vault:
+        raise RecoveryError("committed path escapes the vault")
+    relative = lexical.relative_to(vault).as_posix()
+    _lexical_child(vault, relative, "committed path")
+    if (expected_sha256 is None) != (expected_mode is None):
+        raise RecoveryError("committed path hash and mode disagree")
+    if expected_mode not in GIT_FILE_MODES | {None}:
+        raise RecoveryError("committed path has an invalid mode")
+    if lexical.is_symlink():
+        return False
+    if (_sha256(lexical), worktree_file_mode(lexical)) != (
+        expected_sha256,
+        expected_mode,
+    ):
+        return False
+    if expected_sha256 is None:
+        return (
+            _git_head_file_oid(vault, relative) is None
+            and _git_head_file_mode(vault, relative) is None
+        )
+    return (
+        _git_head_file_oid(vault, relative) == _git_worktree_blob_oid(vault, relative)
+        and _git_head_file_mode(vault, relative) == expected_mode
+    )
+
+
+def committed_file_matches_worktree(vault: Path, path: Path) -> bool:
+    """Return whether one safe regular worktree file is identical to HEAD."""
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        mode = worktree_file_mode(path)
+    except RecoveryError:
+        return False
+    return committed_path_matches_state(vault, path, _sha256(path), mode)
 
 
 def mark_active_applied(active_dir: Path, completion_path: str | None = None) -> None:
@@ -500,7 +610,11 @@ def mark_active_applied(active_dir: Path, completion_path: str | None = None) ->
     try:
         journal = json.loads(journal_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RecoveryError(f"invalid recovery journal: {active_dir}") from exc
+        raise RecoveryError(
+            f"invalid recovery journal for transaction {active_dir.name}"
+        ) from exc
+    if journal.get("schema_version") != 3:
+        raise RecoveryError("recovery journal has an unsupported schema version")
     if journal.get("phase") != "prepared":
         raise RecoveryError("only a prepared transaction can be marked applied")
     if completion_path is not None:
@@ -518,7 +632,6 @@ def _validated_entries(
 ) -> list[tuple[dict[str, Any], Path, Path | None]]:
     resolved_entries: list[tuple[dict[str, Any], Path, Path | None]] = []
     seen_paths: set[Path] = set()
-    mode_aware = journal.get("schema_version") == 3
     for entry in journal["entries"]:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             raise RecoveryError("recovery journal contains an invalid path entry")
@@ -531,19 +644,18 @@ def _validated_entries(
         backup_name = entry.get("backup")
         if final is not None and not isinstance(final, str):
             raise RecoveryError("recovery journal contains an invalid final hash")
-        if mode_aware:
-            original_mode = entry.get("original_mode")
-            final_mode = entry.get("final_mode")
-            if original_mode not in GIT_FILE_MODES | {None} or (
-                final_mode not in GIT_FILE_MODES | {None}
-            ):
-                raise RecoveryError("recovery journal contains an invalid Git mode")
-            if (original is None) != (original_mode is None) or (final is None) != (
-                final_mode is None
-            ):
-                raise RecoveryError(
-                    "recovery journal hash and mode disagree about path presence"
-                )
+        original_mode = entry.get("original_mode")
+        final_mode = entry.get("final_mode")
+        if original_mode not in GIT_FILE_MODES | {None} or (
+            final_mode not in GIT_FILE_MODES | {None}
+        ):
+            raise RecoveryError("recovery journal contains an invalid Git mode")
+        if (original is None) != (original_mode is None) or (final is None) != (
+            final_mode is None
+        ):
+            raise RecoveryError(
+                "recovery journal hash and mode disagree about path presence"
+            )
         backup: Path | None = None
         if original is None:
             if backup_name is not None:
@@ -557,10 +669,7 @@ def _validated_entries(
             if (
                 not backup.is_file()
                 or _sha256(backup) != original
-                or (
-                    mode_aware
-                    and worktree_file_mode(backup) != entry.get("original_mode")
-                )
+                or worktree_file_mode(backup) != entry.get("original_mode")
             ):
                 raise RecoveryError(
                     f"recovery backup integrity failed: {entry['path']}"
@@ -594,10 +703,6 @@ def _validate_archive_contents(
         return
     if archive.is_symlink() or not archive.is_dir():
         raise RecoveryError("transaction archive is not a regular directory")
-    if journal.get("schema_version") == 1:
-        raise RecoveryError(
-            "legacy recovery journal cannot safely remove a transaction archive"
-        )
     expected_files: set[Path] = set()
     expected_directories = {archive}
     for _entry, path, _backup in resolved_entries:
@@ -631,37 +736,20 @@ def rollback_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]
     vault = vault.resolve()
     active_dir = active_dir.resolve()
     journal = _read_journal(vault, active_dir)
-    legacy_journal = journal.get("schema_version") == 1
-    mode_aware = journal.get("schema_version") == 3
     expected_dirty: set[str] = set()
     resolved_entries = _validated_entries(vault, active_dir, journal)
     for entry, path, _backup in resolved_entries:
         current = _sha256(path)
-        if mode_aware:
-            current_state = (current, worktree_file_mode(path))
-            known = current_state in {
-                (entry.get("original_sha256"), entry.get("original_mode")),
-                (entry.get("final_sha256"), entry.get("final_mode")),
-            }
-        else:
-            allowed_raw = entry.get("allowed_sha256")
-            if not isinstance(allowed_raw, list) or not all(
-                isinstance(value, str) for value in allowed_raw
-            ):
-                raise RecoveryError("recovery journal contains invalid allowed hashes")
-            allowed = set(allowed_raw)
-            known = (
-                bool(entry.get("allow_missing"))
-                if current is None
-                else current in allowed
-            )
+        current_state = (current, worktree_file_mode(path))
+        known = current_state in {
+            (entry.get("original_sha256"), entry.get("original_mode")),
+            (entry.get("final_sha256"), entry.get("final_mode")),
+        }
         if not known:
             raise RecoveryError(
                 f"affected note has an unexpected state: {entry['path']}"
             )
         expected_dirty.add(entry["path"])
-        if legacy_journal:
-            expected_dirty.add(entry["path"] + ".vault-pr-tmp")
 
     transaction_id = journal.get("transaction_id")
     archive_prefix = f".vault-pr/transactions/{transaction_id}"
@@ -699,11 +787,7 @@ def rollback_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]
             entry = entry_by_path[relative]
             if _git_index_file_oid(vault, relative) != _git_worktree_blob_oid(
                 vault, relative
-            ) or (
-                mode_aware
-                and _git_index_file_mode(vault, relative)
-                != entry.get("final_mode")
-            ):
+            ) or _git_index_file_mode(vault, relative) != entry.get("final_mode"):
                 raise RecoveryError(
                     f"staged state does not match transaction journal: {relative}"
                 )
@@ -716,8 +800,6 @@ def rollback_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]
             )
     for entry, path, backup in resolved_entries:
         path = _lexical_child(vault, entry["path"], "recovery journal path")
-        if legacy_journal:
-            path.with_name(path.name + ".vault-pr-tmp").unlink(missing_ok=True)
         if backup is None:
             path.unlink(missing_ok=True)
         else:
@@ -725,8 +807,7 @@ def rollback_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]
             temporary = active_dir / "restore-staging" / entry["path"]
             temporary.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup, temporary)
-            if mode_aware:
-                _chmod_git_mode(temporary, entry["original_mode"])
+            _chmod_git_mode(temporary, entry["original_mode"])
             os.replace(temporary, path)
 
     for directory in _created_directories(vault, journal):
@@ -741,10 +822,8 @@ def rollback_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]
         path = _lexical_child(vault, entry["path"], "recovery journal path")
         if _sha256(path) != entry.get("original_sha256"):
             raise RecoveryError(f"recovery verification failed: {entry['path']}")
-        if mode_aware and worktree_file_mode(path) != entry.get("original_mode"):
+        if worktree_file_mode(path) != entry.get("original_mode"):
             raise RecoveryError(f"recovery mode verification failed: {entry['path']}")
-        if legacy_journal and path.with_name(path.name + ".vault-pr-tmp").exists():
-            raise RecoveryError(f"recovery temporary file remains: {entry['path']}")
     shutil.rmtree(active_dir)
     return {"status": "recovered", "transaction_id": transaction_id}
 
@@ -766,28 +845,20 @@ def _finalize_active_transaction_unlocked(
     expected_committed_paths: set[str] = set()
     for entry, path, _backup in _validated_entries(vault, active_dir, journal):
         final = entry.get("final_sha256")
-        final_mode = (
-            entry.get("final_mode") if journal.get("schema_version") == 3 else None
-        )
-        if _sha256(path) != final or (
-            journal.get("schema_version") == 3
-            and worktree_file_mode(path) != final_mode
-        ):
+        final_mode = entry.get("final_mode")
+        if _sha256(path) != final or worktree_file_mode(path) != final_mode:
             raise RecoveryError(
                 f"applied path does not match final state: {entry['path']}"
             )
         if _git_head_file_oid(vault, entry["path"]) != _git_worktree_blob_oid(
             vault, entry["path"]
-        ) or (
-            journal.get("schema_version") == 3
-            and _git_head_file_mode(vault, entry["path"]) != final_mode
-        ):
+        ) or _git_head_file_mode(vault, entry["path"]) != final_mode:
             raise RecoveryError(
                 f"Git commit does not contain final path state: {entry['path']}"
             )
-        if entry.get("original_sha256") != final or (
-            journal.get("schema_version") == 3
-            and entry.get("original_mode") != final_mode
+        if (
+            entry.get("original_sha256") != final
+            or entry.get("original_mode") != final_mode
         ):
             expected_committed_paths.add(entry["path"])
     committed_paths = _committed_paths(vault, base_commit, head)
@@ -863,19 +934,14 @@ def commit_applied_transaction(
         final_by_path: dict[str, tuple[str | None, str | None]] = {}
         for entry, path, _backup in entries:
             final = entry.get("final_sha256")
-            final_mode = (
-                entry.get("final_mode") if journal.get("schema_version") == 3 else None
-            )
-            if _sha256(path) != final or (
-                journal.get("schema_version") == 3
-                and worktree_file_mode(path) != final_mode
-            ):
+            final_mode = entry.get("final_mode")
+            if _sha256(path) != final or worktree_file_mode(path) != final_mode:
                 raise RecoveryError(
                     f"applied path does not match final state: {entry['path']}"
                 )
-            if entry.get("original_sha256") != final or (
-                journal.get("schema_version") == 3
-                and entry.get("original_mode") != final_mode
+            if (
+                entry.get("original_sha256") != final
+                or entry.get("original_mode") != final_mode
             ):
                 expected_paths.add(entry["path"])
                 final_by_path[entry["path"]] = (final, final_mode)
@@ -913,10 +979,7 @@ def commit_applied_transaction(
         for relative, (final, final_mode) in final_by_path.items():
             if _git_index_file_oid(vault, relative) != _git_worktree_blob_oid(
                 vault, relative
-            ) or (
-                journal.get("schema_version") == 3
-                and _git_index_file_mode(vault, relative) != final_mode
-            ):
+            ) or _git_index_file_mode(vault, relative) != final_mode:
                 raise RecoveryError(
                     f"staged state does not match transaction journal: {relative}"
                 )

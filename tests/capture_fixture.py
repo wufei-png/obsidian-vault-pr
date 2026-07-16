@@ -24,22 +24,26 @@ def write_capture(
     vault: Path,
     *,
     source_note: str = "knowledgebase/sources/source.md",
+    requested_url: str = "https://example.com/source",
+    title: str = "Source Fixture",
 ) -> str:
-    raw = b"raw source fixture\n"
+    raw = b"<main>raw source fixture</main>\n"
     extracted = b"# Source Fixture\n\n" + b"knowledge " * 100
     identity = {
-        "schema_version": 2,
-        "requested_url": "https://example.com/source",
-        "final_url": "https://example.com/source",
-        "adapter": "http",
-        "raw_sha256": hashlib.sha256(raw).hexdigest(),
-        "extracted_sha256": hashlib.sha256(extracted).hexdigest(),
-        "asset_sha256": {},
-        "artifacts": {
-            "raw": "source.html",
-            "extracted": "extracted.md",
-            "source_note": source_note,
+        "schema_version": 3,
+        "source": {
+            "kind": "url",
+            "access_kind": "public",
+            "requested_url": requested_url,
+            "final_url": requested_url,
         },
+        "primary": {
+            "path": "source.html",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size": len(raw),
+            "mime": "text/html",
+        },
+        "files": [],
     }
     source_id = f"src_{source_identity_digest(identity)[:20]}"
     capture = vault / ".vault-pr" / "sources" / "public" / source_id
@@ -52,7 +56,17 @@ def write_capture(
     manifest = {
         **identity,
         "source_id": source_id,
-        "title": "Source Fixture",
+        "captured_at": "2026-07-16T00:00:00+00:00",
+        "title": title,
+        "derived": {
+            "extracted": {
+                "path": "extracted.md",
+                "sha256": hashlib.sha256(extracted).hexdigest(),
+                "size": len(extracted),
+                "mime": "text/markdown",
+            }
+        },
+        "acquisition": {"adapter": "http"},
     }
     (capture / "manifest.json").write_text(json.dumps(manifest) + "\n")
     return source_id

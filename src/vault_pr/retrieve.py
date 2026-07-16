@@ -14,6 +14,9 @@ from urllib.parse import unquote, urlsplit
 
 from .capture import CaptureError, load_validated_capture_artifact_text
 from .config import index_spec, load_vault_path, source_archive_dir
+from .errors import IngestError
+from .index import IndexUpdateError, validate_qmd_index_freshness
+from .source_note import resolve_source_note
 
 
 class RetrievalError(RuntimeError):
@@ -21,6 +24,7 @@ class RetrievalError(RuntimeError):
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+IndexValidator = Callable[..., dict[str, Any]]
 
 
 def _source_artifacts(
@@ -170,6 +174,7 @@ def retrieve_related_notes(
     limit: int = 10,
     runner: Runner = subprocess.run,
     executable: str | None = None,
+    index_validator: IndexValidator = validate_qmd_index_freshness,
 ) -> dict[str, Any]:
     """Combine BM25 and vector candidates across the configured vault index."""
     if limit < 1 or limit > 50:
@@ -181,12 +186,21 @@ def retrieve_related_notes(
     qmd = executable or shutil.which("qmd")
     if not qmd:
         raise RetrievalError("required tool missing: qmd")
+    try:
+        index_freshness = index_validator(config, executable=qmd)
+    except IndexUpdateError as exc:
+        raise RetrievalError(f"qmd index freshness validation failed: {exc}") from exc
+    if not index_freshness.get("eligible"):
+        raise RetrievalError(
+            "qmd index is stale: "
+            + ", ".join(index_freshness.get("reasons", ["unknown"]))
+        )
     index_name = config.get("index", {}).get("name", "notebook")
     query = _retrieval_query(str(manifest.get("title", "")), extracted)
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, dict):
-        raise RetrievalError("source manifest is missing artifacts")
-    source_note = artifacts.get("source_note")
+    try:
+        source_note = str(resolve_source_note(config, vault, source_id).relative_to(vault))
+    except IngestError as exc:
+        raise RetrievalError(str(exc)) from exc
     path_map = build_qmd_path_map(spec.root_dir)
 
     merged: dict[str, dict[str, Any]] = {}
@@ -224,7 +238,7 @@ def retrieve_related_notes(
                 spec.root_dir, collection_relative, path_map
             )
             vault_relative = str(candidate_path.relative_to(vault))
-            if isinstance(source_note, str) and vault_relative == source_note:
+            if vault_relative == source_note:
                 continue
             try:
                 score = float(item.get("score", 0))
@@ -251,5 +265,6 @@ def retrieve_related_notes(
         "source_id": source_id,
         "query": query,
         "collection": spec.collection,
+        "index_freshness": index_freshness,
         "candidates": candidates,
     }

@@ -11,6 +11,10 @@ from vault_pr.retrieve import RetrievalError, _qmd_handelize, retrieve_related_n
 from tests.capture_fixture import write_capture
 
 
+def fresh_index(*_: object, **__: object) -> dict[str, object]:
+    return {"eligible": True, "reasons": []}
+
+
 class RetrievalRunner:
     def __call__(
         self, command: list[str], **_: object
@@ -50,7 +54,10 @@ class RetrieveTests(unittest.TestCase):
     def config(vault: Path) -> dict[str, object]:
         return {
             "vault": {"path": str(vault)},
-            "sources": {"public_archive_dir": ".vault-pr/sources/public"},
+            "sources": {
+                "capture_archive_dir": ".vault-pr/sources/public",
+                "visible_notes_dir": "knowledgebase/sources",
+            },
             "index": {
                 "name": "test",
                 "collection": "fixture-vault",
@@ -72,6 +79,7 @@ class RetrieveTests(unittest.TestCase):
                 source_id,
                 runner=RetrievalRunner(),
                 executable="qmd",
+                index_validator=fresh_index,
             )
 
             self.assertEqual(len(result["candidates"]), 2)
@@ -123,6 +131,7 @@ class RetrieveTests(unittest.TestCase):
                 source_id,
                 runner=NormalizedPathRunner(),
                 executable="qmd",
+                index_validator=fresh_index,
             )
 
             self.assertEqual(
@@ -158,6 +167,7 @@ class RetrieveTests(unittest.TestCase):
                     source_id,
                     runner=AmbiguousPathRunner(),
                     executable="qmd",
+                    index_validator=fresh_index,
                 )
 
     def test_excludes_source_note_after_resolving_normalized_path(self) -> None:
@@ -189,6 +199,7 @@ class RetrieveTests(unittest.TestCase):
                 source_id,
                 runner=SourceNoteRunner(),
                 executable="qmd",
+                index_validator=fresh_index,
             )
 
             self.assertEqual(result["candidates"], [])
@@ -206,6 +217,7 @@ class RetrieveTests(unittest.TestCase):
                     source_id,
                     runner=RetrievalRunner(),
                     executable="qmd",
+                    index_validator=fresh_index,
                 )
 
     def test_rejects_tampered_capture_identity(self) -> None:
@@ -216,31 +228,57 @@ class RetrieveTests(unittest.TestCase):
                 vault / ".vault-pr" / "sources" / "public" / source_id / "manifest.json"
             )
             manifest = json.loads(manifest_path.read_text())
-            manifest["final_url"] = "https://example.com/tampered"
+            manifest["source"]["final_url"] = "https://example.com/tampered"
             manifest_path.write_text(json.dumps(manifest))
 
             with self.assertRaisesRegex(RetrievalError, "immutable identity"):
-                retrieve_related_notes(self.config(vault), source_id, executable="qmd")
+                retrieve_related_notes(
+                    self.config(vault),
+                    source_id,
+                    executable="qmd",
+                    index_validator=fresh_index,
+                )
 
     def test_rejects_tampered_source_note_association(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir) / "vault"
             source_id = write_capture(vault)
-            capture = vault / ".vault-pr" / "sources" / "public" / source_id
-            manifest_path = capture / "manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            original = vault / manifest["artifacts"]["source_note"]
+            original = vault / "knowledgebase" / "sources" / "source.md"
             replacement = original.with_name("replacement.md")
             replacement.write_text(original.read_text())
-            manifest["artifacts"]["source_note"] = str(replacement.relative_to(vault))
-            manifest_path.write_text(json.dumps(manifest))
 
-            with self.assertRaisesRegex(RetrievalError, "immutable identity"):
-                retrieve_related_notes(self.config(vault), source_id, executable="qmd")
+            with self.assertRaisesRegex(RetrievalError, "exactly one Source Note"):
+                retrieve_related_notes(
+                    self.config(vault),
+                    source_id,
+                    executable="qmd",
+                    index_validator=fresh_index,
+                )
+
+    def test_rejects_stale_index_before_running_qmd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            source_id = write_capture(vault)
+            with self.assertRaisesRegex(RetrievalError, "qmd index is stale"):
+                retrieve_related_notes(
+                    self.config(vault),
+                    source_id,
+                    runner=RetrievalRunner(),
+                    executable="qmd",
+                    index_validator=lambda *_args, **_kwargs: {
+                        "eligible": False,
+                        "reasons": ["commit_matches"],
+                    },
+                )
 
     def test_rejects_invalid_source_id(self) -> None:
         with self.assertRaisesRegex(RetrievalError, "invalid source id"):
-            retrieve_related_notes({}, "bad", executable="qmd")
+            retrieve_related_notes(
+                {},
+                "bad",
+                executable="qmd",
+                index_validator=fresh_index,
+            )
 
 
 if __name__ == "__main__":

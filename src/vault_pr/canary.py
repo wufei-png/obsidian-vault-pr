@@ -13,8 +13,9 @@ from urllib.parse import unquote, urlsplit
 
 from .git import run_git
 from .index import update_qmd_index
-from .ingest import ingest_url
+from .ingest import ingest_source
 from .recovery import commit_applied_transaction
+from .source_note import resolve_source_note
 from .retrieve import (
     RetrievalError,
     build_qmd_path_map,
@@ -145,6 +146,7 @@ def run_capture_route_canary(
         with tempfile.TemporaryDirectory(prefix="vault-pr-canary-") as temp_dir:
             vault = Path(temp_dir) / "vault"
             vault.mkdir()
+            vault = vault.resolve()
             _checked_git(vault, "init", "-q")
             _checked_git(vault, "config", "user.name", "Vault PR Canary")
             _checked_git(vault, "config", "user.email", "canary@example.invalid")
@@ -159,7 +161,7 @@ def run_capture_route_canary(
             config: dict[str, Any] = {
                 "vault": {"path": str(vault)},
                 "sources": {
-                    "public_archive_dir": ".vault-pr/sources/public",
+                    "capture_archive_dir": ".vault-pr/sources",
                     "visible_notes_dir": "sources",
                 },
                 "notes": {
@@ -175,9 +177,9 @@ def run_capture_route_canary(
                     "max_retries": 0,
                 },
             }
-            captured = ingest_url(
+            captured = ingest_source(
                 config=config,
-                url=url,
+                source_reference=url,
                 apply=True,
                 title_override=title,
                 snapshot_path=snapshot_path,
@@ -195,13 +197,17 @@ def run_capture_route_canary(
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
                 raise CanaryError("capture route manifest is unreadable") from exc
-            actual_adapter = manifest.get("adapter")
+            acquisition = manifest.get("acquisition")
+            actual_adapter = (
+                acquisition.get("adapter")
+                if isinstance(acquisition, dict)
+                else None
+            )
             if not isinstance(actual_adapter, str):
                 raise CanaryError("capture route manifest has no adapter")
-            artifacts = manifest.get("artifacts")
-            source_note = artifacts.get("source_note") if isinstance(artifacts, dict) else None
-            if not isinstance(source_note, str):
-                raise CanaryError("capture route manifest has no source note")
+            source_note = str(
+                resolve_source_note(config, vault, source_id).relative_to(vault)
+            )
             git_dir = Path(_checked_git(vault, "rev-parse", "--absolute-git-dir"))
             committed = commit_applied_transaction(
                 vault,

@@ -31,7 +31,7 @@ def require_clean_git_root(vault: Path) -> None:
     if root.returncode != 0:
         raise GitSafetyError("vault is not a Git repository")
     if Path(root.stdout.strip()).resolve() != vault:
-        raise GitSafetyError(f"vault Git root is {root.stdout.strip()}")
+        raise GitSafetyError("configured vault is not the Git repository root")
 
     status = run_git(vault, "status", "--porcelain=v1")
     if status.returncode != 0:
@@ -52,28 +52,28 @@ def vault_write_lock(vault: Path) -> Iterator[None]:
     except FileNotFoundError:
         existing = None
     except OSError as exc:
-        raise GitSafetyError(f"unable to inspect vault write lock: {lock_path}") from exc
+        raise GitSafetyError("unable to inspect vault write lock") from exc
     if existing is not None and stat.S_ISLNK(existing.st_mode):
-        raise GitSafetyError(f"vault write lock is a symbolic link: {lock_path}")
+        raise GitSafetyError("vault write lock is a symbolic link")
     if existing is not None and not stat.S_ISREG(existing.st_mode):
-        raise GitSafetyError(f"vault write lock is not a regular file: {lock_path}")
+        raise GitSafetyError("vault write lock is not a regular file")
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(lock_path, flags, 0o600)
     except OSError as exc:
-        raise GitSafetyError(f"unable to open vault write lock: {lock_path}") from exc
+        raise GitSafetyError("unable to open vault write lock") from exc
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or (
             existing is not None
             and (existing.st_dev, existing.st_ino) != (opened.st_dev, opened.st_ino)
         ):
-            raise GitSafetyError(f"vault write lock is not a regular file: {lock_path}")
+            raise GitSafetyError("vault write lock is not a regular file")
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise GitSafetyError(f"another vault-pr writer holds {lock_path}") from exc
+            raise GitSafetyError("another vault-pr writer holds the vault lock") from exc
         yield
     finally:
         try:

@@ -31,6 +31,15 @@ _ROLE_DEFAULTS = {
     "index": {"index", "moc"},
     "excluded": {"audit", "prompt-template", "prompt-archive"},
 }
+GRAPH_RULESET_VERSION = 1
+AUTONOMOUS_RULE_CAPABILITIES = {
+    "broken_wikilink": "repair_broken_wikilink",
+    "source_without_synthesis_link": "repair_source_synthesis_link",
+}
+AUTONOMOUS_CAPABILITY_ACTIONS = {
+    "repair_broken_wikilink": frozenset({"create", "update"}),
+    "repair_source_synthesis_link": frozenset({"create", "update"}),
+}
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -40,6 +49,48 @@ def _canonical_json_bytes(value: Any) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def relevant_quality_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return only config fields that affect deterministic graph findings."""
+    return {
+        "notes": config.get("notes", {}),
+        "note_roles": config.get("quality", {}).get("note_roles", {})
+        if isinstance(config.get("quality", {}), dict)
+        else {},
+        "graph_ruleset_version": GRAPH_RULESET_VERSION,
+    }
+
+
+def _finding(
+    rule_id: str,
+    *,
+    severity: str,
+    path: str,
+    owner_sha256: str | None,
+    target: str | None = None,
+    blocking_scope: str = "none",
+) -> dict[str, Any]:
+    identity = {
+        "rule_id": rule_id,
+        "path": path,
+        "target": target,
+    }
+    digest = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+    result: dict[str, Any] = {
+        "finding_id": f"finding_{digest[:20]}",
+        "rule_id": rule_id,
+        "severity": severity,
+        "path": path,
+        "owner_sha256": owner_sha256,
+        "blocking_scope": blocking_scope,
+    }
+    if target is not None:
+        result["target"] = target
+    capability = AUTONOMOUS_RULE_CAPABILITIES.get(rule_id)
+    if capability is not None:
+        result["autonomous_capability"] = capability
+    return result
 
 
 @dataclass(frozen=True)
@@ -58,7 +109,8 @@ def _normalize(value: str) -> str:
     return unicodedata.normalize("NFC", value).strip().casefold()
 
 
-def _role_sets(config: dict[str, Any]) -> dict[str, set[str]]:
+def note_role_sets(config: dict[str, Any]) -> dict[str, set[str]]:
+    """Return configured normalized note types grouped by graph role."""
     quality = config.get("quality", {})
     if not isinstance(quality, dict):
         raise ConfigError("quality must be a table")
@@ -103,8 +155,8 @@ def _frontmatter(content: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _note_role(frontmatter: dict[str, Any], roles: dict[str, set[str]]) -> str:
-    raw_type = frontmatter.get("type")
+def note_role_for_type(raw_type: Any, roles: dict[str, set[str]]) -> str:
+    """Classify one raw frontmatter type using the configured role mapping."""
     if not isinstance(raw_type, str) or not raw_type.strip():
         return "unclassified"
     normalized = _normalize(raw_type)
@@ -112,6 +164,10 @@ def _note_role(frontmatter: dict[str, Any], roles: dict[str, set[str]]) -> str:
         if normalized in roles[role]:
             return role
     return "unclassified"
+
+
+def _note_role(frontmatter: dict[str, Any], roles: dict[str, set[str]]) -> str:
+    return note_role_for_type(frontmatter.get("type"), roles)
 
 
 def _aliases(frontmatter: dict[str, Any]) -> tuple[str, ...]:
@@ -186,12 +242,12 @@ def _tracked_notes(
             raise QualityAuditError("tracked note is not a regular file")
         if path.stat().st_size > 2_000_000:
             findings.append(
-                {
-                    "id": "note_too_large",
-                    "severity": "warning",
-                    "path": relative,
-                    "blocking_scope": "none",
-                }
+                _finding(
+                    "note_too_large",
+                    severity="warning",
+                    path=relative,
+                    owner_sha256=None,
+                )
             )
             continue
         try:
@@ -296,11 +352,12 @@ def _components(paths: set[str], edges: set[tuple[str, str]]) -> list[list[str]]
 def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
     """Return deterministic graph findings without writing the vault."""
     vault = load_vault_path(config)
-    roles = _role_sets(config)
+    roles = note_role_sets(config)
     notes, findings = _tracked_notes(config, vault, roles)
     exact, short = _resolvers(notes)
     by_path = {note.path: note for note in notes}
     incoming: Counter[str] = Counter()
+    incoming_from: dict[str, set[str]] = defaultdict(set)
     outgoing: dict[str, set[str]] = defaultdict(set)
     edges: set[tuple[str, str]] = set()
     graph_roles = {"concept", "source", "index"}
@@ -311,13 +368,14 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
             status, resolved = _resolve_link(note, target, exact, short)
             if status != "resolved" or resolved is None:
                 findings.append(
-                    {
-                        "id": f"{status}_wikilink",
-                        "severity": "error",
-                        "path": note.path,
-                        "target": target,
-                        "blocking_scope": "owning_transaction",
-                    }
+                    _finding(
+                        f"{status}_wikilink",
+                        severity="error",
+                        path=note.path,
+                        owner_sha256=note.sha256,
+                        target=target,
+                        blocking_scope="owning_transaction",
+                    )
                 )
                 continue
             if by_path.get(resolved) is None or by_path[resolved].role not in graph_roles:
@@ -325,6 +383,7 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
             if resolved == note.path:
                 continue
             incoming[resolved] += 1
+            incoming_from[resolved].add(note.path)
             outgoing[note.path].add(resolved)
             edges.add((note.path, resolved))
 
@@ -334,57 +393,66 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
             continue
         if note.role == "unclassified":
             findings.append(
-                {
-                    "id": "unclassified_note_role",
-                    "severity": "warning",
-                    "path": note.path,
-                    "blocking_scope": "none",
-                }
+                _finding(
+                    "unclassified_note_role",
+                    severity="warning",
+                    path=note.path,
+                    owner_sha256=note.sha256,
+                )
             )
         elif note.role == "concept" and not incoming[note.path] and not outgoing[note.path]:
             findings.append(
-                {
-                    "id": "isolated_concept",
-                    "severity": "warning",
-                    "path": note.path,
-                    "blocking_scope": "none",
-                }
+                _finding(
+                    "isolated_concept",
+                    severity="warning",
+                    path=note.path,
+                    owner_sha256=note.sha256,
+                )
             )
         elif note.role == "source" and not any(
-            by_path[target].role in {"concept", "index"}
-            for target in outgoing[note.path]
-            if target in by_path
+            by_path[owner].role in {"concept", "index"}
+            for owner in incoming_from[note.path]
+            if owner in by_path
         ):
             findings.append(
-                {
-                    "id": "source_without_synthesis_link",
-                    "severity": "warning",
-                    "path": note.path,
-                    "blocking_scope": "none",
-                }
+                _finding(
+                    "source_without_synthesis_link",
+                    severity="warning",
+                    path=note.path,
+                    owner_sha256=note.sha256,
+                )
             )
         elif note.role == "index" and not outgoing[note.path]:
             findings.append(
-                {
-                    "id": "index_without_coverage",
-                    "severity": "warning",
-                    "path": note.path,
-                    "blocking_scope": "none",
-                }
+                _finding(
+                    "index_without_coverage",
+                    severity="warning",
+                    path=note.path,
+                    owner_sha256=note.sha256,
+                )
             )
 
     components = _components(graph_paths, edges)
     head = run_git(vault, "rev-parse", "HEAD")
     status = run_git(vault, "status", "--porcelain=v1")
     role_counts = Counter(note.role for note in notes)
+    relevant_config = relevant_quality_config(config)
     config_digest = hashlib.sha256(
-        json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        _canonical_json_bytes(relevant_config)
+    ).hexdigest()
+    rules_digest = hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "graph_ruleset_version": GRAPH_RULESET_VERSION,
+                "autonomous_capabilities": AUTONOMOUS_RULE_CAPABILITIES,
+            }
+        )
     ).hexdigest()
     findings.sort(
         key=lambda item: (
             {"error": 0, "warning": 1}.get(str(item.get("severity")), 2),
             str(item.get("path", "")),
-            str(item.get("id", "")),
+            str(item.get("rule_id", "")),
         )
     )
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -414,6 +482,7 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
     findings_digest = hashlib.sha256(_canonical_json_bytes(findings)).hexdigest()
     packet_evidence = [
         {"kind": "config", "sha256": config_digest},
+        {"kind": "graph_rules", "sha256": rules_digest},
         {"kind": "note_inventory", "sha256": inventory_digest},
         {"kind": "graph_findings", "sha256": findings_digest},
     ]
@@ -421,6 +490,7 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
         "mode": "graph",
         "git_commit": head.stdout.strip() if head.returncode == 0 else None,
         "config_sha256": config_digest,
+        "rules_sha256": rules_digest,
         "evidence": packet_evidence,
         "metrics": metrics,
         "note_inventory": inventory,
@@ -435,8 +505,8 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
         "generated_at": generated_at,
         "git_commit": packet_payload["git_commit"],
         "git_clean": status.returncode == 0 and not status.stdout,
-        "baseline_eligible": status.returncode == 0 and not status.stdout,
         "config_sha256": config_digest,
+        "rules_sha256": rules_digest,
         "metrics": metrics,
         "findings": findings,
         "quality_assessor_packet": {

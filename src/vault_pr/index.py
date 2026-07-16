@@ -17,6 +17,7 @@ from .config import ConfigError, IndexSpec, index_spec, load_vault_path
 from .files import atomic_replace_text
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .recovery import list_active_transactions
+from .tooling import ToolProbeError, probe_qmd_capabilities
 
 
 class IndexUpdateError(RuntimeError):
@@ -25,6 +26,12 @@ class IndexUpdateError(RuntimeError):
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Sleeper = Callable[[float], None]
+QmdCapabilityProbe = Callable[..., dict[str, object]]
+INDEX_STATUS_SCHEMA_VERSION = 1
+INDEX_STATUS_KIND = "qmd_index_status"
+INDEX_STATUS_MAX_BYTES = 1_000_000
+HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
+GIT_OID_PATTERN = re.compile(r"[0-9a-f]{40,64}")
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,58 @@ def _index_name(config: dict[str, Any]) -> str:
     if not isinstance(name, str) or not name.strip():
         raise ConfigError("index.name must be a non-empty string")
     return name.strip()
+
+
+def _embed_enabled(config: dict[str, Any]) -> bool:
+    index_config = config.get("index", {})
+    if not isinstance(index_config, dict):
+        raise ConfigError("index must be a table")
+    embed = index_config.get("embed", True)
+    if not isinstance(embed, bool):
+        raise ConfigError("index.embed must be boolean")
+    return embed
+
+
+def _batch_size(config: dict[str, Any]) -> int:
+    index_config = config.get("index", {})
+    if not isinstance(index_config, dict):
+        raise ConfigError("index must be a table")
+    batch_size = index_config.get("max_docs_per_batch", 64)
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+        raise ConfigError("index.max_docs_per_batch must be an integer")
+    if batch_size < 1:
+        raise ConfigError("index.max_docs_per_batch must be positive")
+    return batch_size
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def relevant_index_config(config: dict[str, Any]) -> dict[str, object]:
+    """Return only configuration that changes qmd index identity or semantics."""
+    vault = load_vault_path(config)
+    spec = _configured_collection(config, vault)
+    return {
+        "schema_version": 1,
+        "index": {
+            "name": _index_name(config),
+            "collection": spec.collection,
+            "mask": spec.mask,
+            "context": spec.context,
+            "embed": _embed_enabled(config),
+        },
+    }
+
+
+def relevant_index_config_sha256(config: dict[str, Any]) -> str:
+    """Hash the canonical qmd-relevant subset of the local configuration."""
+    return hashlib.sha256(_canonical_json(relevant_index_config(config))).hexdigest()
 
 
 def _qmd_command(qmd: str, index_name: str, *args: str) -> list[str]:
@@ -311,11 +370,98 @@ def reconcile_qmd_collection(
     }
 
 
-def _write_status(vault: Path, status: dict[str, Any]) -> None:
+def index_status_path(vault: Path) -> Path:
+    """Return the private Git-directory path for the qmd freshness record."""
     git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")
     if git_dir.returncode != 0:
         raise IndexUpdateError("unable to resolve vault Git directory")
-    status_path = Path(git_dir.stdout.strip()) / "vault-pr-index-status.json"
+    return Path(git_dir.stdout.strip()) / "vault-pr-index-status.json"
+
+
+def _validate_qmd_snapshot(snapshot: object) -> dict[str, object]:
+    if not isinstance(snapshot, dict) or set(snapshot) != {
+        "schema_version",
+        "tool",
+        "version",
+        "capabilities",
+        "capability_sha256",
+    }:
+        raise IndexUpdateError(
+            "index status contains an invalid qmd capability snapshot"
+        )
+    capabilities = snapshot.get("capabilities")
+    if (
+        snapshot.get("schema_version") != 1
+        or snapshot.get("tool") != "qmd"
+        or not isinstance(snapshot.get("version"), str)
+        or not snapshot["version"]
+        or not isinstance(capabilities, dict)
+        or not capabilities
+        or not all(
+            isinstance(name, str) and name and value is True
+            for name, value in capabilities.items()
+        )
+    ):
+        raise IndexUpdateError(
+            "index status contains an invalid qmd capability snapshot"
+        )
+    identity = {
+        "schema_version": snapshot["schema_version"],
+        "tool": snapshot["tool"],
+        "capabilities": capabilities,
+    }
+    expected = hashlib.sha256(_canonical_json(identity)).hexdigest()
+    if snapshot.get("capability_sha256") != expected:
+        raise IndexUpdateError("qmd capability snapshot hash does not match")
+    return snapshot
+
+
+def _validate_status(status: object) -> dict[str, Any]:
+    if not isinstance(status, dict):
+        raise IndexUpdateError("index status must be a JSON object")
+    base_fields = {
+        "schema_version",
+        "kind",
+        "status",
+        "attempts",
+        "updated_at",
+        "reconciliation",
+        "git_commit",
+        "relevant_config_sha256",
+        "qmd",
+    }
+    expected = base_fields | (
+        {"last_error"} if status.get("status") == "index_failed" else set()
+    )
+    if set(status) != expected:
+        raise IndexUpdateError("index status has unknown or missing fields")
+    if (
+        status.get("schema_version") != INDEX_STATUS_SCHEMA_VERSION
+        or status.get("kind") != INDEX_STATUS_KIND
+        or status.get("status") not in {"indexed", "index_failed"}
+        or isinstance(status.get("attempts"), bool)
+        or not isinstance(status.get("attempts"), int)
+        or status["attempts"] < 1
+        or not isinstance(status.get("updated_at"), str)
+        or not status["updated_at"]
+        or not isinstance(status.get("reconciliation"), dict)
+        or not isinstance(status.get("git_commit"), str)
+        or not GIT_OID_PATTERN.fullmatch(status["git_commit"])
+        or not isinstance(status.get("relevant_config_sha256"), str)
+        or not HEX64_PATTERN.fullmatch(status["relevant_config_sha256"])
+    ):
+        raise IndexUpdateError("index status schema is invalid")
+    if status["status"] == "index_failed" and not isinstance(
+        status.get("last_error"), str
+    ):
+        raise IndexUpdateError("failed index status must contain last_error")
+    _validate_qmd_snapshot(status.get("qmd"))
+    return status
+
+
+def _write_status(vault: Path, status: dict[str, Any]) -> None:
+    _validate_status(status)
+    status_path = index_status_path(vault)
     atomic_replace_text(
         status_path,
         json.dumps(status, ensure_ascii=False, indent=2) + "\n",
@@ -323,15 +469,101 @@ def _write_status(vault: Path, status: dict[str, Any]) -> None:
     )
 
 
-def _metadata(config: dict[str, Any], vault: Path, qmd_version: str) -> dict[str, str]:
+def _metadata(
+    config: dict[str, Any],
+    vault: Path,
+    qmd_snapshot: dict[str, object],
+) -> dict[str, object]:
     head = run_git(vault, "rev-parse", "HEAD")
-    config_hash = hashlib.sha256(
-        json.dumps(config, ensure_ascii=False, sort_keys=True).encode()
-    ).hexdigest()
+    if head.returncode != 0 or not head.stdout.strip():
+        raise IndexUpdateError("unable to resolve vault HEAD for index status")
     return {
-        "git_commit": head.stdout.strip() if head.returncode == 0 else "unknown",
-        "config_sha256": config_hash,
-        "qmd_version": qmd_version,
+        "git_commit": head.stdout.strip(),
+        "relevant_config_sha256": relevant_index_config_sha256(config),
+        "qmd": qmd_snapshot,
+    }
+
+
+def load_index_status(vault: Path) -> tuple[dict[str, Any], str]:
+    """Load, bound, validate, and hash the persisted qmd index status."""
+    path = index_status_path(vault)
+    try:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > INDEX_STATUS_MAX_BYTES
+        ):
+            raise IndexUpdateError("qmd index status is missing, unsafe, or too large")
+        content = path.read_bytes()
+        parsed = json.loads(content)
+    except IndexUpdateError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise IndexUpdateError("qmd index status is not valid UTF-8 JSON") from exc
+    return _validate_status(parsed), hashlib.sha256(content).hexdigest()
+
+
+def validate_qmd_index_freshness(
+    config: dict[str, Any],
+    *,
+    runner: Runner = subprocess.run,
+    executable: str | None = None,
+    capability_probe: QmdCapabilityProbe = probe_qmd_capabilities,
+) -> dict[str, Any]:
+    """Compare one persisted index result with exact current governance inputs."""
+    vault = load_vault_path(config)
+    index_name = _index_name(config)
+    qmd = executable or shutil.which("qmd")
+    reasons: list[str] = []
+    if not qmd:
+        raise IndexUpdateError("required tool missing: qmd")
+    head = run_git(vault, "rev-parse", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        raise IndexUpdateError("unable to resolve vault HEAD for index freshness")
+    expected_commit = head.stdout.strip()
+    expected_config = relevant_index_config_sha256(config)
+    try:
+        current_qmd = capability_probe(qmd, index_name=index_name)
+        _validate_qmd_snapshot(current_qmd)
+    except (ToolProbeError, IndexUpdateError) as exc:
+        raise IndexUpdateError(f"qmd capability validation failed: {exc}") from exc
+
+    try:
+        status, status_sha256 = load_index_status(vault)
+    except IndexUpdateError:
+        status = {}
+        status_sha256 = None
+        reasons.append("index_status_unavailable")
+    try:
+        alignment = reconcile_qmd_collection(
+            config, check_only=True, runner=runner, executable=qmd
+        )
+        collection_status = alignment.get("status")
+    except (ConfigError, IndexUpdateError):
+        collection_status = "unknown"
+        reasons.append("collection_check_failed")
+
+    checks = {
+        "collection_aligned": collection_status == "aligned",
+        "index_completed": status.get("status") == "indexed",
+        "commit_matches": status.get("git_commit") == expected_commit,
+        "config_matches": status.get("relevant_config_sha256") == expected_config,
+        "qmd_capabilities_match": (
+            isinstance(status.get("qmd"), dict)
+            and status["qmd"].get("capability_sha256")
+            == current_qmd.get("capability_sha256")
+        ),
+    }
+    reasons.extend(name for name, passed in checks.items() if not passed)
+    return {
+        "schema_version": 1,
+        "eligible": not reasons,
+        "reasons": sorted(set(reasons)),
+        "git_commit": expected_commit,
+        "relevant_config_sha256": expected_config,
+        "qmd": current_qmd,
+        "status_sha256": status_sha256,
+        "collection_status": collection_status,
     }
 
 
@@ -342,6 +574,7 @@ def update_qmd_index(
     runner: Runner = subprocess.run,
     sleeper: Sleeper = time.sleep,
     executable: str | None = None,
+    capability_probe: QmdCapabilityProbe = probe_qmd_capabilities,
 ) -> dict[str, Any]:
     """Reconcile and refresh qmd after a clean content commit."""
     vault = load_vault_path(config)
@@ -351,6 +584,11 @@ def update_qmd_index(
     qmd = executable or shutil.which("qmd")
     if not qmd:
         raise IndexUpdateError("required tool missing: qmd")
+    try:
+        qmd_snapshot = capability_probe(qmd, index_name=index_name)
+        _validate_qmd_snapshot(qmd_snapshot)
+    except (ToolProbeError, IndexUpdateError) as exc:
+        raise IndexUpdateError(f"qmd capability validation failed: {exc}") from exc
 
     if check_only:
         git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")
@@ -378,14 +616,8 @@ def update_qmd_index(
                 + ", ".join(path.name for path in active)
             )
         reconciliation = reconcile_qmd_collection(config, runner=runner, executable=qmd)
-        embed = bool(config.get("index", {}).get("embed", True))
-        batch_size = config.get("index", {}).get("max_docs_per_batch", 64)
-        try:
-            batch_size = int(batch_size)
-        except (TypeError, ValueError) as exc:
-            raise ConfigError("index.max_docs_per_batch must be an integer") from exc
-        if batch_size < 1:
-            raise ConfigError("index.max_docs_per_batch must be positive")
+        embed = _embed_enabled(config)
+        batch_size = _batch_size(config)
 
         attempts = 0
         last_error = ""
@@ -403,20 +635,16 @@ def update_qmd_index(
                     str(batch_size),
                 )
             if result.returncode == 0:
-                version = runner(
-                    [qmd, "--version"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
                 status = {
+                    "schema_version": INDEX_STATUS_SCHEMA_VERSION,
+                    "kind": INDEX_STATUS_KIND,
                     "status": "indexed",
                     "attempts": attempts,
                     "updated_at": datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     ),
                     "reconciliation": reconciliation,
-                    **_metadata(config, vault, version.stdout.strip() or "unknown"),
+                    **_metadata(config, vault, qmd_snapshot),
                 }
                 _write_status(vault, status)
                 return status
@@ -426,12 +654,14 @@ def update_qmd_index(
                 sleeper(backoff[attempt_index])
 
         status = {
+            "schema_version": INDEX_STATUS_SCHEMA_VERSION,
+            "kind": INDEX_STATUS_KIND,
             "status": "index_failed",
             "attempts": attempts,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "last_error": last_error,
             "reconciliation": reconciliation,
-            **_metadata(config, vault, "unknown"),
+            **_metadata(config, vault, qmd_snapshot),
         }
         _write_status(vault, status)
         return status

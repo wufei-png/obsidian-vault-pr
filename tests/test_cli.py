@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
+import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from vault_pr.cli import build_parser, doctor
@@ -120,6 +123,30 @@ class ConfigTests(unittest.TestCase):
             config.write_text(f'[vault]\npath = "{vault}"\n', encoding="utf-8")
 
             self.assertEqual(doctor(config), 1)
+
+    def test_doctor_keeps_json_protocol_for_invalid_active_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            active_root = vault / ".git" / "vault-pr-active"
+            active_root.write_text("not a directory\n", encoding="utf-8")
+            config = Path(temp_dir) / "config.toml"
+            config.write_text(f'[vault]\npath = "{vault}"\n', encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                status = doctor(config)
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(status, 1)
+            self.assertEqual(payload["status"], "unhealthy")
+            active_check = next(
+                item
+                for item in payload["data"]["checks"]
+                if item["check"] == "active_transaction"
+            )
+            self.assertEqual(active_check["status"], "fail")
 
 
 if __name__ == "__main__":

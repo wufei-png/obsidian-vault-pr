@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -9,7 +10,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vault_pr.config import ConfigError
-from vault_pr.index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
+from vault_pr.index import (
+    IndexUpdateError,
+    load_index_status,
+    reconcile_qmd_collection,
+    relevant_index_config_sha256,
+    update_qmd_index,
+    validate_qmd_index_freshness,
+)
 
 
 def make_config(vault: Path, *, max_retries: int = 3) -> dict[str, object]:
@@ -26,6 +34,40 @@ def make_config(vault: Path, *, max_retries: int = 3) -> dict[str, object]:
             "retry_backoff_seconds": [0, 0, 0, 0],
         },
     }
+
+
+def qmd_snapshot(version: str = "qmd test") -> dict[str, object]:
+    capabilities = {
+        "index_selection": True,
+        "collection_inspection": True,
+        "context_inspection": True,
+        "incremental_update": True,
+        "bounded_embedding_batch": True,
+    }
+    identity = {
+        "schema_version": 1,
+        "tool": "qmd",
+        "capabilities": capabilities,
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **identity,
+        "version": version,
+        "capability_sha256": digest,
+    }
+
+
+def capability_probe(_executable: str, *, index_name: str) -> dict[str, object]:
+    if index_name != "test-notebook":
+        raise AssertionError(f"unexpected qmd index name: {index_name}")
+    return qmd_snapshot()
 
 
 class QmdRunner:
@@ -142,7 +184,19 @@ class IndexTests(unittest.TestCase):
     def make_vault(self, root: Path) -> Path:
         vault = root / "vault"
         (vault / "knowledgebase" / "sources").mkdir(parents=True)
+        (vault / "knowledgebase" / "sources" / ".keep").write_text("")
         subprocess.run(["git", "init", "-q", str(vault)], check=True)
+        subprocess.run(
+            ["git", "-C", str(vault), "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(vault), "config", "user.name", "Test"], check=True
+        )
+        subprocess.run(["git", "-C", str(vault), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(vault), "commit", "-qm", "fixture"], check=True
+        )
         return vault
 
     def test_check_reports_aligned_collection(self) -> None:
@@ -355,6 +409,7 @@ class IndexTests(unittest.TestCase):
                 runner=runner,
                 sleeper=lambda _: None,
                 executable="qmd",
+                capability_probe=capability_probe,
             )
 
             self.assertEqual(status["status"], "indexed")
@@ -375,6 +430,7 @@ class IndexTests(unittest.TestCase):
                     runner=runner,
                     sleeper=lambda _: None,
                     executable="qmd",
+                    capability_probe=capability_probe,
                 )
 
             self.assertEqual(runner.calls, [])
@@ -397,6 +453,7 @@ class IndexTests(unittest.TestCase):
                         runner=runner,
                         sleeper=lambda _: None,
                         executable="qmd",
+                        capability_probe=capability_probe,
                     )
 
             self.assertEqual(runner.calls, [])
@@ -415,6 +472,7 @@ class IndexTests(unittest.TestCase):
                 runner=runner,
                 sleeper=lambda _: None,
                 executable="qmd",
+                capability_probe=capability_probe,
             )
 
             self.assertEqual(status["status"], "index_failed")
@@ -430,6 +488,182 @@ class IndexTests(unittest.TestCase):
             config = make_config(vault, max_retries=5)
             with self.assertRaisesRegex(ConfigError, "hard limit of 3"):
                 update_qmd_index(config, executable="qmd")
+
+    def test_relevant_config_hash_excludes_execution_and_unrelated_settings(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            first = make_config(vault)
+            second = make_config(vault)
+            second["index"]["max_retries"] = 0
+            second["index"]["retry_backoff_seconds"] = []
+            second["index"]["max_docs_per_batch"] = 1
+            second["review"] = {"review_all_semantic_transactions": False}
+
+            self.assertEqual(
+                relevant_index_config_sha256(first),
+                relevant_index_config_sha256(second),
+            )
+
+            second["index"]["mask"] = "knowledgebase/**/*.md"
+            self.assertNotEqual(
+                relevant_index_config_sha256(first),
+                relevant_index_config_sha256(second),
+            )
+
+    def test_freshness_requires_exact_head_config_and_qmd_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            runner = QmdRunner(vault, collection_path=vault)
+            update_qmd_index(
+                config,
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+
+            fresh = validate_qmd_index_freshness(
+                config,
+                runner=runner,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+            self.assertTrue(fresh["eligible"])
+            self.assertEqual(fresh["reasons"], [])
+
+            changed = vault / "knowledgebase" / "changed.md"
+            changed.write_text("changed\n")
+            subprocess.run(["git", "-C", str(vault), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "change"], check=True
+            )
+            stale = validate_qmd_index_freshness(
+                config,
+                runner=runner,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+            self.assertFalse(stale["eligible"])
+            self.assertIn("commit_matches", stale["reasons"])
+
+    def test_freshness_rejects_changed_qmd_capability_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            runner = QmdRunner(vault, collection_path=vault)
+            update_qmd_index(
+                config,
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+
+            def changed_probe(
+                _executable: str, *, index_name: str
+            ) -> dict[str, object]:
+                snapshot = qmd_snapshot("qmd newer")
+                capabilities = dict(snapshot["capabilities"])
+                capabilities["new_read_only_feature"] = True
+                identity = {
+                    "schema_version": 1,
+                    "tool": "qmd",
+                    "capabilities": capabilities,
+                }
+                snapshot["capabilities"] = capabilities
+                snapshot["capability_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        identity,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                return snapshot
+
+            stale = validate_qmd_index_freshness(
+                config,
+                runner=runner,
+                executable="qmd",
+                capability_probe=changed_probe,
+            )
+            self.assertFalse(stale["eligible"])
+            self.assertIn("qmd_capabilities_match", stale["reasons"])
+
+    def test_freshness_requires_exact_relevant_config_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            runner = QmdRunner(vault, collection_path=vault)
+            update_qmd_index(
+                config,
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+            changed = make_config(vault)
+            changed["index"]["context"] = "Changed context."
+            runner.context = "Changed context."
+
+            stale = validate_qmd_index_freshness(
+                changed,
+                runner=runner,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+
+            self.assertFalse(stale["eligible"])
+            self.assertIn("config_matches", stale["reasons"])
+            self.assertNotIn("collection_aligned", stale["reasons"])
+
+    def test_freshness_ignores_qmd_version_when_capabilities_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            runner = QmdRunner(vault, collection_path=vault)
+            update_qmd_index(
+                config,
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+
+            fresh = validate_qmd_index_freshness(
+                config,
+                runner=runner,
+                executable="qmd",
+                capability_probe=lambda _executable, *, index_name: qmd_snapshot(
+                    "qmd compatible upgrade"
+                ),
+            )
+            self.assertTrue(fresh["eligible"])
+
+    def test_index_status_schema_rejects_unknown_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            runner = QmdRunner(vault, collection_path=vault)
+            update_qmd_index(
+                config,
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+            status_path = vault / ".git" / "vault-pr-index-status.json"
+            status = json.loads(status_path.read_text())
+            status["legacy_config_sha256"] = "a" * 64
+            status_path.write_text(json.dumps(status))
+
+            with self.assertRaisesRegex(
+                IndexUpdateError, "unknown or missing fields"
+            ):
+                load_index_status(vault)
 
 
 if __name__ == "__main__":
