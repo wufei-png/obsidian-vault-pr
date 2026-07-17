@@ -4,6 +4,61 @@
 
 `obsidian-vault-pr` 专门管这些事。Agent 继续负责读懂材料和组织知识；确定性的 `vault-pr` CLI 负责校验、落盘、提交和恢复。每次语义写入都要先形成一笔有边界的事务，交代改动缘由和目标文件，并把证据一起装进来。计划、审查记录和 Git 历史都能回头核对。
 
+## 工作流架构
+
+整个流程有两个持久化边界：先把来源固化成一笔内容绑定、可核验的采集事务，再基于现有 Vault 发起独立的语义维护事务。
+
+```mermaid
+flowchart TB
+    request["来源引用或维护请求"]
+
+    subgraph capture["阶段一 · 受治理的采集事务"]
+        direction LR
+        provider["可选 Capture Provider<br/>微信文章或登录页"]
+        capture_kernel["治理内核<br/>校验并采集"]
+        source["不可变来源归档<br/>及可见来源笔记"]
+        capture_commit["精确路径提交<br/>事务回执"]
+
+        provider -->|"Snapshot Bundle"| capture_kernel
+        capture_kernel --> source --> capture_commit
+    end
+
+    request -->|"普通网页、PDF 或本地文件"| capture_kernel
+    request -->|"特殊来源"| provider
+
+    subgraph semantic["阶段二 · 受治理的语义事务"]
+        direction LR
+        retrieve["基于当前 HEAD 的 qmd 检索"]
+        maintain["Vault 维护者<br/>综合知识并提出 Plan"]
+        check["内核校验<br/>授权、证据、路径、策略"]
+        review{"需要独立审核？"}
+        reviewer["全新语义审核者<br/>只审核确定的 Review Packet"]
+        apply["内核 apply → commit → finalize"]
+        verify["索引并验证<br/>检索、图谱、RAG"]
+        revise["有限轮修订<br/>或停止且不落盘"]
+
+        retrieve --> maintain --> check --> review
+        review -->|"否"| apply
+        review -->|"是"| reviewer
+        reviewer -->|"批准"| apply
+        reviewer -->|"拒绝"| revise
+        revise --> maintain
+        apply --> verify
+    end
+
+    capture_commit --> retrieve
+    apply -.->|"发生中断"| recover["recover / finalize<br/>核验后补完或回滚"]
+
+    classDef agent fill:#eee7ff,stroke:#6f42c1,color:#20152f
+    classDef kernel fill:#29272d,stroke:#8b5cf6,color:#ffffff
+    classDef record fill:#fbf7ef,stroke:#9b8c7c,color:#292524
+    classDef decision fill:#fff4d6,stroke:#b7791f,color:#3d2a00
+    class maintain,reviewer agent
+    class capture_kernel,check,apply,recover kernel
+    class provider,source,capture_commit,retrieve,verify,revise record
+    class review decision
+```
+
 ## 一条链接进去，知识要落到体系里
 
 `vault-pr` 可以接收普通网页、Markdown、PDF、本地文件，也能验证外部 Capture Provider 生成的微信文章或登录页快照。原始材料会成为不可变的 Source Capture，其身份与内容、访问类型绑定，不受文件名、抓取时间和本机路径影响。
@@ -11,6 +66,38 @@
 采集只是起点。Agent 会通过本地 qmd 检索整个 Vault，找到相关概念和主题笔记，再提出一组受限修改：建立可见的来源笔记，补充已有概念页，在重要主张旁保留出处。遇到互相冲突的说法，它应当并列保留来源，更新当前判断和置信度，而不是挑一个顺眼的覆盖过去。
 
 一次事务默认最多触及 15 条笔记。规模再大，就拆开做，逐笔检查、逐笔提交。
+
+## 三个 Agent 如何分工
+
+下图只有三个紫色节点是 Agent 角色。Capture Provider 和治理内核是能力。调度器会为每次审核和评估创建上下文隔离的新实例：审核者不得编辑或重新规划，评估者不得批准事务或规划修复。
+
+```mermaid
+flowchart TB
+    user["用户"] --> skill["vault-pr skill<br/>唯一公开入口"]
+    skill --> maintainer["Vault 维护者<br/>规划并负责完整工作流"]
+    maintainer -->|"命令与 Plan"| kernel["治理内核<br/>确定性 CLI"]
+    kernel -->|"校验后的结果"| maintainer
+
+    subgraph isolated["调度器创建的上下文隔离实例"]
+        direction LR
+        reviewer["语义审核者<br/>只能批准或拒绝"]
+        assessor["质量评估者<br/>只读判断 RAG 质量"]
+    end
+
+    kernel -->|"策略要求审核时<br/>发送不可变 Review Packet"| reviewer
+    reviewer -->|"结构化审核结果"| kernel
+    kernel -->|"仅发送盲测 RAG 数据包"| assessor
+    assessor -->|"通过 / 失败及发现"| kernel
+
+    kernel --> diagnostics["图谱检查与 RAG discovery<br/>保持确定性诊断"]
+
+    classDef agent fill:#eee7ff,stroke:#6f42c1,color:#20152f
+    classDef kernel fill:#29272d,stroke:#8b5cf6,color:#ffffff
+    classDef boundary fill:#fbf7ef,stroke:#9b8c7c,color:#292524
+    class maintainer,reviewer,assessor agent
+    class kernel kernel
+    class user,skill,diagnostics boundary
+```
 
 ## 可以让它动手，出问题时也有路可退
 

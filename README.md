@@ -45,6 +45,99 @@ The implemented workflow provides:
 - formal Vault Maintainer, Quality Assessor, and Semantic Reviewer contracts
   behind one user-facing skill.
 
+## Architecture at a glance
+
+The workflow has two durable boundaries. Capture first records the source in an
+immutable, content-bound archive and commits that capture transaction. Semantic
+integration then becomes a separate, reviewable transaction over the existing
+vault.
+
+```mermaid
+flowchart TB
+    request["Source Reference or maintenance request"]
+
+    subgraph capture["Phase 1 · Governed capture transaction"]
+        direction LR
+        provider["Optional Capture Provider<br/>WeChat or authenticated pages"]
+        capture_kernel["Governance Kernel<br/>validate and capture"]
+        source["Immutable Source Capture<br/>and visible Source Note"]
+        capture_commit["Exact-path commit<br/>transaction receipt"]
+
+        provider -->|"Snapshot Bundle"| capture_kernel
+        capture_kernel --> source --> capture_commit
+    end
+
+    request -->|"ordinary HTTP, PDF, or local file"| capture_kernel
+    request -->|"specialized source"| provider
+
+    subgraph semantic["Phase 2 · Governed semantic transaction"]
+        direction LR
+        retrieve["Exact-HEAD qmd retrieval"]
+        maintain["Vault Maintainer<br/>synthesize and propose Plan"]
+        check["Kernel checks<br/>authorization, evidence, paths, policy"]
+        review{"Independent review required?"}
+        reviewer["Fresh Semantic Reviewer<br/>exact Review Packet"]
+        apply["Kernel apply → commit → finalize"]
+        verify["Index and verify<br/>retrieval, graph, RAG"]
+        revise["Bounded revision<br/>or stop unapplied"]
+
+        retrieve --> maintain --> check --> review
+        review -->|"No"| apply
+        review -->|"Yes"| reviewer
+        reviewer -->|"Approve"| apply
+        reviewer -->|"Reject"| revise
+        revise --> maintain
+        apply --> verify
+    end
+
+    capture_commit --> retrieve
+    apply -.->|"interrupted"| recover["recover / finalize<br/>verify, then complete or roll back"]
+
+    classDef agent fill:#eee7ff,stroke:#6f42c1,color:#20152f
+    classDef kernel fill:#29272d,stroke:#8b5cf6,color:#ffffff
+    classDef record fill:#fbf7ef,stroke:#9b8c7c,color:#292524
+    classDef decision fill:#fff4d6,stroke:#b7791f,color:#3d2a00
+    class maintain,reviewer agent
+    class capture_kernel,check,apply,recover kernel
+    class provider,source,capture_commit,retrieve,verify,revise record
+    class review decision
+```
+
+### Agent role relationships
+
+Only the three purple boxes below are agent roles. Capture Providers and the
+Governance Kernel are capabilities. The orchestrator creates every reviewer and
+assessor as a fresh isolated instance: reviewers cannot edit or replan, and
+assessors cannot approve transactions or plan repairs.
+
+```mermaid
+flowchart TB
+    user["User"] --> skill["vault-pr skill<br/>one public entry point"]
+    skill --> maintainer["Vault Maintainer<br/>plans and owns the workflow"]
+    maintainer -->|"commands and Plans"| kernel["Governance Kernel<br/>deterministic CLI"]
+    kernel -->|"validated outcomes"| maintainer
+
+    subgraph isolated["Fresh isolated instances created by the orchestrator"]
+        direction LR
+        reviewer["Semantic Reviewer<br/>approve or reject only"]
+        assessor["Quality Assessor<br/>read-only RAG judgment"]
+    end
+
+    kernel -->|"immutable Review Packet<br/>when policy requires"| reviewer
+    reviewer -->|"structured assessment"| kernel
+    kernel -->|"blind RAG packet only"| assessor
+    assessor -->|"pass / fail and findings"| kernel
+
+    kernel --> diagnostics["Graph audit and RAG discovery<br/>deterministic diagnostics"]
+
+    classDef agent fill:#eee7ff,stroke:#6f42c1,color:#20152f
+    classDef kernel fill:#29272d,stroke:#8b5cf6,color:#ffffff
+    classDef boundary fill:#fbf7ef,stroke:#9b8c7c,color:#292524
+    class maintainer,reviewer,assessor agent
+    class kernel kernel
+    class user,skill,diagnostics boundary
+```
+
 ## Capability boundary
 
 The CLI is a deterministic Governance Kernel, not a registry of agent skills.
