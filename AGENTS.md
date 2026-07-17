@@ -39,8 +39,8 @@ use temporary directories or synthetic vaults.
   source note and manifest.
 - Preserve conflicting claims and their sources, then update the current
   synthesis and confidence instead of silently overwriting history.
-- Touch at most 15 notes in one transaction; split larger changes into chained
-  transactions.
+- Touch at most 15 notes in one transaction; split larger changes into multiple
+  bounded transactions and commit each before starting the next.
 - Allow create, rewrite, rename, and split automatically after validation.
   Require an independent reviewer agent for merge, delete, contradictions, and
   every transaction when the configured vault enables review-all policy.

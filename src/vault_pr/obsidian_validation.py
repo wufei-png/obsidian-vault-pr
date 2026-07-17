@@ -264,7 +264,9 @@ def _references_internal_path(
         if candidate is not None
     }
     return any(
-        PurePosixPath(candidate).parts[:1] == (".vault-pr",)
+        PurePosixPath(candidate).parts
+        and _normalize(PurePosixPath(candidate).parts[0])
+        in {".git", ".obsidian", ".vault-pr"}
         for candidate in possible
     )
 
@@ -430,7 +432,9 @@ def validate_proposed_obsidian_state(
         if (vault / relative).is_file() and not (vault / relative).is_symlink()
     }
     baseline_issues, _baseline_links, _baseline_assets = _issues(
-        vault, baseline_contents, baseline_files
+        vault,
+        baseline_contents,
+        baseline_files,
     )
     prospective_contents, prospective_files = _prospective_state(
         config, vault, operations

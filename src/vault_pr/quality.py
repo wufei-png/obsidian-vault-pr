@@ -33,6 +33,18 @@ _ROLE_DEFAULTS = {
 }
 GRAPH_RULESET_VERSION = 1
 GRAPH_AUDIT_SCHEMA_VERSION = 2
+GRAPH_AUDIT_PAYLOAD_FIELDS = (
+    "schema_version",
+    "audit",
+    "git_commit",
+    "config_sha256",
+    "rules_sha256",
+    "evidence",
+    "metrics",
+    "note_inventory",
+    "resolved_edges",
+    "findings",
+)
 AUTONOMOUS_RULE_CAPABILITIES = {
     "broken_wikilink": "repair_broken_wikilink",
     "source_without_synthesis_link": "repair_source_synthesis_link",
@@ -50,6 +62,41 @@ def _canonical_json_bytes(value: Any) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def graph_audit_payload_sha256(payload: dict[str, Any]) -> str:
+    """Hash the closed deterministic portion of a graph audit."""
+    if set(payload) != set(GRAPH_AUDIT_PAYLOAD_FIELDS):
+        raise QualityAuditError(
+            "graph audit payload has unknown or missing fields"
+        )
+    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
+
+def validate_graph_audit_digest(audit: dict[str, Any]) -> str:
+    """Validate a graph audit's closed schema and content-bound digest."""
+    expected_fields = {
+        *GRAPH_AUDIT_PAYLOAD_FIELDS,
+        "generated_at",
+        "git_clean",
+        "audit_sha256",
+    }
+    if (
+        set(audit) != expected_fields
+        or audit.get("schema_version") != GRAPH_AUDIT_SCHEMA_VERSION
+        or audit.get("audit") != "graph"
+        or not isinstance(audit.get("generated_at"), str)
+        or not audit["generated_at"].strip()
+        or not isinstance(audit.get("git_clean"), bool)
+    ):
+        raise QualityAuditError("graph audit schema is invalid")
+    payload = {
+        field: audit[field] for field in GRAPH_AUDIT_PAYLOAD_FIELDS
+    }
+    digest = graph_audit_payload_sha256(payload)
+    if audit.get("audit_sha256") != digest:
+        raise QualityAuditError("graph audit digest does not match its content")
+    return digest
 
 
 def relevant_quality_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -499,7 +546,7 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
         "resolved_edges": resolved_edges,
         "findings": findings,
     }
-    audit_digest = hashlib.sha256(_canonical_json_bytes(audit_payload)).hexdigest()
+    audit_digest = graph_audit_payload_sha256(audit_payload)
     return {
         **audit_payload,
         "generated_at": generated_at,

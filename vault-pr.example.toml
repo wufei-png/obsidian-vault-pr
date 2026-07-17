@@ -8,7 +8,7 @@ directory = "attachments"
 max_touched_notes = 15
 
 [sources]
-capture_archive_dir = ".vault-pr/sources"
+capture_archive_dir = ".vault-pr/sources/public"
 visible_notes_dir = "sources"
 timeout_seconds = 30
 max_download_bytes = 10000000

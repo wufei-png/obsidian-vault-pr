@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,11 @@ _NOTE_ROLE_FIELDS = {
     "index_types",
     "excluded_types",
 }
+_PROTECTED_ROOTS = {".git", ".obsidian", ".vault-pr"}
+
+
+def _normalized_root(value: str) -> str:
+    return unicodedata.normalize("NFC", value).casefold()
 
 
 @dataclass(frozen=True)
@@ -252,6 +258,8 @@ def note_path_allowed(config: dict[str, Any], vault: Path, path: Path) -> bool:
     if not resolved.is_relative_to(vault):
         return False
     relative = resolved.relative_to(vault).as_posix()
+    if _normalized_root(Path(relative).parts[0]) in _PROTECTED_ROOTS:
+        return False
     include = _path_patterns(config, "include", ["**/*.md"])
     protected = [".git/**", ".obsidian/**", ".vault-pr/**"]
     exclude = protected + _path_patterns(
@@ -329,7 +337,33 @@ def source_archive_dir(config: dict[str, Any], vault: Path) -> Path:
         raw_path = config["sources"]["capture_archive_dir"]
     except (KeyError, TypeError) as exc:
         raise ConfigError("missing sources.capture_archive_dir") from exc
-    return vault_relative_path(vault, raw_path, "sources.capture_archive_dir")
+    if not isinstance(raw_path, str):
+        raise ConfigError(
+            "sources.capture_archive_dir must be under .vault-pr/sources/"
+        )
+    relative = Path(raw_path)
+    if (
+        len(relative.parts) < 3
+        or relative.parts[:2] != (".vault-pr", "sources")
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != raw_path
+    ):
+        raise ConfigError(
+            "sources.capture_archive_dir must be under .vault-pr/sources/"
+        )
+    directory = vault_relative_path(
+        vault,
+        raw_path,
+        "sources.capture_archive_dir",
+    )
+    current = vault
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ConfigError(
+                "sources.capture_archive_dir must not traverse a symlink"
+            )
+    return directory
 
 
 def vault_asset_dir(config: dict[str, Any], vault: Path) -> Path:
@@ -347,7 +381,16 @@ def vault_asset_dir(config: dict[str, Any], vault: Path) -> Path:
         raise ConfigError("assets.directory must not be the vault root")
     assert isinstance(raw_directory, str)
     relative = Path(raw_directory)
-    if relative.parts[0] in {".git", ".obsidian", ".vault-pr"}:
+    if (
+        any(part in {".", ".."} for part in relative.parts)
+        or relative.as_posix() != raw_directory
+    ):
+        raise ConfigError("assets.directory must be a normalized relative path")
+    resolved_relative = directory.relative_to(vault)
+    if (
+        _normalized_root(relative.parts[0]) in _PROTECTED_ROOTS
+        or _normalized_root(resolved_relative.parts[0]) in _PROTECTED_ROOTS
+    ):
         raise ConfigError("assets.directory must not use a protected directory")
     current = vault
     for part in relative.parts:

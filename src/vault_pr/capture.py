@@ -439,12 +439,12 @@ def _load_validated_capture(
     source_id: str,
     vault: Path,
     expected_manifest: dict[str, Any] | None,
-    content_artifact: str | None,
-) -> tuple[dict[str, Any], bytes | None]:
+    content_artifacts: set[str] | None,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
     if not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise CaptureError("invalid source id")
     root_descriptor = _capture_root_descriptor(capture_dir)
-    requested_content: bytes | None = None
+    requested_content: dict[str, bytes] = {}
     try:
         manifest, manifest_hash, manifest_identity = _read_manifest(
             root_descriptor, capture_dir
@@ -542,8 +542,8 @@ def _load_validated_capture(
                 )
             expected_records[path] = (digest, size)
 
-        requested_path: Path | None = None
-        if content_artifact is not None:
+        requested_paths: dict[Path, list[str]] = {}
+        for content_artifact in content_artifacts or set():
             if content_artifact == "extracted":
                 requested_path = extracted_path
             elif content_artifact == "primary":
@@ -566,6 +566,9 @@ def _load_validated_capture(
                 raise CaptureError(
                     f"capture manifest has unknown artifact: {content_artifact}"
                 )
+            requested_paths.setdefault(requested_path, []).append(
+                content_artifact
+            )
 
         expected_files = {Path("manifest.json"), *expected_records}
         expected_directories = {Path(".")}
@@ -591,7 +594,7 @@ def _load_validated_capture(
             ) = _read_capture_file(
                 root_descriptor,
                 relative,
-                include_content=relative == requested_path,
+                include_content=relative in requested_paths,
             )
             if file_identity in seen_identities:
                 raise CaptureError(
@@ -626,8 +629,9 @@ def _load_validated_capture(
                 raise CaptureError(
                     f"capture artifact MIME type failed: {relative}"
                 )
-            if relative == requested_path:
-                requested_content = content
+            for requested in requested_paths.get(relative, []):
+                assert content is not None
+                requested_content[requested] = content
 
         (
             final_manifest_hash,
@@ -660,7 +664,7 @@ def load_validated_capture(
         source_id=source_id,
         vault=vault,
         expected_manifest=expected_manifest,
-        content_artifact=None,
+        content_artifacts=None,
     )
     return manifest
 
@@ -678,11 +682,11 @@ def load_validated_capture_artifact_text(
         source_id=source_id,
         vault=vault,
         expected_manifest=None,
-        content_artifact=artifact,
+        content_artifacts={artifact},
     )
-    assert content is not None
+    content_bytes = content[artifact]
     try:
-        text = content.decode("utf-8")
+        text = content_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CaptureError(
             f"capture {artifact} artifact is not valid UTF-8"
@@ -698,24 +702,48 @@ def load_validated_capture_asset_bytes(
     artifact_path: str,
 ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
     """Validate a capture and read one declared asset through the pinned tree."""
+    manifest, assets = load_validated_capture_assets_bytes(
+        capture_dir,
+        source_id=source_id,
+        vault=vault,
+        artifact_paths=[artifact_path],
+    )
+    asset, content = assets[artifact_path]
+    return manifest, asset, content
+
+
+def load_validated_capture_assets_bytes(
+    capture_dir: Path,
+    *,
+    source_id: str,
+    vault: Path,
+    artifact_paths: list[str],
+) -> tuple[dict[str, Any], dict[str, tuple[dict[str, Any], bytes]]]:
+    """Validate a capture once and read multiple declared assets."""
+    if not artifact_paths or len(artifact_paths) != len(set(artifact_paths)):
+        raise CaptureError("capture asset paths must be non-empty and unique")
+    selectors = {f"file:{artifact_path}" for artifact_path in artifact_paths}
     manifest, content = _load_validated_capture(
         capture_dir,
         source_id=source_id,
         vault=vault,
         expected_manifest=None,
-        content_artifact=f"file:{artifact_path}",
+        content_artifacts=selectors,
     )
-    asset = next(
-        (
-            item
-            for item in manifest["files"]
-            if item.get("path") == artifact_path and item.get("role") == "asset"
-        ),
-        None,
-    )
-    if asset is None:
-        raise CaptureError(
-            f"capture manifest has no promotable asset: {artifact_path}"
+    result: dict[str, tuple[dict[str, Any], bytes]] = {}
+    files_by_path = {
+        item.get("path"): item
+        for item in manifest["files"]
+        if item.get("role") == "asset"
+    }
+    for artifact_path in artifact_paths:
+        asset = files_by_path.get(artifact_path)
+        if asset is None:
+            raise CaptureError(
+                f"capture manifest has no promotable asset: {artifact_path}"
+            )
+        result[artifact_path] = (
+            asset,
+            content[f"file:{artifact_path}"],
         )
-    assert content is not None
-    return manifest, asset, content
+    return manifest, result

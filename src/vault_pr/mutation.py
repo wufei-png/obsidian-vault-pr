@@ -344,6 +344,35 @@ def latest_committed_operation(
     }
 
 
+def validate_committed_mutation_receipt(
+    *,
+    vault: Path,
+    operation: str,
+    transaction_id: str,
+    transaction_sha256: str,
+    request_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Load one exact committed mutation receipt without acquiring the vault lock."""
+    request_sha256 = request_sha256 or transaction_sha256
+    _validate_request_fields(
+        operation=operation,
+        transaction_id=transaction_id,
+        transaction_sha256=transaction_sha256,
+        request_sha256=request_sha256,
+    )
+    path = _receipt_path(vault, transaction_id)
+    receipt = _read_receipt(path)
+    _validate_identity(
+        receipt,
+        operation=operation,
+        transaction_id=transaction_id,
+        transaction_sha256=transaction_sha256,
+        request_sha256=request_sha256,
+    )
+    _validate_committed_receipt(vault, path, receipt)
+    return receipt
+
+
 def mutation_response(
     outcome: dict[str, Any],
     *,

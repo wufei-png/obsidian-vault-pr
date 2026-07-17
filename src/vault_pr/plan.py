@@ -16,13 +16,18 @@ import yaml
 
 from .asset_promotion import (
     AssetPromotionError,
+    install_created_promotion,
+    load_promotion_snapshots,
+    load_managed_asset_index,
     normalize_asset_promotion,
+    promotion_results,
+    promotion_review_evidence,
     validate_asset_promotion_batch,
+    validate_promotion_references,
 )
 from .capture import (
     CaptureError,
     load_validated_capture,
-    load_validated_capture_asset_bytes,
 )
 from .config import (
     load_vault_path,
@@ -374,6 +379,7 @@ def _normalize_source_evidence(
     config: dict[str, Any],
     vault: Path,
     raw: dict[str, Any],
+    source_manifests: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     if set(raw) != {"kind", "source_id"}:
         raise PlanError("source_capture evidence has unknown or missing fields")
@@ -381,6 +387,7 @@ def _normalize_source_evidence(
     if not isinstance(source_id, str) or not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise PlanError("source_capture evidence has an invalid source_id")
     manifest = _validated_source_manifest(config, vault, source_id)
+    source_manifests[source_id] = manifest
     capture = source_archive_dir(config, vault) / source_id
     manifest_path = capture / "manifest.json"
     derived = manifest.get("derived")
@@ -452,6 +459,7 @@ def _normalize_evidence(
     config: dict[str, Any],
     vault: Path,
     raw_evidence: object,
+    source_manifests: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     if not isinstance(raw_evidence, list):
         raise PlanError("plan evidence must be an array")
@@ -464,7 +472,12 @@ def _normalize_evidence(
         if not isinstance(kind, str) or kind not in ALLOWED_EVIDENCE_KINDS:
             raise PlanError(f"evidence {index} has an unsupported kind")
         if kind == "source_capture":
-            item = _normalize_source_evidence(config, vault, raw)
+            item = _normalize_source_evidence(
+                config,
+                vault,
+                raw,
+                source_manifests,
+            )
         else:
             item = _normalize_quality_evidence(config, vault, raw)
         if item["evidence_id"] in identities:
@@ -532,7 +545,13 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         raise PlanError("invalid transaction_id")
     summary = _normalized_summary(plan.get("summary"), "plan summary")
     authorization = _normalize_authorization(config, plan.get("authorization"))
-    evidence = _normalize_evidence(config, vault, plan.get("evidence"))
+    source_manifests: dict[str, dict[str, Any]] = {}
+    evidence = _normalize_evidence(
+        config,
+        vault,
+        plan.get("evidence"),
+        source_manifests,
+    )
     intent = plan.get("intent", "integrate")
     if not isinstance(intent, str) or intent not in ALLOWED_INTENTS:
         raise PlanError(f"unsupported plan intent: {intent}")
@@ -590,6 +609,8 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     normalized: list[dict[str, Any]] = []
     actions: set[str] = set()
     source_evidence_ids = {item["source_id"] for item in source_evidence}
+    asset_dir: Path | None = None
+    managed_assets: dict[str, list[Path]] = {}
     for index, raw_operation in enumerate(operations):
         if not isinstance(raw_operation, dict):
             raise PlanError(f"operation {index} must be an object")
@@ -599,13 +620,23 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         if action == "promote_asset":
             if plan_schema_version < 3:
                 raise PlanError("promote_asset requires plan schema_version 3")
+            if asset_dir is None:
+                try:
+                    asset_dir, managed_assets = load_managed_asset_index(
+                        config,
+                        vault,
+                    )
+                except AssetPromotionError as exc:
+                    raise PlanError(str(exc)) from exc
             try:
                 promotion = normalize_asset_promotion(
-                    config,
                     vault,
                     raw_operation,
                     index,
                     source_evidence_ids,
+                    source_manifests,
+                    asset_dir,
+                    managed_assets,
                 )
             except AssetPromotionError as exc:
                 raise PlanError(str(exc)) from exc
@@ -751,14 +782,16 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             operation["content_file"] = content_path
         normalized.append(operation)
 
+    promotions = [
+        operation
+        for operation in normalized
+        if operation["action"] == "promote_asset"
+    ]
     try:
         validate_asset_promotion_batch(
             config,
-            [
-                operation
-                for operation in normalized
-                if operation["action"] == "promote_asset"
-            ],
+            vault,
+            promotions,
         )
     except AssetPromotionError as exc:
         raise PlanError(str(exc)) from exc
@@ -886,31 +919,22 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         )
     except ObsidianValidationError as exc:
         raise PlanError(str(exc)) from exc
-    promoted_paths = {
-        str(operation["path"].relative_to(vault))
-        for operation in normalized
-        if operation["action"] == "promote_asset"
-    }
-    if promoted_paths:
+    if promotions:
         modified_note_paths = {
             str(operation["path"].relative_to(vault))
             for operation in normalized
             if operation["action"] in {"create", "update", "rename"}
             and operation["path"].suffix.casefold() == ".md"
         }
-        referenced_assets = {
-            asset
-            for note_path in modified_note_paths
-            for asset in obsidian_validation["resolved_assets_by_path"].get(
-                note_path, []
+        try:
+            validate_promotion_references(
+                vault,
+                promotions,
+                modified_note_paths,
+                obsidian_validation["resolved_assets_by_path"],
             )
-        }
-        unreferenced = sorted(promoted_paths - referenced_assets)
-        if unreferenced:
-            raise PlanError(
-                "promoted asset must be referenced by a modified visible note: "
-                + ", ".join(unreferenced)
-            )
+        except AssetPromotionError as exc:
+            raise PlanError(str(exc)) from exc
     if intent == "integrate":
         resolved = obsidian_validation["resolved_links_by_path"]
         raw_roles = obsidian_validation["prospective_note_roles"]
@@ -1095,23 +1119,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 "sha256": _sha256_bytes(content_snapshots[content_file]),
             }
         )
-    proposed_assets = [
-        {
-            "evidence_id": (
-                "asset:"
-                + str(operation["path"].relative_to(vault))
-            ),
-            "source_id": operation["source_id"],
-            "source_path": operation["source_path"],
-            "path": str(operation["path"].relative_to(vault)),
-            "sha256": operation["sha256"],
-            "size": operation["size"],
-            "mime": operation["mime"],
-            "disposition": operation["disposition"],
-        }
-        for operation in normalized
-        if operation["action"] == "promote_asset"
-    ]
+    proposed_assets = promotion_review_evidence(vault, promotions)
     evidence_ids = [
         "plan",
         "authorization",
@@ -1410,32 +1418,19 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             for operation in validation["operations"]
             if operation.get("content_file")
         }
-        asset_snapshots: dict[Path, bytes] = {}
-        for operation in validation["operations"]:
-            if operation["action"] != "promote_asset":
-                continue
-            capture_dir = (
-                source_archive_dir(config, vault) / operation["source_id"]
+        promotions = [
+            operation
+            for operation in validation["operations"]
+            if operation["action"] == "promote_asset"
+        ]
+        try:
+            asset_snapshots = load_promotion_snapshots(
+                config,
+                vault,
+                promotions,
             )
-            try:
-                _manifest, asset, content = load_validated_capture_asset_bytes(
-                    capture_dir,
-                    source_id=operation["source_id"],
-                    vault=vault,
-                    artifact_path=operation["source_path"],
-                )
-            except CaptureError as exc:
-                raise PlanError(
-                    f"promoted asset changed during validation: {exc}"
-                ) from exc
-            if (
-                asset["sha256"] != operation["sha256"]
-                or asset["size"] != operation["size"]
-                or asset["mime"] != operation["mime"]
-                or _sha256_bytes(content) != operation["sha256"]
-            ):
-                raise PlanError("promoted asset changed during validation")
-            asset_snapshots[operation["path"]] = content
+        except AssetPromotionError as exc:
+            raise PlanError(str(exc)) from exc
         governance_sha256 = _governance_digest_snapshot(
             frozen_plan_path,
             plan_bytes,
@@ -1527,6 +1522,9 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 operation["action"] == "promote_asset"
                 and operation["disposition"] == "reuse"
             ):
+                affected.add(target)
+                expected_original_sha256[target] = operation["sha256"]
+                expected_original_mode[target] = validated_original_mode[target]
                 continue
             affected.add(target)
             if operation["action"] == "rename":
@@ -1613,22 +1611,10 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             ],
         }
         if validation["plan_schema_version"] >= 3:
-            result["asset_promotions"] = [
-                {
-                    "source_id": operation["source_id"],
-                    "source_path": operation["source_path"],
-                    "path": str(operation["path"].relative_to(vault)),
-                    "sha256": operation["sha256"],
-                    "mime": operation["mime"],
-                    "status": (
-                        "created"
-                        if operation["disposition"] == "create"
-                        else "reused"
-                    ),
-                }
-                for operation in operations
-                if operation["action"] == "promote_asset"
-            ]
+            result["asset_promotions"] = promotion_results(
+                vault,
+                promotions,
+            )
         result_bytes = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode(
             "utf-8"
         )
@@ -1663,13 +1649,12 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                     write_index += 1
                 elif action == "promote_asset":
                     if operation["disposition"] == "create":
-                        _install_staged(
+                        install_created_promotion(
+                            vault,
                             target,
                             asset_snapshots[target],
-                            active_dir / "write-staging" / str(write_index),
                             final_mode[target],
                         )
-                        write_index += 1
                 elif action == "delete":
                     target.unlink()
                 elif action == "rename":
@@ -1711,6 +1696,23 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 )
                 write_index += 1
 
+        def postcondition(_active_dir: Path) -> None:
+            for operation in promotions:
+                if operation["disposition"] != "reuse":
+                    continue
+                target = operation["path"]
+                if (
+                    target.is_symlink()
+                    or not target.is_file()
+                    or _sha256_file(target) != operation["sha256"]
+                    or worktree_file_mode(target)
+                    != validated_original_mode[target]
+                ):
+                    raise PlanError(
+                        "reused asset changed during transaction: "
+                        + str(target.relative_to(vault))
+                    )
+
         try:
             outcome = execute_journaled_mutation(
                 vault=vault,
@@ -1726,6 +1728,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 final_sha256=final_sha256,
                 final_mode=final_mode,
                 write=write,
+                postcondition=postcondition,
                 completion_path=str((archive / "result.json").relative_to(vault)),
                 lock=False,
             )

@@ -36,10 +36,14 @@ class ObsidianValidationTests(unittest.TestCase):
     def _vault(self, root: Path) -> tuple[Path, dict[str, object]]:
         vault = root / "vault"
         (vault / "knowledgebase").mkdir(parents=True)
+        vault = vault.resolve()
         _git(vault, "init", "-q")
         _git(vault, "config", "user.email", "fixture@example.com")
         _git(vault, "config", "user.name", "Fixture")
         return vault, {
+            "sources": {
+                "capture_archive_dir": ".vault-pr/sources/public",
+            },
             "notes": {
                 "include": ["**/*.md"],
                 "exclude": [".git/**", ".obsidian/**", ".vault-pr/**"],
@@ -206,6 +210,31 @@ class ObsidianValidationTests(unittest.TestCase):
                     ),
                 )
 
+    def test_rejects_case_variant_internal_asset_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config = self._vault(root)
+            note = vault / "knowledgebase" / "note.md"
+            note.write_text(_note("Note", "Body"), encoding="utf-8")
+            self._commit(vault)
+
+            with self.assertRaisesRegex(
+                ObsidianValidationError, "asset_promotion_required"
+            ):
+                validate_proposed_obsidian_state(
+                    config,
+                    vault,
+                    self._update(
+                        root,
+                        vault,
+                        "knowledgebase/note.md",
+                        _note(
+                            "Note",
+                            "![[.VAULT-PR/sources/"
+                            "src_11111111111111111111/cover.png]]",
+                        ),
+                    ),
+                )
 
 if __name__ == "__main__":
     unittest.main()

@@ -161,7 +161,7 @@ def run_capture_route_canary(
             config: dict[str, Any] = {
                 "vault": {"path": str(vault)},
                 "sources": {
-                    "capture_archive_dir": ".vault-pr/sources",
+                    "capture_archive_dir": ".vault-pr/sources/public",
                     "visible_notes_dir": "sources",
                 },
                 "notes": {
