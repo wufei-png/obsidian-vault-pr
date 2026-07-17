@@ -79,7 +79,6 @@ ALLOWED_EVIDENCE_KINDS = {
 SOURCE_ID_PATTERN = re.compile(r"src_[0-9a-f]{20}")
 QUALITY_RECORD_ID_PATTERN = re.compile(r"quality_[0-9a-f]{20}")
 TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
-CHAIN_ID_PATTERN = re.compile(r"chain_[A-Za-z0-9_-]{1,80}")
 HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
 MAX_EVIDENCE_EXCERPT_CHARACTERS = 12_000
 
@@ -186,7 +185,6 @@ def init_plan(
     source_ids: list[str] | None = None,
     request_ref: str | None = None,
     request_sha256: str | None = None,
-    chain_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a plan template outside the worktree in the vault Git directory."""
     vault = load_vault_path(config)
@@ -239,8 +237,6 @@ def init_plan(
         "contradiction": False,
         "operations": [],
     }
-    if chain_id is not None:
-        plan["chain_id"] = chain_id
     plan_path = plan_dir / "plan.json"
     plan_path.write_text(
         json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -500,7 +496,6 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     allowed_plan_fields = {
         "schema_version",
         "transaction_id",
-        "chain_id",
         "summary",
         "authorization",
         "evidence",
@@ -516,11 +511,6 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         transaction_id
     ):
         raise PlanError("invalid transaction_id")
-    chain_id = plan.get("chain_id")
-    if chain_id is not None and (
-        not isinstance(chain_id, str) or not CHAIN_ID_PATTERN.fullmatch(chain_id)
-    ):
-        raise PlanError("invalid chain_id")
     summary = _normalized_summary(plan.get("summary"), "plan summary")
     authorization = _normalize_authorization(config, plan.get("authorization"))
     evidence = _normalize_evidence(config, vault, plan.get("evidence"))
@@ -1053,7 +1043,6 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     return {
         "status": "valid",
         "transaction_id": transaction_id,
-        "chain_id": chain_id,
         "summary": summary,
         "authorization": authorization,
         "evidence": evidence,
@@ -1435,7 +1424,6 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         result = {
             "schema_version": 2,
             "transaction_id": validation["transaction_id"],
-            "chain_id": validation["chain_id"],
             "source_ids": validation["source_ids"],
             "authorization": validation["authorization"],
             "retrieval": validation["retrieval"],

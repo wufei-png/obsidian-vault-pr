@@ -39,6 +39,21 @@ class ConfigTests(unittest.TestCase):
                 ["ingest", "https://example.com/article", "--domain", "tech"]
             )
 
+    def test_plan_init_no_longer_accepts_a_chain_id(self) -> None:
+        parser = build_parser()
+        base_args = [
+            "plan",
+            "init",
+            "--summary",
+            "Integrate source",
+            "--authorization-summary",
+            "Integrate the captured source",
+        ]
+        parsed = parser.parse_args(base_args)
+        self.assertFalse(hasattr(parsed, "chain_id"))
+        with self.assertRaises(SystemExit):
+            parser.parse_args([*base_args, "--chain-id", "chain_example"])
+
     def test_loads_single_vault_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = (Path(temp_dir) / "vault").resolve()

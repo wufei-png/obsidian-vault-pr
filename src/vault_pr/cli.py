@@ -346,7 +346,6 @@ def build_parser() -> argparse.ArgumentParser:
     plan_init.add_argument("--source-id", action="append", default=[])
     plan_init.add_argument("--request-ref")
     plan_init.add_argument("--request-sha256")
-    plan_init.add_argument("--chain-id")
     plan_init.add_argument("--config", type=Path, default=Path("vault-pr.local.toml"))
     plan_check = plan_subparsers.add_parser("check", help="validate a plan")
     plan_check.add_argument("plan", type=Path)
@@ -593,7 +592,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source_ids=args.source_id,
                     request_ref=args.request_ref,
                     request_sha256=args.request_sha256,
-                    chain_id=args.chain_id,
                 )
             elif args.plan_command == "check":
                 checked = validate_plan(config, args.plan)

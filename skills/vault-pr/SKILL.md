@@ -99,8 +99,8 @@ A diagnostic or merely assessment-ready run is not an Evaluation Baseline.
    metadata in the source note and transaction manifest.
 12. Preserve conflicting claims and their sources. Update the current synthesis
    and confidence instead of silently replacing history.
-13. Touch no more than 15 notes per transaction. Split larger work into chained
-   transactions.
+13. Touch no more than 15 notes per transaction. Split larger work into multiple
+    bounded transactions, committing each one before starting the next.
 14. Validate Markdown, frontmatter, wikilinks, attachments, Bases, and policy.
 15. Commit the semantic transaction with `vault-pr commit <transaction-id>
     --message <behavior-and-intent> --config <config>` using the ID returned by
