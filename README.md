@@ -1,5 +1,9 @@
 # Obsidian Vault PR
 
+<p align="center">
+  <img src="images/cover/cover-01-governance-architecture.png" alt="Obsidian Vault PR Cover" width="100%">
+</p>
+
 `obsidian-vault-pr` is a governance and change-management layer for existing
 Obsidian vaults. It lets an agent ingest sources, update interlinked notes, run
 deterministic checks, request semantic review for risky changes, and leave an
