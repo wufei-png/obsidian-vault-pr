@@ -289,6 +289,39 @@ class RagEvaluationTests(unittest.TestCase):
                 ["knowledgebase/rag.md"],
             )
 
+    def test_discovery_run_has_no_assessor_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _vault, config, _answers = self._fixture(Path(temp_dir))
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [
+                            {
+                                "file": "qmd://fixture/knowledgebase/rag.md",
+                                "score": 0.9,
+                            }
+                        ]
+                    ),
+                    stderr="",
+                )
+
+            result = evaluate_rag(
+                config,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: self._index_evidence(),
+            )
+
+            self.assertFalse(result["semantic_assessment_ready"])
+            self.assertNotIn("quality_assessor_packet", result)
+            diagnostic = result["rag_discovery"]
+            self.assertEqual(diagnostic["diagnostic_type"], "rag_discovery")
+            self.assertEqual(diagnostic["payload"]["mode"], "rag_discovery")
+            self.assertEqual(len(diagnostic["payload"]["cases"]), 1)
+
     def test_rejects_unaccepted_generated_case(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault, config, _answers = self._fixture(Path(temp_dir))

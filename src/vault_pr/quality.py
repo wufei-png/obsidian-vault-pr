@@ -32,6 +32,7 @@ _ROLE_DEFAULTS = {
     "excluded": {"audit", "prompt-template", "prompt-archive"},
 }
 GRAPH_RULESET_VERSION = 1
+GRAPH_AUDIT_SCHEMA_VERSION = 2
 AUTONOMOUS_RULE_CAPABILITIES = {
     "broken_wikilink": "repair_broken_wikilink",
     "source_without_synthesis_link": "repair_source_synthesis_link",
@@ -480,42 +481,28 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
     ]
     inventory_digest = hashlib.sha256(_canonical_json_bytes(inventory)).hexdigest()
     findings_digest = hashlib.sha256(_canonical_json_bytes(findings)).hexdigest()
-    packet_evidence = [
+    audit_evidence = [
         {"kind": "config", "sha256": config_digest},
         {"kind": "graph_rules", "sha256": rules_digest},
         {"kind": "note_inventory", "sha256": inventory_digest},
         {"kind": "graph_findings", "sha256": findings_digest},
     ]
-    packet_payload = {
-        "mode": "graph",
+    audit_payload = {
+        "schema_version": GRAPH_AUDIT_SCHEMA_VERSION,
+        "audit": "graph",
         "git_commit": head.stdout.strip() if head.returncode == 0 else None,
         "config_sha256": config_digest,
         "rules_sha256": rules_digest,
-        "evidence": packet_evidence,
+        "evidence": audit_evidence,
         "metrics": metrics,
         "note_inventory": inventory,
         "resolved_edges": resolved_edges,
         "findings": findings,
-        "unassessed": [],
     }
-    packet_digest = hashlib.sha256(_canonical_json_bytes(packet_payload)).hexdigest()
+    audit_digest = hashlib.sha256(_canonical_json_bytes(audit_payload)).hexdigest()
     return {
-        "schema_version": 1,
-        "assessment": "graph",
+        **audit_payload,
         "generated_at": generated_at,
-        "git_commit": packet_payload["git_commit"],
         "git_clean": status.returncode == 0 and not status.stdout,
-        "config_sha256": config_digest,
-        "rules_sha256": rules_digest,
-        "metrics": metrics,
-        "findings": findings,
-        "quality_assessor_packet": {
-            "schema_version": 1,
-            "packet_type": "quality_assessment_input",
-            "packet_id": f"pkt_{packet_digest[:20]}",
-            "created_at": generated_at,
-            "input_sha256": packet_digest,
-            "mode": "graph",
-            "payload": packet_payload,
-        },
+        "audit_sha256": audit_digest,
     }

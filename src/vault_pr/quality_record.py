@@ -19,6 +19,7 @@ from .mutation import (
 )
 from .quality import (
     AUTONOMOUS_RULE_CAPABILITIES,
+    GRAPH_AUDIT_SCHEMA_VERSION,
     GRAPH_RULESET_VERSION,
     audit_graph,
 )
@@ -64,13 +65,15 @@ def _record_core(
     audit: dict[str, Any],
     selected: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    packet = audit.get("quality_assessor_packet")
-    if not isinstance(packet, dict):
-        raise QualityRecordError("graph audit has no assessment input packet")
+    audit_sha256 = audit.get("audit_sha256")
+    if not isinstance(audit_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", audit_sha256
+    ):
+        raise QualityRecordError("graph audit has no valid audit digest")
     return {
         "assessment": {
             "kind": "graph_audit",
-            "input_sha256": packet.get("input_sha256"),
+            "input_sha256": audit_sha256,
             "git_commit": audit.get("git_commit"),
             "rules_sha256": audit.get("rules_sha256"),
             "relevant_config_sha256": audit.get("config_sha256"),
@@ -155,12 +158,13 @@ def record_quality_findings(
 
     current = audit_graph(config)
     if (
-        audit.get("schema_version") != 1
-        or audit.get("assessment") != "graph"
+        audit.get("schema_version") != GRAPH_AUDIT_SCHEMA_VERSION
+        or audit.get("audit") != "graph"
         or audit.get("git_clean") is not True
         or audit.get("git_commit") != current.get("git_commit")
         or audit.get("config_sha256") != current.get("config_sha256")
         or audit.get("rules_sha256") != current.get("rules_sha256")
+        or audit.get("audit_sha256") != current.get("audit_sha256")
         or audit.get("findings") != current.get("findings")
     ):
         raise QualityRecordError("graph audit is stale or does not match the vault")

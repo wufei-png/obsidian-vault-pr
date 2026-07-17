@@ -36,7 +36,7 @@ The implemented workflow provides:
 - disposable live capture-route canaries for HTML, PDF, provider-assisted
   WeChat, and environment-gated authenticated snapshots;
 - read-only Note Role graph audits and vault-owned RAG evaluation cases with
-  deterministic retrieval metrics and hash-bound Quality Assessor packets;
+  deterministic retrieval metrics and hash-bound blind-RAG assessor packets;
 - formal Vault Maintainer, Quality Assessor, and Semantic Reviewer contracts
   behind one user-facing skill.
 
@@ -108,10 +108,10 @@ writing. `vault-pr quality rag` reads human-accepted cases from
 `.vault-pr/quality/rag/cases.jsonl`, scores expected retrieval, and binds a
 temporary JSONL answer file plus bounded note excerpts into the packet a fresh
 Quality Assessor uses to judge claims and provenance. Omitting `--answers`
-creates a discovery-only packet. A passed assessor output must be recorded with
-`quality rag-accept` and finalized with `vault-pr commit`; only that Git-tracked
-Quality Record is a baseline. Runs on a dirty worktree remain diagnostic and
-return `assessment_candidate_eligible: false`.
+creates discovery-only diagnostic evidence. A passed assessor output must be
+recorded with `quality rag-accept` and finalized with `vault-pr commit`; only
+that Git-tracked Quality Record is a baseline. Runs on a dirty worktree remain
+diagnostic and return `assessment_candidate_eligible: false`.
 
 Use `vault-pr index --check` for a read-only collection drift report. A normal
 `vault-pr index` repairs only explicitly configured collections, leaves all

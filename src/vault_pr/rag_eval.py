@@ -513,7 +513,7 @@ def evaluate_rag(
         "unassessed": unassessed,
     }
     packet_digest = _canonical_digest(packet_payload)
-    return {
+    evaluation = {
         "schema_version": 1,
         "assessment": "rag",
         "generated_at": generated_at,
@@ -537,7 +537,9 @@ def evaluate_rag(
             "mean_reciprocal_rank": sum(item["reciprocal_rank"] for item in results)
             / len(results),
         },
-        "quality_assessor_packet": {
+    }
+    if answers:
+        evaluation["quality_assessor_packet"] = {
             "schema_version": 1,
             "packet_type": "quality_assessment_input",
             "packet_id": f"pkt_{packet_digest[:20]}",
@@ -545,8 +547,15 @@ def evaluate_rag(
             "input_sha256": packet_digest,
             "mode": mode,
             "payload": packet_payload,
-        },
-    }
+        }
+    else:
+        evaluation["rag_discovery"] = {
+            "schema_version": 1,
+            "diagnostic_type": "rag_discovery",
+            "diagnostic_sha256": packet_digest,
+            "payload": packet_payload,
+        }
+    return evaluation
 
 
 def _read_bounded_json(

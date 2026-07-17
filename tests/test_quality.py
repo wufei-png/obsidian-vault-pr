@@ -81,9 +81,10 @@ class GraphQualityTests(unittest.TestCase):
                 if finding["rule_id"] == "broken_wikilink"
             )
             self.assertEqual(broken["blocking_scope"], "owning_transaction")
-            packet = result["quality_assessor_packet"]
-            payload = packet["payload"]
-            self.assertEqual(len(payload["note_inventory"]), 7)
+            self.assertEqual(result["schema_version"], 2)
+            self.assertEqual(result["audit"], "graph")
+            self.assertNotIn("quality_assessor_packet", result)
+            self.assertEqual(len(result["note_inventory"]), 7)
             broken_targets = {
                 finding.get("target")
                 for finding in result["findings"]
@@ -94,7 +95,7 @@ class GraphQualityTests(unittest.TestCase):
             self.assertNotIn('-z "${NODES}"', broken_targets)
             self.assertNotIn("35", broken_targets)
             evidence = {
-                item["kind"]: item["sha256"] for item in payload["evidence"]
+                item["kind"]: item["sha256"] for item in result["evidence"]
             }
             findings_sha256 = hashlib.sha256(
                 json.dumps(
@@ -105,16 +106,20 @@ class GraphQualityTests(unittest.TestCase):
                 ).encode("utf-8")
             ).hexdigest()
             self.assertEqual(evidence["graph_findings"], findings_sha256)
-            packet_sha256 = hashlib.sha256(
+            audit_payload = {
+                key: value
+                for key, value in result.items()
+                if key not in {"audit_sha256", "generated_at", "git_clean"}
+            }
+            audit_sha256 = hashlib.sha256(
                 json.dumps(
-                    payload,
+                    audit_payload,
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
-            self.assertEqual(packet["input_sha256"], packet_sha256)
-            self.assertEqual(packet["packet_id"], f"pkt_{packet_sha256[:20]}")
+            self.assertEqual(result["audit_sha256"], audit_sha256)
 
     def test_source_requires_an_incoming_synthesis_link(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

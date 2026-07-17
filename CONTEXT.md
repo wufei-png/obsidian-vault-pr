@@ -138,7 +138,7 @@ The primary agent role accountable for turning Source References and Quality Fin
 _Avoid_: User, operator, writer
 
 **Quality Assessor**:
-A read-only agent role that produces Quality Findings, Claim Conflicts, and RAG evaluation judgments without planning changes or granting approval.
+A read-only agent role that judges answer grounding, provenance, and Claim Conflicts for blind RAG evaluations without planning changes or granting approval.
 _Avoid_: Auditor script, reviewer
 
 **Semantic Reviewer**:

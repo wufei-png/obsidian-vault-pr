@@ -13,8 +13,9 @@ agent for source interpretation, synthesis, link decisions, and semantic review.
 1. The main agent acts as Vault Maintainer and must read
    [its role contract](references/roles/vault-maintainer.md) before starting a
    User Ingestion or repair transaction.
-2. Start a fresh Quality Assessor with no inherited conversation when graph or
-   RAG quality must be judged. Give it only the bounded packet defined in
+2. Start a fresh Quality Assessor with no inherited conversation when answer
+   grounding and provenance in a blind RAG evaluation must be judged. Give it
+   only the bounded packet defined in
    [its role contract](references/roles/quality-assessor.md); it is read-only and
    cannot plan, approve, or repair changes.
 3. Start a fresh Semantic Reviewer with no inherited conversation for every
@@ -32,12 +33,15 @@ For maintained route regression, read
 against a disposable test Source Reference. Never redirect a user-supplied
 retention URL to the disposable canary.
 
-For vault quality, run `vault-pr quality graph --config <config>` and read
-[the RAG evaluation contract](references/rag-evaluation.md) before
-`vault-pr quality rag --answers <temporary-jsonl> --config <config>`. Send the
-hash-bound output to a fresh Quality Assessor. Record a passed output with
-`vault-pr quality rag-accept ... --apply`, then commit the returned transaction.
-A diagnostic or merely assessment-ready run is not an Evaluation Baseline.
+For vault quality, run `vault-pr quality graph --config <config>` and inspect its
+deterministic findings directly. Read
+[the RAG evaluation contract](references/rag-evaluation.md) before running
+`vault-pr quality rag`. A run without `--answers` is a deterministic discovery
+diagnostic and is not sent to a Quality Assessor. Send only a hash-bound
+`rag_blind` run with answers to a fresh Quality Assessor. Record a passed output
+with `vault-pr quality rag-accept ... --apply`, then commit the returned
+transaction. A diagnostic or merely assessment-ready run is not an Evaluation
+Baseline.
 
 ## Resolve the vault
 

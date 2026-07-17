@@ -39,8 +39,9 @@ save its JSON output outside the Vault. The
 Governance Kernel scores retrieval, verifies the current qmd index commit,
 relevant configuration, and capability fingerprint, binds bounded note excerpts and generated answers,
 and creates a hash-bound `quality_assessment_input` packet. Without `--answers`,
-the command is retrieval discovery only. A successful run is only an assessment
-candidate, never a recorded baseline.
+the command emits hash-bound `rag_discovery` diagnostic evidence instead of an
+agent packet. A successful run is only an assessment candidate, never a recorded
+baseline.
 
 Note evidence is deduplicated into a packet-level catalog. Cases reference
 Vault-relative catalog paths instead of repeating excerpts. Generation stops at

@@ -24,6 +24,10 @@ Every input packet contains the same identity envelope:
 The current Quality Assessment packet family is v1. The current Semantic
 Review packet and assessment family is v2.
 
+Quality Assessment packets are emitted only for `rag_blind` evaluations.
+Graph audits and `rag_discovery` runs produce their own deterministic CLI
+evidence, not agent packet families.
+
 `input_sha256` is the SHA-256 of canonical JSON for `payload` alone. Semantic
 Review Packets intentionally contain no current timestamp, so the Kernel can
 regenerate the exact packet during check, review, and apply. The packet

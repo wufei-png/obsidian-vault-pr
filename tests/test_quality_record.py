@@ -74,6 +74,10 @@ class QualityRecordTests(unittest.TestCase):
 
             self.assertEqual(planned["record_id"], applied["record_id"])
             record, path = load_quality_record(vault, applied["record_id"])
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                record["assessment"]["input_sha256"], audit["audit_sha256"]
+            )
             self.assertEqual(record["findings"][0]["finding_id"], finding_id)
             self.assertTrue(path.is_file())
             git_dir = Path(
@@ -87,6 +91,24 @@ class QualityRecordTests(unittest.TestCase):
             )
             self.assertEqual(committed["status"], "committed_and_finalized")
             self.assertFalse(_git(vault, "status", "--porcelain=v1").stdout)
+
+    def test_rejects_tampered_graph_audit_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config, audit_path, finding_id = self._fixture(root)
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            audit["audit_sha256"] = "0" * 64
+            audit_path.write_text(json.dumps(audit) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                QualityRecordError, "stale or does not match"
+            ):
+                record_quality_findings(
+                    config,
+                    audit_path=audit_path,
+                    finding_ids=[finding_id],
+                    apply=True,
+                )
 
     def test_write_failure_rolls_back_and_uses_domain_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

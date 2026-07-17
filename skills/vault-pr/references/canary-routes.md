@@ -4,8 +4,8 @@
 the source, builds a temporary qmd collection, verifies retrieval, removes the
 collection, and deletes the fixture. Passing this deterministic route does not by
 itself prove semantic integration; the Vault Maintainer must still complete a
-bounded plan and Quality Assessor judgment before the whole Canary Scenario is
-accepted.
+bounded plan and any policy-required Semantic Review before the whole Canary
+Scenario is accepted.
 
 Maintain these route classes:
 

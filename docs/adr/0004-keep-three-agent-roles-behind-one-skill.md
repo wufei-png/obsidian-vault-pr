@@ -10,10 +10,12 @@ Governance Kernel remain capabilities rather than agent roles.
 
 ## Consequences
 
-The same Semantic Reviewer role may use different risk rubrics, and the same
-Quality Assessor role may run discovery or blind evaluation, but an instance may
-not approve work it planned or repair a finding it produced. Independence
-requires a fresh context and role boundary, not a different model provider.
+The same Semantic Reviewer role may use different risk rubrics, while the
+Quality Assessor performs only blind RAG evaluation. Deterministic graph audits
+and RAG discovery runs remain Governance Kernel diagnostics. An assessor
+instance may not approve work it planned or repair a finding it produced.
+Independence requires a fresh context and role boundary, not a different model
+provider.
 Rejected plans may be revised by the Vault Maintainer and sent to a fresh
 reviewer only a configured, bounded number of times; exhaustion leaves the
 finding and unapplied transaction available for later inspection rather than
