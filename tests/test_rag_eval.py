@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vault_pr.assessor_schema import AssessorSchemaError, validate_rag_assessment
 from vault_pr.rag_eval import (
@@ -132,6 +133,19 @@ class RagEvaluationTests(unittest.TestCase):
             "claim_conflicts": [],
             "unassessed": [],
         }
+
+    @staticmethod
+    def _rehash_packet(packet: dict[str, object]) -> None:
+        digest = hashlib.sha256(
+            json.dumps(
+                packet["payload"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        packet["packet_id"] = f"pkt_{digest[:20]}"
+        packet["input_sha256"] = digest
 
     def test_passed_judgment_requires_reason_and_evidence(self) -> None:
         packet = {
@@ -288,6 +302,39 @@ class RagEvaluationTests(unittest.TestCase):
                 packet["payload"]["cases"][0]["evidence_note_refs"],
                 ["knowledgebase/rag.md"],
             )
+
+    def test_validates_qmd_snapshot_once_under_governance_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _vault, config, answers = self._fixture(Path(temp_dir))
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            calls = 0
+
+            def validate_once(
+                _config: dict[str, object], _qmd: str
+            ) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return self._index_evidence()
+
+            evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=validate_once,
+            )
+
+            self.assertEqual(calls, 1)
 
     def test_discovery_run_has_no_assessor_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -452,7 +499,7 @@ class RagEvaluationTests(unittest.TestCase):
             evaluation_path.write_text(json.dumps(result), encoding="utf-8")
             assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
 
-            with self.assertRaisesRegex(RagEvaluationError, "qmd index evidence"):
+            with self.assertRaisesRegex(RagEvaluationError, "not eligible"):
                 accept_rag_baseline(
                     config,
                     evaluation_path=evaluation_path,
@@ -584,6 +631,13 @@ class RagEvaluationTests(unittest.TestCase):
             self.assertEqual(active_retry["next_action"], "commit")
             record = vault / accepted["path"]
             self.assertTrue(record.is_file())
+            self.assertEqual(
+                json.loads(record.read_text(encoding="utf-8"))["schema_version"],
+                2,
+            )
+            baseline = json.loads(record.read_text(encoding="utf-8"))
+            self.assertNotIn("evaluation", baseline)
+            self.assertEqual(baseline["quality_assessor_packet"], packet)
             git_dir = Path(
                 subprocess.run(
                     ["git", "-C", str(vault), "rev-parse", "--absolute-git-dir"],
@@ -653,6 +707,307 @@ class RagEvaluationTests(unittest.TestCase):
                     evaluation_path=evaluation_path,
                     assessment_path=assessment_path,
                 )
+
+    def test_rejects_tampered_assessor_packet_envelope_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config, answers = self._fixture(root)
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            evaluation = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: self._index_evidence(),
+            )
+            packet = evaluation["quality_assessor_packet"]
+            assessment = self._passed_assessment(packet)
+            packet["mode"] = "rag_discovery"
+            evaluation_path = root / "evaluation.json"
+            assessment_path = root / "assessment.json"
+            evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+            assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+
+            with self.assertRaisesRegex(RagEvaluationError, "hash validation"):
+                accept_rag_baseline(
+                    config,
+                    evaluation_path=evaluation_path,
+                    assessment_path=assessment_path,
+                )
+
+    def test_rejects_unknown_assessor_packet_envelope_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config, answers = self._fixture(root)
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            evaluation = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: self._index_evidence(),
+            )
+            packet = evaluation["quality_assessor_packet"]
+            assessment = self._passed_assessment(packet)
+            packet["unexpected"] = True
+            evaluation_path = root / "evaluation.json"
+            assessment_path = root / "assessment.json"
+            evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+            assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RagEvaluationError,
+                "no Quality Assessor packet",
+            ):
+                accept_rag_baseline(
+                    config,
+                    evaluation_path=evaluation_path,
+                    assessment_path=assessment_path,
+                )
+
+    def test_rejects_unknown_rag_evaluation_projection_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config, answers = self._fixture(root)
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            evidence = self._index_evidence()
+            evaluation = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: evidence,
+            )
+            packet = evaluation["quality_assessor_packet"]
+            assessment = self._passed_assessment(packet)
+            evaluation["unexpected"] = "/private/path"
+            evaluation_path = root / "evaluation.json"
+            assessment_path = root / "assessment.json"
+            evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+            assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RagEvaluationError,
+                "projection",
+            ):
+                accept_rag_baseline(
+                    config,
+                    evaluation_path=evaluation_path,
+                    assessment_path=assessment_path,
+                )
+
+    def test_rejects_rehashed_incomplete_or_open_rag_case_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config, answers = self._fixture(root)
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            original = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: self._index_evidence(),
+            )
+            mutations = {
+                "missing_answer": lambda case: case.pop("answer"),
+                "unknown_nested_field": lambda case: case.update(
+                    {"unexpected": True}
+                ),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    evaluation = json.loads(json.dumps(original))
+                    packet = evaluation["quality_assessor_packet"]
+                    mutate(packet["payload"]["cases"][0])
+                    self._rehash_packet(packet)
+                    assessment = self._passed_assessment(packet)
+                    evaluation_path = root / f"{name}-evaluation.json"
+                    assessment_path = root / f"{name}-assessment.json"
+                    evaluation_path.write_text(
+                        json.dumps(evaluation),
+                        encoding="utf-8",
+                    )
+                    assessment_path.write_text(
+                        json.dumps(assessment),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        RagEvaluationError,
+                        "RAG case",
+                    ):
+                        accept_rag_baseline(
+                            config,
+                            evaluation_path=evaluation_path,
+                            assessment_path=assessment_path,
+                        )
+
+    def test_rejects_rehashed_changes_to_authoritative_rag_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config, answers = self._fixture(root)
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            original = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: self._index_evidence(),
+            )
+            mutations = {
+                "threshold": lambda case: case["thresholds"].update(
+                    {"min_recall_at_k": 0.5}
+                ),
+                "expected_claim": lambda case: case.update(
+                    {"expected_claims": ["Altered expected claim."]}
+                ),
+                "answer": lambda case: case.update(
+                    {"answer": "Altered generated answer."}
+                ),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    evaluation = json.loads(json.dumps(original))
+                    packet = evaluation["quality_assessor_packet"]
+                    mutate(packet["payload"]["cases"][0])
+                    self._rehash_packet(packet)
+                    assessment = self._passed_assessment(packet)
+                    evaluation_path = root / f"{name}-authority-evaluation.json"
+                    assessment_path = root / f"{name}-authority-assessment.json"
+                    evaluation_path.write_text(
+                        json.dumps(evaluation),
+                        encoding="utf-8",
+                    )
+                    assessment_path.write_text(
+                        json.dumps(assessment),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        RagEvaluationError,
+                        "authoritative case set|semantic digest",
+                    ):
+                        accept_rag_baseline(
+                            config,
+                            evaluation_path=evaluation_path,
+                            assessment_path=assessment_path,
+                            executable="qmd",
+                            index_validator=lambda _config, _qmd: self._index_evidence(),
+                        )
+
+    def test_rechecks_rag_freshness_after_acquiring_mutation_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config, answers = self._fixture(root)
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            evidence = self._index_evidence()
+            evaluation = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: evidence,
+            )
+            packet = evaluation["quality_assessor_packet"]
+            assessment = self._passed_assessment(packet)
+            evaluation_path = root / "evaluation.json"
+            assessment_path = root / "assessment.json"
+            evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+            assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+            from vault_pr import rag_eval as rag_eval_module
+
+            real_execute = rag_eval_module.execute_journaled_mutation
+
+            def commit_change_before_lock(**kwargs: object) -> object:
+                note = vault / "knowledgebase" / "rag.md"
+                note.write_text(
+                    note.read_text(encoding="utf-8") + "\nChanged.\n",
+                    encoding="utf-8",
+                )
+                _git(vault, "add", "knowledgebase/rag.md")
+                _git(vault, "commit", "-qm", "concurrent RAG change")
+                return real_execute(**kwargs)
+
+            with patch(
+                "vault_pr.rag_eval.execute_journaled_mutation",
+                side_effect=commit_change_before_lock,
+            ):
+                with self.assertRaisesRegex(
+                    RagEvaluationError,
+                    "HEAD no longer matches",
+                ):
+                    accept_rag_baseline(
+                        config,
+                        evaluation_path=evaluation_path,
+                        assessment_path=assessment_path,
+                        apply=True,
+                        executable="qmd",
+                        index_validator=lambda _config, _qmd: evidence,
+                    )
+
+            self.assertFalse(
+                (vault / ".vault-pr/quality/rag/baselines").exists()
+            )
 
     def test_accepts_tracked_cases_override_from_packet_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -724,8 +1079,12 @@ class RagEvaluationTests(unittest.TestCase):
                 index_validator=lambda _config, _qmd: evidence,
             )
             packet = evaluation["quality_assessor_packet"]
-            packet["payload"]["note_evidence"][0]["path"] = "/dev/zero"
-            packet["payload"]["cases"][0]["evidence_note_refs"] = ["/dev/zero"]
+            unsafe_note = dict(packet["payload"]["note_evidence"][0])
+            unsafe_note["path"] = "/dev/zero"
+            packet["payload"]["note_evidence"].append(unsafe_note)
+            case = packet["payload"]["cases"][0]
+            case["retrieved_paths"].append("/dev/zero")
+            case["evidence_note_refs"].append("/dev/zero")
             digest = hashlib.sha256(
                 json.dumps(
                     packet["payload"],
@@ -775,7 +1134,50 @@ class RagEvaluationTests(unittest.TestCase):
             evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
             assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
 
-            with self.assertRaisesRegex(RagEvaluationError, "thresholds"):
+            with self.assertRaisesRegex(RagEvaluationError, "not eligible"):
+                accept_rag_baseline(
+                    config,
+                    evaluation_path=evaluation_path,
+                    assessment_path=assessment_path,
+                    executable="qmd",
+                    index_validator=lambda _config, _qmd: evidence,
+                )
+
+    def test_diagnostic_dirty_vault_evaluation_cannot_be_recorded_later(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config, answers = self._fixture(root)
+            scratch = vault / "scratch.tmp"
+            scratch.write_text("diagnostic dirt", encoding="utf-8")
+
+            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 0.9}]
+                    ),
+                    stderr="",
+                )
+
+            evidence = self._index_evidence()
+            evaluation = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: evidence,
+            )
+            self.assertFalse(evaluation["assessment_candidate_eligible"])
+            packet = evaluation["quality_assessor_packet"]
+            assessment = self._passed_assessment(packet)
+            scratch.unlink()
+            evaluation_path = root / "dirty-evaluation.json"
+            assessment_path = root / "dirty-assessment.json"
+            evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+            assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+
+            with self.assertRaisesRegex(RagEvaluationError, "not eligible"):
                 accept_rag_baseline(
                     config,
                     evaluation_path=evaluation_path,
