@@ -24,8 +24,9 @@ The implemented workflow provides:
   file, or a manifest-driven Snapshot Bundle for WeChat and authenticated
   pages; local absolute paths and provider metadata do not define identity;
 - vault-wide BM25/vector retrieval for deduplication and semantic planning;
-- Plan schema v2 with one Write Authorization Snapshot, multiple Evidence
-  items, explicit retrieval requirements, and a 15-note default limit;
+- Plan schema v3 with one Write Authorization Snapshot, multiple Evidence
+  items, explicit retrieval requirements, governed Source Capture Asset
+  promotion, and a 15-note default limit; existing v2 Plans remain readable;
 - deterministic Review Packets and structured assessments for merge, delete,
   contradiction, `purge_capture`, autonomous repair, or review-all policy;
   the skill orchestration assigns these plans to a separate reviewer agent;

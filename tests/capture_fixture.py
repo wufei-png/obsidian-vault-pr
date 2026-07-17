@@ -26,9 +26,22 @@ def write_capture(
     source_note: str = "knowledgebase/sources/source.md",
     requested_url: str = "https://example.com/source",
     title: str = "Source Fixture",
+    secondary_files: dict[str, tuple[bytes, str, str]] | None = None,
 ) -> str:
     raw = b"<main>raw source fixture</main>\n"
     extracted = b"# Source Fixture\n\n" + b"knowledge " * 100
+    file_records = [
+        {
+            "path": path,
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "mime": mime,
+            "role": role,
+        }
+        for path, (content, mime, role) in sorted(
+            (secondary_files or {}).items()
+        )
+    ]
     identity = {
         "schema_version": 3,
         "source": {
@@ -43,13 +56,17 @@ def write_capture(
             "size": len(raw),
             "mime": "text/html",
         },
-        "files": [],
+        "files": file_records,
     }
     source_id = f"src_{source_identity_digest(identity)[:20]}"
     capture = vault / ".vault-pr" / "sources" / "public" / source_id
     capture.mkdir(parents=True)
     (capture / "source.html").write_bytes(raw)
     (capture / "extracted.md").write_bytes(extracted)
+    for path, (content, _mime, _role) in (secondary_files or {}).items():
+        artifact = capture / path
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(content)
     note_path = vault / source_note
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(source_note_text(source_id))

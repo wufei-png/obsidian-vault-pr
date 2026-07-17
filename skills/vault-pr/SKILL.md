@@ -88,7 +88,10 @@ Baseline.
 6. Run `vault-pr plan init <source-id> --summary <summary> --config <config>`.
    Read [the plan schema](references/plan-schema.md), create proposed note files,
    and fill the plan. Prefer updating a related concept page over creating a
-   duplicate page.
+   duplicate page. Infer which declared Capture assets the proposed Markdown
+   embeds, then express each one as an explicit `promote_asset` operation; the
+   Kernel validates and executes these operations but never infers hidden writes
+   during apply.
 7. Run `vault-pr plan check <plan> --config <config>` before apply.
 8. If review is required, hand only the deterministic Review Packet to a fresh
    independent reviewer. Save its closed structured assessment and run
@@ -106,6 +109,8 @@ Baseline.
 13. Touch no more than 15 notes per transaction. Split larger work into multiple
     bounded transactions, committing each one before starting the next.
 14. Validate Markdown, frontmatter, wikilinks, attachments, Bases, and policy.
+    Promote only manifest entries with role `asset`; never promote a
+    `supplement` merely because it is present in the Capture.
 15. Commit the semantic transaction with `vault-pr commit <transaction-id>
     --message <behavior-and-intent> --config <config>` using the ID returned by
     `plan apply`. If qmd indexing fails, retry at most three times after the

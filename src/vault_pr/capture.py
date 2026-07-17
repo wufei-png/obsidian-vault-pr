@@ -548,6 +548,20 @@ def _load_validated_capture(
                 requested_path = extracted_path
             elif content_artifact == "primary":
                 requested_path = primary_path
+            elif content_artifact.startswith("file:"):
+                declared_path = content_artifact.removeprefix("file:")
+                requested_path = next(
+                    (
+                        path
+                        for path in expected_records
+                        if path.as_posix() == declared_path
+                    ),
+                    None,
+                )
+                if requested_path is None:
+                    raise CaptureError(
+                        f"capture manifest has unknown artifact: {declared_path}"
+                    )
             else:
                 raise CaptureError(
                     f"capture manifest has unknown artifact: {content_artifact}"
@@ -674,3 +688,34 @@ def load_validated_capture_artifact_text(
             f"capture {artifact} artifact is not valid UTF-8"
         ) from exc
     return manifest, text
+
+
+def load_validated_capture_asset_bytes(
+    capture_dir: Path,
+    *,
+    source_id: str,
+    vault: Path,
+    artifact_path: str,
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    """Validate a capture and read one declared asset through the pinned tree."""
+    manifest, content = _load_validated_capture(
+        capture_dir,
+        source_id=source_id,
+        vault=vault,
+        expected_manifest=None,
+        content_artifact=f"file:{artifact_path}",
+    )
+    asset = next(
+        (
+            item
+            for item in manifest["files"]
+            if item.get("path") == artifact_path and item.get("role") == "asset"
+        ),
+        None,
+    )
+    if asset is None:
+        raise CaptureError(
+            f"capture manifest has no promotable asset: {artifact_path}"
+        )
+    assert content is not None
+    return manifest, asset, content

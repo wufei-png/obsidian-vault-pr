@@ -1,11 +1,12 @@
-# Semantic change plan v2
+# Semantic change plan v3
 
 Keep the Plan and proposed files in the private staging directory returned by
-`vault-pr plan init`. Runtime accepts schema v2 only.
+`vault-pr plan init`. Runtime creates schema v3 Plans and continues to accept
+schema v2 Plans that do not use Asset Promotion.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "transaction_id": "txn_20260715T000000Z_example",
   "summary": "Integrate the source into the existing RAG concept page",
   "authorization": {
@@ -35,6 +36,12 @@ Keep the Plan and proposed files in the private staging directory returned by
       "path": "knowledgebase/ai/agent/rag.md",
       "expected_sha256": "sha256-of-current-note",
       "content_file": "files/rag.md"
+    },
+    {
+      "action": "promote_asset",
+      "source_id": "src_0123456789abcdef0123",
+      "source_path": "images/retrieval-flow.png",
+      "path": "attachments/retrieval-flow--89abcdef0123.png"
     }
   ]
 }
@@ -67,6 +74,19 @@ capabilities. Only a Maintenance Request may use
 Normal Markdown operations are `create`, `update`, `delete`, and `rename`.
 Each action has a closed field set; unknown metadata is rejected rather than
 silently ignored.
+`promote_asset` is a schema-v3 operation containing exactly `source_id`,
+`source_path`, and `path`. The source must be a manifest-declared `asset` from
+Source Capture Evidence in the same Plan; `supplement` entries are not
+promotable. The v1 promotion MIME set is PNG, JPEG, GIF, WebP, and PDF. The
+target is a flat file under `[assets].directory` (default `attachments/`) with a
+MIME-compatible extension and a readable name ending in
+`--<first-12-sha256>`. The operation must be referenced by visible Markdown
+modified in the same transaction. Equal content reuses an existing tracked
+Asset Promotion target with that hash marker; different content is never
+allowed to overwrite it. Ordinary pre-existing attachments remain outside this
+managed naming and deduplication contract. The transaction-wide promotion count
+and declared bytes use the configured `sources.max_asset_files` and
+`sources.max_asset_bytes` bounds.
 `purge_capture` is a separate high-risk operation containing only `source_id`.
 It requires a Maintenance Request and independent review, expands to deletion
 of the verified Capture and unique Source Note, and is blocked by remaining
@@ -79,13 +99,13 @@ for ordinary maintenance.
 
 The Kernel validates frontmatter, newly introduced wikilink and anchor defects,
 tracked attachments, referenced Bases, provenance boundaries, exact hashes,
-note limits, and autonomous-repair postconditions. Normal Vault assets are
-read-only dependencies in v2; the Plan cannot create, replace, rename, or delete
-them. Anchor existence is checked only when the target note is modified by the
-transaction; links to unmodified notes still require an unambiguous existing
-file. Visible notes must not directly embed hidden `.vault-pr` Capture assets;
-such references fail with `asset_promotion_required` until a future asset
-promotion operation exists.
+note limits, and autonomous-repair postconditions. Asset Promotion may only
+create or exactly reuse a Vault Asset; updates, renames, and deletes remain
+outside this contract. Anchor existence is checked only when the target note is
+modified by the transaction; links to unmodified notes still require an
+unambiguous existing file. Visible notes must not directly embed hidden
+`.vault-pr` Capture assets; the agent rewrites such references to an explicit
+promotion target before validation.
 
 `vault-pr plan check` deterministically regenerates the Review Packet, including
 the full proposed Markdown up to the packet limit. A reviewer returns a closed

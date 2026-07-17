@@ -1,6 +1,9 @@
 [vault]
 path = "/absolute/path/to/your/obsidian-vault"
 
+[assets]
+directory = "attachments"
+
 [semantic]
 max_touched_notes = 15
 

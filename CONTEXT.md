@@ -38,11 +38,11 @@ An immutable asset or supplement declared inside a Source Capture and retained a
 _Avoid_: Vault attachment
 
 **Vault Asset**:
-A normal attachment managed by the user, Obsidian, or another external tool and referenced by visible notes. Semantic Transactions may validate an existing Vault Asset but do not manage its lifecycle in v2.
+A normal attachment referenced by visible notes. It may be created or reused through Asset Promotion; after promotion, its lifecycle is managed by the user, Obsidian, or another external tool.
 _Avoid_: Capture asset
 
 **Asset Promotion**:
-A future governed operation that would create a Vault Asset from a verified Source Capture Asset. It is intentionally absent from v2 rather than being hidden inside a Markdown operation.
+A governed part of a Semantic Transaction that creates or exactly reuses a hash-named Vault Asset target from a verified Source Capture Asset while introducing a visible note reference. It never overwrites an existing Vault Asset.
 _Avoid_: Copy attachment, embed creation
 
 **Governance Kernel**:

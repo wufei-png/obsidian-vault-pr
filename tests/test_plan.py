@@ -33,6 +33,7 @@ def make_config(
 ) -> dict[str, object]:
     return {
         "vault": {"path": str(vault)},
+        "assets": {"directory": "attachments"},
         "semantic": {"max_touched_notes": maximum},
         "sources": {
             "capture_archive_dir": ".vault-pr/sources/public",
@@ -62,11 +63,16 @@ class PlanTests(unittest.TestCase):
         freshness.start()
         self.addCleanup(freshness.stop)
 
-    def make_vault(self, root: Path) -> tuple[Path, str]:
+    def make_vault(
+        self,
+        root: Path,
+        *,
+        secondary_files: dict[str, tuple[bytes, str, str]] | None = None,
+    ) -> tuple[Path, str]:
         vault = root / "vault"
         (vault / "knowledgebase" / "sources").mkdir(parents=True)
         (vault / "work" / "sources").mkdir(parents=True)
-        source_id = write_capture(vault)
+        source_id = write_capture(vault, secondary_files=secondary_files)
         (vault / "knowledgebase" / "concept.md").write_text(
             note("Concept", "Existing synthesis"),
             encoding="utf-8",
@@ -93,6 +99,7 @@ class PlanTests(unittest.TestCase):
         *,
         intent: str = "integrate",
         contradiction: bool = False,
+        schema_version: int = 2,
     ) -> Path:
         plan_dir = root / "plan"
         files = plan_dir / "files"
@@ -120,7 +127,7 @@ class PlanTests(unittest.TestCase):
         plan_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": schema_version,
                     "transaction_id": "txn_20260715T000000Z_fixture",
                     "summary": "Integrate fixture",
                     "authorization": {
@@ -191,6 +198,204 @@ class PlanTests(unittest.TestCase):
         assessment_path = plan_path.parent / f"{instance_id}.json"
         assessment_path.write_text(json.dumps(assessment) + "\n")
         return record_review(config, plan_path, assessment_path)
+
+    def _asset_plan(
+        self,
+        root: Path,
+        source_id: str,
+        content: bytes,
+        *,
+        target_stem: str = "chart",
+        referenced: bool = True,
+    ) -> tuple[Path, str]:
+        digest = hashlib.sha256(content).hexdigest()
+        target = f"attachments/{target_stem}--{digest[:12]}.png"
+        plan_path = self.write_plan(
+            root,
+            source_id,
+            [
+                {
+                    "action": "promote_asset",
+                    "source_id": source_id,
+                    "source_path": "images/chart.png",
+                    "path": target,
+                }
+            ],
+            schema_version=3,
+        )
+        if referenced:
+            (root / "plan" / "files" / "synthesis.md").write_text(
+                note(
+                    "Concept",
+                    f"Integrated from [[sources/source]]\n\n![[{target}]]",
+                ),
+                encoding="utf-8",
+            )
+        return plan_path, target
+
+    def test_promotes_referenced_capture_asset_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nasset fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (content, "image/png", "asset")
+                },
+            )
+            plan_path, target = self._asset_plan(root, source_id, content)
+
+            result = apply_plan(make_config(vault), plan_path)
+
+            self.assertEqual((vault / target).read_bytes(), content)
+            self.assertEqual(result["asset_promotions"][0]["status"], "created")
+            self.assertEqual(result["schema_version"], 3)
+
+    def test_reuses_existing_asset_with_identical_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nasset fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (content, "image/png", "asset")
+                },
+            )
+            plan_path, target = self._asset_plan(root, source_id, content)
+            (vault / target).parent.mkdir()
+            (vault / target).write_bytes(content)
+            subprocess.run(
+                ["git", "-C", str(vault), "add", target],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "existing asset"],
+                check=True,
+            )
+
+            result = apply_plan(make_config(vault), plan_path)
+
+            self.assertEqual(result["asset_promotions"][0]["status"], "reused")
+
+    def test_rejects_supplement_asset_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nsupplement fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (
+                        content,
+                        "image/png",
+                        "supplement",
+                    )
+                },
+            )
+            plan_path, _target = self._asset_plan(root, source_id, content)
+
+            with self.assertRaisesRegex(PlanError, "not a promotable"):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_rejects_unreferenced_asset_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nasset fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (content, "image/png", "asset")
+                },
+            )
+            plan_path, _target = self._asset_plan(
+                root,
+                source_id,
+                content,
+                referenced=False,
+            )
+
+            with self.assertRaisesRegex(PlanError, "must be referenced"):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_bounds_promoted_asset_bytes_per_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nasset fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (content, "image/png", "asset")
+                },
+            )
+            plan_path, _target = self._asset_plan(root, source_id, content)
+            config = make_config(vault)
+            config["sources"]["max_asset_bytes"] = len(content) - 1
+
+            with self.assertRaisesRegex(PlanError, "asset bytes"):
+                validate_plan(config, plan_path)
+
+    def test_requires_reuse_of_existing_identical_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nasset fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (content, "image/png", "asset")
+                },
+            )
+            digest = hashlib.sha256(content).hexdigest()
+            existing = f"attachments/existing--{digest[:12]}.png"
+            (vault / existing).parent.mkdir()
+            (vault / existing).write_bytes(content)
+            subprocess.run(
+                ["git", "-C", str(vault), "add", existing],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "existing asset"],
+                check=True,
+            )
+            plan_path, _target = self._asset_plan(root, source_id, content)
+
+            with self.assertRaisesRegex(
+                PlanError,
+                f"asset_reuse_required: {existing}",
+            ):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_never_overwrites_existing_asset_with_different_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nasset fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (content, "image/png", "asset")
+                },
+            )
+            plan_path, target = self._asset_plan(root, source_id, content)
+            (vault / target).parent.mkdir()
+            (vault / target).write_bytes(b"\x89PNG\r\n\x1a\ndifferent")
+
+            with self.assertRaisesRegex(PlanError, "different content"):
+                validate_plan(make_config(vault), plan_path)
+
+    def test_rejects_symlinked_asset_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            content = b"\x89PNG\r\n\x1a\nasset fixture"
+            vault, source_id = self.make_vault(
+                root,
+                secondary_files={
+                    "images/chart.png": (content, "image/png", "asset")
+                },
+            )
+            (vault / "real-attachments").mkdir()
+            (vault / "attachments").symlink_to("real-attachments")
+            plan_path, _target = self._asset_plan(root, source_id, content)
+
+            with self.assertRaisesRegex(ConfigError, "must not traverse"):
+                validate_plan(make_config(vault), plan_path)
 
     def test_rejects_tampered_source_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

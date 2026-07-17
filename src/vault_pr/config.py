@@ -15,6 +15,7 @@ class ConfigError(ValueError):
 
 _CONFIG_FIELDS: dict[str, set[str]] = {
     "vault": {"path"},
+    "assets": {"directory"},
     "sources": {
         "capture_archive_dir",
         "visible_notes_dir",
@@ -329,3 +330,28 @@ def source_archive_dir(config: dict[str, Any], vault: Path) -> Path:
     except (KeyError, TypeError) as exc:
         raise ConfigError("missing sources.capture_archive_dir") from exc
     return vault_relative_path(vault, raw_path, "sources.capture_archive_dir")
+
+
+def vault_asset_dir(config: dict[str, Any], vault: Path) -> Path:
+    """Resolve the flat directory governed for promoted Vault Assets."""
+    raw_assets = config.get("assets", {})
+    if not isinstance(raw_assets, dict):
+        raise ConfigError("assets must be a table")
+    raw_directory = raw_assets.get("directory", "attachments")
+    directory = vault_relative_path(
+        vault,
+        raw_directory,
+        "assets.directory",
+    )
+    if directory == vault:
+        raise ConfigError("assets.directory must not be the vault root")
+    assert isinstance(raw_directory, str)
+    relative = Path(raw_directory)
+    if relative.parts[0] in {".git", ".obsidian", ".vault-pr"}:
+        raise ConfigError("assets.directory must not use a protected directory")
+    current = vault
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ConfigError("assets.directory must not traverse a symlink")
+    return directory

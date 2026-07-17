@@ -307,10 +307,15 @@ def _issues(
     files: set[str],
     *,
     anchor_validation_paths: set[str] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, list[str]],
+    dict[str, list[str]],
+]:
     exact, short = _note_resolvers(contents)
     issues: list[dict[str, Any]] = []
     resolved_by_path: dict[str, list[str]] = defaultdict(list)
+    resolved_assets_by_path: dict[str, list[str]] = defaultdict(list)
     for source_path, content in sorted(contents.items()):
         semantic = _semantic_text(content)
         for match in _WIKILINK.finditer(semantic):
@@ -338,17 +343,19 @@ def _issues(
                             "target": target,
                         }
                     )
-                elif suffix == ".base":
-                    try:
-                        _validate_base(vault, candidates[0])
-                    except ObsidianValidationError:
-                        issues.append(
-                            {
-                                "kind": "invalid_base",
-                                "path": source_path,
-                                "target": candidates[0],
-                            }
-                        )
+                else:
+                    resolved_assets_by_path[source_path].append(candidates[0])
+                    if suffix == ".base":
+                        try:
+                            _validate_base(vault, candidates[0])
+                        except ObsidianValidationError:
+                            issues.append(
+                                {
+                                    "kind": "invalid_base",
+                                    "path": source_path,
+                                    "target": candidates[0],
+                                }
+                            )
                 continue
             status, resolved = _resolve_note(source_path, target, exact, short)
             if status != "resolved" or resolved is None:
@@ -396,8 +403,17 @@ def _issues(
                         "target": raw,
                     }
                 )
+            else:
+                resolved_assets_by_path[source_path].append(candidates[0])
     issues.sort(key=lambda item: (item["path"], item["kind"], item["target"]))
-    return issues, {path: sorted(values) for path, values in resolved_by_path.items()}
+    return (
+        issues,
+        {path: sorted(values) for path, values in resolved_by_path.items()},
+        {
+            path: sorted(set(values))
+            for path, values in resolved_assets_by_path.items()
+        },
+    )
 
 
 def validate_proposed_obsidian_state(
@@ -413,7 +429,7 @@ def validate_proposed_obsidian_state(
         for relative in tracked
         if (vault / relative).is_file() and not (vault / relative).is_symlink()
     }
-    baseline_issues, _baseline_links = _issues(
+    baseline_issues, _baseline_links, _baseline_assets = _issues(
         vault, baseline_contents, baseline_files
     )
     prospective_contents, prospective_files = _prospective_state(
@@ -426,7 +442,7 @@ def validate_proposed_obsidian_state(
         and operation["path"].suffix.casefold() == ".md"
         and str(operation["path"].relative_to(vault)) in prospective_contents
     }
-    prospective_issues, resolved = _issues(
+    prospective_issues, resolved, resolved_assets = _issues(
         vault,
         prospective_contents,
         prospective_files,
@@ -451,6 +467,7 @@ def validate_proposed_obsidian_state(
         "existing_reference_debt": baseline_issues,
         "prospective_reference_debt": prospective_issues,
         "resolved_links_by_path": resolved,
+        "resolved_assets_by_path": resolved_assets,
         "prospective_note_sha256": {
             path: hashlib.sha256(content.encode("utf-8")).hexdigest()
             for path, content in sorted(prospective_contents.items())

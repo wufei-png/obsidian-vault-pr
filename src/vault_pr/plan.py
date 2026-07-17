@@ -14,7 +14,16 @@ from typing import Any
 from .files import atomic_replace_bytes
 import yaml
 
-from .capture import CaptureError, load_validated_capture
+from .asset_promotion import (
+    AssetPromotionError,
+    normalize_asset_promotion,
+    validate_asset_promotion_batch,
+)
+from .capture import (
+    CaptureError,
+    load_validated_capture,
+    load_validated_capture_asset_bytes,
+)
 from .config import (
     load_vault_path,
     max_touched_notes,
@@ -66,7 +75,16 @@ class PlanError(RuntimeError):
     """Raised when a semantic change plan is invalid or unsafe."""
 
 
-ALLOWED_ACTIONS = {"create", "update", "delete", "rename", "purge_capture"}
+PLAN_SCHEMA_VERSION = 3
+ALLOWED_PLAN_SCHEMA_VERSIONS = {2, PLAN_SCHEMA_VERSION}
+ALLOWED_ACTIONS = {
+    "create",
+    "update",
+    "delete",
+    "rename",
+    "purge_capture",
+    "promote_asset",
+}
 ALLOWED_INTENTS = {"integrate", "maintenance", "merge", "split", "rename"}
 ALLOWED_AUTHORIZATION_KINDS = {
     "maintenance_request",
@@ -220,7 +238,7 @@ def init_plan(
     plan_dir.mkdir(parents=True)
     (plan_dir / "files").mkdir()
     plan = {
-        "schema_version": 2,
+        "schema_version": PLAN_SCHEMA_VERSION,
         "transaction_id": transaction_id,
         "summary": summary,
         "authorization": authorization,
@@ -491,7 +509,8 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     vault = load_vault_path(config)
     plan_path = plan_path.expanduser().resolve()
     plan = _read_json(plan_path, "plan")
-    if plan.get("schema_version") != 2:
+    plan_schema_version = plan.get("schema_version")
+    if plan_schema_version not in ALLOWED_PLAN_SCHEMA_VERSIONS:
         raise PlanError("unsupported plan schema_version")
     allowed_plan_fields = {
         "schema_version",
@@ -567,14 +586,37 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         raise PlanError("plan operations must be a non-empty array")
 
     touched: set[Path] = set()
+    affected_paths: set[Path] = set()
     normalized: list[dict[str, Any]] = []
     actions: set[str] = set()
+    source_evidence_ids = {item["source_id"] for item in source_evidence}
     for index, raw_operation in enumerate(operations):
         if not isinstance(raw_operation, dict):
             raise PlanError(f"operation {index} must be an object")
         action = raw_operation.get("action")
         if not isinstance(action, str) or action not in ALLOWED_ACTIONS:
             raise PlanError(f"operation {index} has unsupported action: {action}")
+        if action == "promote_asset":
+            if plan_schema_version < 3:
+                raise PlanError("promote_asset requires plan schema_version 3")
+            try:
+                promotion = normalize_asset_promotion(
+                    config,
+                    vault,
+                    raw_operation,
+                    index,
+                    source_evidence_ids,
+                )
+            except AssetPromotionError as exc:
+                raise PlanError(str(exc)) from exc
+            if promotion["path"] in affected_paths:
+                raise PlanError(
+                    f"operation {index} duplicates an affected asset path"
+                )
+            affected_paths.add(promotion["path"])
+            actions.add(action)
+            normalized.append(promotion)
+            continue
         if action == "purge_capture":
             if set(raw_operation) != {"action", "source_id"}:
                 raise PlanError(
@@ -616,6 +658,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                     f"operation {index} duplicates an affected note path"
                 )
             touched.add(source_note)
+            affected_paths.add(source_note)
             actions.add(action)
             normalized.append(
                 {
@@ -626,6 +669,11 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 }
             )
             for path in purge_paths:
+                if path in affected_paths:
+                    raise PlanError(
+                        f"operation {index} duplicates an affected capture path"
+                    )
+                affected_paths.add(path)
                 normalized.append(
                     {
                         "action": "delete",
@@ -660,6 +708,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         if target in touched:
             raise PlanError(f"operation {index} duplicates an affected note path")
         touched.add(target)
+        affected_paths.add(target)
         operation = {"action": action, "path": target}
 
         source = target
@@ -676,6 +725,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             if source in touched:
                 raise PlanError(f"operation {index} duplicates an affected note path")
             touched.add(source)
+            affected_paths.add(source)
             operation["from"] = source
             if target.exists():
                 raise PlanError(f"operation {index} rename target already exists")
@@ -700,6 +750,18 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 raise PlanError(f"operation {index} content has invalid frontmatter")
             operation["content_file"] = content_path
         normalized.append(operation)
+
+    try:
+        validate_asset_promotion_batch(
+            config,
+            [
+                operation
+                for operation in normalized
+                if operation["action"] == "promote_asset"
+            ],
+        )
+    except AssetPromotionError as exc:
+        raise PlanError(str(exc)) from exc
 
     if intent == "integrate":
         for source in source_evidence:
@@ -824,6 +886,31 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         )
     except ObsidianValidationError as exc:
         raise PlanError(str(exc)) from exc
+    promoted_paths = {
+        str(operation["path"].relative_to(vault))
+        for operation in normalized
+        if operation["action"] == "promote_asset"
+    }
+    if promoted_paths:
+        modified_note_paths = {
+            str(operation["path"].relative_to(vault))
+            for operation in normalized
+            if operation["action"] in {"create", "update", "rename"}
+            and operation["path"].suffix.casefold() == ".md"
+        }
+        referenced_assets = {
+            asset
+            for note_path in modified_note_paths
+            for asset in obsidian_validation["resolved_assets_by_path"].get(
+                note_path, []
+            )
+        }
+        unreferenced = sorted(promoted_paths - referenced_assets)
+        if unreferenced:
+            raise PlanError(
+                "promoted asset must be referenced by a modified visible note: "
+                + ", ".join(unreferenced)
+            )
     if intent == "integrate":
         resolved = obsidian_validation["resolved_links_by_path"]
         raw_roles = obsidian_validation["prospective_note_roles"]
@@ -1008,12 +1095,33 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 "sha256": _sha256_bytes(content_snapshots[content_file]),
             }
         )
+    proposed_assets = [
+        {
+            "evidence_id": (
+                "asset:"
+                + str(operation["path"].relative_to(vault))
+            ),
+            "source_id": operation["source_id"],
+            "source_path": operation["source_path"],
+            "path": str(operation["path"].relative_to(vault)),
+            "sha256": operation["sha256"],
+            "size": operation["size"],
+            "mime": operation["mime"],
+            "disposition": operation["disposition"],
+        }
+        for operation in normalized
+        if operation["action"] == "promote_asset"
+    ]
     evidence_ids = [
         "plan",
         "authorization",
         *[item["evidence_id"] for item in evidence],
         *[item["evidence_id"] for item in proposed_contents],
+        *[item["evidence_id"] for item in proposed_assets],
     ]
+    review_obsidian_validation = dict(obsidian_validation)
+    if plan_schema_version < 3:
+        review_obsidian_validation.pop("resolved_assets_by_path", None)
     packet_payload = {
         "governance_sha256": governance_sha256,
         "plan": plan,
@@ -1022,12 +1130,14 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         "retrieval": retrieval,
         "index_freshness": index_freshness,
         "proposed_contents": proposed_contents,
-        "obsidian_validation": obsidian_validation,
+        "obsidian_validation": review_obsidian_validation,
         "risks": risks,
         "required_judgments": list(REQUIRED_JUDGMENTS),
         "evidence_ids": evidence_ids,
         "unassessed": [],
     }
+    if plan_schema_version >= 3:
+        packet_payload["proposed_assets"] = proposed_assets
     try:
         review_packet = build_review_packet(packet_payload)
     except ReviewError as exc:
@@ -1063,6 +1173,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         "review_rejections": rejection_count,
         "revision_limit_exhausted": revision_limit_exhausted,
         "operations": normalized,
+        "plan_schema_version": plan_schema_version,
         "plan": plan,
         "plan_path": plan_path,
     }
@@ -1254,18 +1365,18 @@ def _plan_request_identity(
         digest.update(b"\0")
         if path.is_file():
             digest.update(path.read_bytes())
-    relevant_config = {
-        key: config.get(key, {})
-        for key in (
-            "semantic",
-            "sources",
-            "notes",
-            "review",
-            "quality",
-            "index",
-            "autonomous_repair",
-        )
-    }
+    config_keys = [
+        "semantic",
+        "sources",
+        "notes",
+        "review",
+        "quality",
+        "index",
+        "autonomous_repair",
+    ]
+    if plan.get("schema_version") == PLAN_SCHEMA_VERSION:
+        config_keys.append("assets")
+    relevant_config = {key: config.get(key, {}) for key in config_keys}
     digest.update(b"config\0")
     digest.update(canonical_json(relevant_config))
     return transaction_id, digest.hexdigest()
@@ -1299,6 +1410,32 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             for operation in validation["operations"]
             if operation.get("content_file")
         }
+        asset_snapshots: dict[Path, bytes] = {}
+        for operation in validation["operations"]:
+            if operation["action"] != "promote_asset":
+                continue
+            capture_dir = (
+                source_archive_dir(config, vault) / operation["source_id"]
+            )
+            try:
+                _manifest, asset, content = load_validated_capture_asset_bytes(
+                    capture_dir,
+                    source_id=operation["source_id"],
+                    vault=vault,
+                    artifact_path=operation["source_path"],
+                )
+            except CaptureError as exc:
+                raise PlanError(
+                    f"promoted asset changed during validation: {exc}"
+                ) from exc
+            if (
+                asset["sha256"] != operation["sha256"]
+                or asset["size"] != operation["size"]
+                or asset["mime"] != operation["mime"]
+                or _sha256_bytes(content) != operation["sha256"]
+            ):
+                raise PlanError("promoted asset changed during validation")
+            asset_snapshots[operation["path"]] = content
         governance_sha256 = _governance_digest_snapshot(
             frozen_plan_path,
             plan_bytes,
@@ -1342,7 +1479,20 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             action = operation["action"]
             target = operation["path"]
             try:
-                if action == "create":
+                if action == "promote_asset":
+                    if operation["disposition"] == "create":
+                        unchanged = not target.exists()
+                        validated_original_mode[target] = None
+                    else:
+                        unchanged = (
+                            target.is_file()
+                            and not target.is_symlink()
+                            and _sha256_file(target) == operation["sha256"]
+                        )
+                        validated_original_mode[target] = worktree_file_mode(
+                            target
+                        )
+                elif action == "create":
                     unchanged = not target.exists()
                     validated_original_mode[target] = None
                 elif action == "rename":
@@ -1373,6 +1523,11 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         expected_original_mode: dict[Path, str | None] = {}
         for operation in operations:
             target = operation["path"]
+            if (
+                operation["action"] == "promote_asset"
+                and operation["disposition"] == "reuse"
+            ):
+                continue
             affected.add(target)
             if operation["action"] == "rename":
                 source = operation["from"]
@@ -1381,7 +1536,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 expected_original_sha256[target] = None
                 expected_original_mode[source] = validated_original_mode[source]
                 expected_original_mode[target] = None
-            elif operation["action"] == "create":
+            elif operation["action"] in {"create", "promote_asset"}:
                 expected_original_sha256[target] = None
                 expected_original_mode[target] = None
             else:
@@ -1407,6 +1562,10 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 )
                 if action == "create":
                     final_mode[target] = "100644"
+            elif action == "promote_asset":
+                if operation["disposition"] == "create":
+                    final_sha256[target] = operation["sha256"]
+                    final_mode[target] = "100644"
             elif action == "delete":
                 final_sha256[target] = None
                 final_mode[target] = None
@@ -1422,7 +1581,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 final_mode[target] = validated_original_mode[source]
 
         result = {
-            "schema_version": 2,
+            "schema_version": validation["plan_schema_version"],
             "transaction_id": validation["transaction_id"],
             "source_ids": validation["source_ids"],
             "authorization": validation["authorization"],
@@ -1453,6 +1612,23 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 for path in sorted(affected)
             ],
         }
+        if validation["plan_schema_version"] >= 3:
+            result["asset_promotions"] = [
+                {
+                    "source_id": operation["source_id"],
+                    "source_path": operation["source_path"],
+                    "path": str(operation["path"].relative_to(vault)),
+                    "sha256": operation["sha256"],
+                    "mime": operation["mime"],
+                    "status": (
+                        "created"
+                        if operation["disposition"] == "create"
+                        else "reused"
+                    ),
+                }
+                for operation in operations
+                if operation["action"] == "promote_asset"
+            ]
         result_bytes = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode(
             "utf-8"
         )
@@ -1485,6 +1661,15 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                         final_mode[target],
                     )
                     write_index += 1
+                elif action == "promote_asset":
+                    if operation["disposition"] == "create":
+                        _install_staged(
+                            target,
+                            asset_snapshots[target],
+                            active_dir / "write-staging" / str(write_index),
+                            final_mode[target],
+                        )
+                        write_index += 1
                 elif action == "delete":
                     target.unlink()
                 elif action == "rename":
