@@ -24,6 +24,82 @@
 
 观点是否成立、概念该怎么组织，仍由 Agent 判断。`obsidian-vault-pr` 盯住容易被忽略的写入环节：Agent 能改多大范围，依据是什么，落盘前通过了哪些检查。失败后也能说明白发生了什么。
 
+## 已经有 Agent 管理 Vault，为什么还需要它
+
+同类开源项目大多走
+[Karpathy 的 LLM Wiki 模式](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)：
+不可变 `raw/` 资料，由 Agent 编译并维护互联 Markdown Wiki，再配合 index / lint / query。
+其中不少项目在**新建 Wiki 仓库**场景下，已经可以基本替代 `obsidian-vault-pr` 的知识维护效果。更值得问的是：在**已有 Vault** 上，谁负责持久改动的安全边界。
+
+下表按架构与职责做定性比较，不是统一基准测试。星标约为 2026-07-17 的社区规模。
+
+| 项目                                                                                         | 主要角色                                                         | 擅长什么                                                                     | 相对 `vault-pr` 的客观判断                                                                                                           |
+| -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| [obsidian-wiki](https://github.com/Ar9av/obsidian-wiki)（约 2.9k★）                          | 较均衡的 Karpathy Wiki 框架，适配多种编码 Agent                  | 采集、lint、重建、多 Agent 适配、完整生命周期                                | 新建 Wiki 仓库时是很强的替代品。对已有目录与笔记角色的确定性写入内核支持较弱。                                                       |
+| [obsidian-second-brain](https://github.com/eugeniughelbur/obsidian-second-brain)（约 3.3k★） | 自动化程度最高的 AI-first 第二大脑                               | 约 44 条命令、定时维护、混合检索、网页研究、笔记自重写                       | 若接受其约定，可以替代 `vault-pr` 的“Vault 会自己演化”效果。系统表面积大；安全更多依赖 Agent 工作流，而非内容绑定事务与恢复协议。    |
+| [claude-obsidian](https://github.com/AgriciDaniel/claude-obsidian)（约 9.5k★）               | 最流行的 Claude Code Wiki 技能包与方法论                         | 来源吸收、概念页、矛盾标注、LYT/PARA/Zettelkasten 模式、按文件 advisory lock | Claude Code 下新建 Wiki 时几乎可直接替代。Advisory lock 与 Obsidian Git 自动提交，不等于带日志的精确路径 apply / commit / finalize。 |
+| [llm-wiki-agent](https://github.com/SamurAIGPT/llm-wiki-agent)（约 3.2k★）                   | 轻量跨 Agent 自维护 Wiki 技能                                    | 运行时负担小；适配 Claude Code、Codex、OpenCode、Gemini CLI                  | 想要技能而非治理 CLI、又从零建 Karpathy Wiki 时，可替代 `vault-pr`。独立审查与恢复机制很少。                                         |
+| [obsidian-mind](https://github.com/breferrari/obsidian-mind)（约 3.4k★）                     | 编码 Agent 的持久工作记忆                                        | 会话生命周期 hooks、qmd 检索、项目 / 决策 / 人物结构                         | 问题域不同：跨会话工程记忆，不是任意已有 Vault 的通用来源编译与治理。                                                                |
+| [llm-wiki-compiler](https://github.com/atomicstrata/llm-wiki-compiler)（约 1.8k★）           | 偏研究资料的知识编译器                                           | Claim / 段落级出处、行号引用、两阶段生成、混合检索                           | 科研 Wiki、强引用场景下可替代 `vault-pr` 的知识编译路径。Obsidian 多为展示端；不是 Vault 无关的治理层。                              |
+| [Synto](https://github.com/kytmanov/synto)（约 0.2k★）                                       | 本地 Ollama 优先的 Wiki 编译器（`obsidian-llm-wiki-local` 后继） | 稳定实体 ID、重命名 / 合并 / 拆分、草稿审批、编译 lineage、离线评估          | 编译器里产品直觉最接近（草稿、谱系、评估）。社区仍小；本质仍是 Wiki 编译器，不是“接管已有 Vault”的写入内核。                         |
+
+相关但不属严格同类、适合组合使用的层：
+[Claudian](https://github.com/YishenTu/claudian) /
+[obsidian-agent-client](https://github.com/RAIT-09/obsidian-agent-client)
+（Obsidian 内的 Agent UI）、
+[obsidian-skills](https://github.com/kepano/obsidian-skills)
+（Obsidian 格式与 CLI 能力）、
+[qmd](https://github.com/tobi/qmd)
+（本地 BM25 / 向量检索）。
+
+### 本仓库的立足点
+
+`obsidian-wiki` 这类项目回答的是：「Agent 该怎样长出一套知识 Wiki？」
+`obsidian-vault-pr` 回答的是更窄的问题：**在你已经信任的 Vault 上，Agent 的一次写入何时才算完成、有依据、且可恢复？**
+
+独特之处在于：
+
+- **接管，不重塑。** 沿用现有目录、笔记角色和方法论，不强制 PARA、Zettelkasten 或 greenfield Wiki 布局。
+- **证据 ≠ 授权。** 固化来源只能说明改动有依据；只有有边界的 Write Authorization Snapshot，才允许 Agent 提出修改。
+- **高风险独立审查。** 合并、删除、矛盾处理等操作，必须把独立 Semantic Reviewer 绑定到同一份确定性 Review Packet。
+- **确定性写入内核。** 干净工作区门槛、默认最多 15 条笔记、精确路径 apply/commit、transaction receipt，以及可核对的 `apply → commit → finalize` 恢复——不只靠 Agent 约定去 Git。
+- **写完再验系统。** 内容提交后检查 exact-HEAD 的 qmd 新鲜度、Note Role 图谱，以及可接受的 RAG 评测基线。
+
+从零建数字大脑、并愿意让 Agent 拥有组织方式时，Wiki 项目往往就够了。Vault 已经旧、共享或敏感，需要证明每次持久改动经过授权、有证据、必要时已审查、精确提交且可恢复时，再用 `vault-pr`。
+
+### 如何结合使用
+
+**默认：选一条主写入路径。** [obsidian-wiki](https://github.com/Ar9av/obsidian-wiki)
+这类完整 Wiki 技能包，和 `vault-pr` skill 都会教 Agent 改 Vault，也常常会提交。两边都当一等公民写入时，通常会冲突（直接改文件 vs 带日志的 apply、`wiki-sync` / 裸 Git vs `vault-pr commit`、两套目录约定互相抢）。
+
+- 从零建数字大脑、愿意让 Agent 拥有组织方式 → 单独用 Wiki 项目。
+- 维护已有、Git 管理的 Vault，要可审计事务 → 单独用 `vault-pr`；笔记形态写在自己的 `AGENTS.md` / schema 即可。
+
+**可以安全叠在 `vault-pr` 上的：** 格式技能
+([obsidian-skills](https://github.com/kepano/obsidian-skills))、本地检索
+([qmd](https://github.com/tobi/qmd))、可选 Agent UI
+([Claudian](https://github.com/YishenTu/claudian) /
+[obsidian-agent-client](https://github.com/RAIT-09/obsidian-agent-client))。
+它们不替代写入内核。
+
+```text
+Obsidian Vault（Git）
+├── 你的 AGENTS.md / 笔记约定   # 笔记该长什么样
+├── Obsidian 格式技能           # wikilink、Bases、CLI
+├── Agent UI（可选）
+├── qmd                         # BM25 / 向量
+└── vault-pr                    # 唯一允许改文件并提交的路径
+```
+
+**可选的进阶叠用**（Wiki 方法论 + `vault-pr`）只有在你能强制执行时才划算：
+
+1. Wiki 技能可以建议综合与链接，但不得写 Vault 文件、不得跑 Git。
+2. 凡持久改动一律走 `vault-pr`：采集 → 计划 → 审查 → apply → commit → recover。
+3. 关掉 wiki 自动同步 / 全量 stage；活跃事务期间禁止裸 `git add` / `git commit`。
+4. 产品代码提交留在本仓库，知识提交留在 Vault；对同一 Vault 串行写入。
+
+做不到这条边界，就把 Wiki 技能包和 `vault-pr` 当互斥，不要叠。
+
 如果你已经有一个长期使用、由 Git 管理的 Obsidian Vault，又想把链接采集和知识维护交给 Agent，`vault-pr` 会先给这位新同事立好规矩：进门要登记，动手前复核，做完要收尾。
 
 先运行 `vault-pr doctor`。确认 Vault、Git、Defuddle 和 qmd 状态正常，再交出第一条链接。

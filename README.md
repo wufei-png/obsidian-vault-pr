@@ -59,6 +59,106 @@ and [the provider contract](skills/vault-pr/references/capture-providers.md).
 `pypdf` and PyYAML are Python package dependencies. The `defuddle` agent skill is
 not a CLI dependency.
 
+## Positioning among agent-managed Obsidian projects
+
+Most mature open-source work in this space follows
+[Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f):
+immutable `raw/` sources, an agent that compiles and maintains an interlinked
+Markdown wiki, then index/lint/query loops. Several of those projects can
+already replace `obsidian-vault-pr` for greenfield wiki maintenance. The
+remaining question is which layer owns durable change safety on an **existing**
+vault.
+
+Comparison below is qualitative (architecture and intended job), not a shared
+benchmark. Stars and activity noted as of 2026-07-17.
+
+| Project                                                                                   | Primary role                                                              | What it does well                                                                                          | Honest take vs `vault-pr`                                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [obsidian-wiki](https://github.com/Ar9av/obsidian-wiki) (~2.9k★)                          | Balanced Karpathy wiki framework for many coding agents                   | Ingest, lint, rebuild, multi-agent adapters, vault lifecycle without locking you to one harness            | Strong substitute for building a new wiki vault. Weaker as a deterministic write kernel for a vault that already has its own folders and note roles.                                            |
+| [obsidian-second-brain](https://github.com/eugeniughelbur/obsidian-second-brain) (~3.3k★) | Highest-automation AI-first second brain                                  | ~44 commands, scheduled maintenance, hybrid search, web research, self-rewriting notes                     | Can replace the _maintenance effect_ of `vault-pr` if you adopt its conventions. Broad surface area; safety leans on agent workflow rather than a content-bound transaction + recover protocol. |
+| [claude-obsidian](https://github.com/AgriciDaniel/claude-obsidian) (~9.5k★)               | Most popular Claude Code wiki skill + methodology pack                    | Source ingest, concept pages, contradiction callouts, LYT/PARA/Zettelkasten modes, per-file advisory locks | Excellent greenfield substitute under Claude Code. Advisory locks and Obsidian Git auto-commits are not the same as journaled exact-path apply/commit/finalize.                                 |
+| [llm-wiki-agent](https://github.com/SamurAIGPT/llm-wiki-agent) (~3.2k★)                   | Lightweight cross-agent self-maintaining wiki skill                       | Low runtime footprint; works with Claude Code, Codex, OpenCode, Gemini CLI                                 | Can replace `vault-pr` for a new Karpathy wiki when you want skills without a governance CLI. Little independent review or recovery machinery.                                                  |
+| [obsidian-mind](https://github.com/breferrari/obsidian-mind) (~3.4k★)                     | Persistent work memory for coding agents                                  | Session lifecycle hooks, qmd retrieval, structured project/decision/person memory                          | Different job: engineering memory across sessions, not general source-to-wiki maintenance of an arbitrary existing vault.                                                                       |
+| [llm-wiki-compiler](https://github.com/atomicstrata/llm-wiki-compiler) (~1.8k★)           | Research-oriented knowledge compiler                                      | Claim/paragraph provenance, line-level citations, two-stage generation, hybrid retrieval                   | Strong substitute when the goal is a research wiki with strict citations. Obsidian is mainly a viewer; not a vault-agnostic governance layer.                                                   |
+| [Synto](https://github.com/kytmanov/synto) (~0.2k★)                                       | Local Ollama-first wiki compiler (successor to `obsidian-llm-wiki-local`) | Stable entity IDs, rename/merge/split, draft approval, compile lineage, offline eval                       | Closest _product instincts_ among compilers (drafts, lineage, eval). Younger project; still a wiki compiler, not an adopt-existing-vault write kernel.                                          |
+
+Related layers that are useful with, rather than instead of, the projects above:
+[Claudian](https://github.com/YishenTu/claudian) / [obsidian-agent-client](https://github.com/RAIT-09/obsidian-agent-client)
+(agent UI inside Obsidian), [obsidian-skills](https://github.com/kepano/obsidian-skills)
+(Obsidian format/CLI fluency), and [qmd](https://github.com/tobi/qmd) (local
+BM25/vector search).
+
+### What is unique here
+
+`obsidian-wiki` and peers answer “how should an agent grow a knowledge wiki?”
+`obsidian-vault-pr` answers a narrower question: **on a vault you already trust,
+when is an agent write finished, justified, and recoverable?**
+
+That is the foothold:
+
+- **Adopt, do not redesign.** Keep the vault’s folders, note roles, and
+  methodology. Do not require PARA, Zettelkasten, or a greenfield wiki layout.
+- **Evidence ≠ authority.** A captured source can justify a change; only a
+  bounded Write Authorization Snapshot lets the agent propose it.
+- **Independent review for risk.** Merge, delete, contradiction handling, and
+  similar operations bind a separate Semantic Reviewer to a deterministic Review
+  Packet for the exact Plan and files.
+- **Deterministic write kernel.** Clean-worktree gate, 15-note default limit,
+  exact-path apply/commit, transaction receipts, and verified
+  `apply → commit → finalize` recovery — not agent-convention Git alone.
+- **Post-write system checks.** Exact-HEAD qmd freshness, Note Role graph
+  audits, and accepted RAG evaluation baselines after content is committed.
+
+If you are starting a new digital brain and are happy for the agent to own
+organization, a wiki project is often enough. Use `vault-pr` when the vault is
+already old, shared, or sensitive, and you need each durable change to be
+authorized, evidenced, reviewed when necessary, committed exactly, and
+recoverable.
+
+### How to combine with related tools
+
+**Default: pick one primary write path.** A full wiki skill pack such as
+[obsidian-wiki](https://github.com/Ar9av/obsidian-wiki) and the `vault-pr`
+skill both teach the agent to change vault files and often to commit. Running
+both as first-class writers usually conflicts (direct edits vs journaled apply,
+`wiki-sync` / bare Git vs `vault-pr commit`, competing folder conventions).
+
+- Starting a greenfield digital brain and happy for the agent to own
+  organization → use a wiki project alone.
+- Maintaining an existing Git-managed vault with auditable transactions → use
+  `vault-pr` alone; put note-shape rules in your own `AGENTS.md` / schema if
+  needed.
+
+**Safe to combine with `vault-pr`:** format skills
+([obsidian-skills](https://github.com/kepano/obsidian-skills)), local retrieval
+([qmd](https://github.com/tobi/qmd)), and an optional agent UI
+([Claudian](https://github.com/YishenTu/claudian) /
+[obsidian-agent-client](https://github.com/RAIT-09/obsidian-agent-client)).
+Those do not replace the write kernel.
+
+```text
+Obsidian vault (Git)
+├── Your AGENTS.md / note schema   # how notes should look
+├── Obsidian format skills         # wikilinks, Bases, CLI fluency
+├── Agent UI (optional)
+├── qmd                            # BM25 / vectors
+└── vault-pr                       # only path that mutates + commits
+```
+
+**Optional advanced stack** (wiki methodology + `vault-pr`) only if you enforce:
+
+1. Wiki skills may advise synthesis and linking; they must not write vault files
+   or run Git.
+2. Every durable mutation goes through `vault-pr` capture → plan → review →
+   apply → commit → recover.
+3. Disable wiki auto-sync / stage-all helpers; never bare `git add` / `git commit`
+   for agent-maintained changes while a transaction is active.
+4. Keep product commits in this repository and knowledge commits in the vault;
+   serialize Git writes on the same vault.
+
+If you cannot hold that boundary, treat wiki packs and `vault-pr` as mutually
+exclusive.
+
 ## Local setup
 
 ```bash
