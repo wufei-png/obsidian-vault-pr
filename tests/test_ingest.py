@@ -184,6 +184,46 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual(extracted.title, "Test Article")
             self.assertIn("useful content", (output_dir / "extracted.md").read_text())
 
+    def test_explicit_html_mime_overrides_markdown_url_suffix(self) -> None:
+        fetched = FetchedSource(
+            requested_url="https://example.com/article.md",
+            final_url="https://example.com/article.md",
+            status=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            body=(
+                b"<html><head><title>HTML Article</title></head><body><main>"
+                + b"useful content " * 30
+                + b"</main></body></html>"
+            ),
+            captured_at="2026-07-15T00:00:00+00:00",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+
+            def run_defuddle(
+                command: list[str], **_: object
+            ) -> LimitedProcessResult:
+                if "--version" in command:
+                    return LimitedProcessResult(0, "defuddle 1.0", "")
+                if "-p" in command:
+                    return LimitedProcessResult(0, "HTML Article", "")
+                (output_dir / "extracted.md").write_text(
+                    "# HTML Article\n\n" + "useful content " * 30
+                )
+                return LimitedProcessResult(0, "", "")
+
+            with (
+                patch("vault_pr.acquisition.shutil.which", return_value="defuddle"),
+                patch(
+                    "vault_pr.acquisition.run_limited_process",
+                    side_effect=run_defuddle,
+                ),
+            ):
+                extracted = extract_source(fetched, output_dir)
+
+            self.assertEqual(extracted.raw_filename, "source.html")
+            self.assertEqual(extracted.extractor, "defuddle")
+
     def test_pdf_extracts_page_text(self) -> None:
         fetched = FetchedSource(
             requested_url="https://example.com/report.pdf",

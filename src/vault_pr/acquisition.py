@@ -404,10 +404,24 @@ def extract_source(
     max_extraction_memory_bytes: int = 536_870_912,
 ) -> ExtractedSource:
     """Write the raw response and extract deterministic Markdown."""
-    content_type = fetched.headers.get("content-type", "").lower()
+    content_type = (
+        fetched.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    )
     url_path = urllib.parse.urlsplit(fetched.final_url).path.lower()
-    is_pdf = url_path.endswith(".pdf") or "application/pdf" in content_type
-    is_markdown = url_path.endswith(".md") or "text/markdown" in content_type
+    if content_type == "application/pdf":
+        is_pdf = True
+        is_markdown = False
+    elif content_type == "text/markdown":
+        is_pdf = False
+        is_markdown = True
+    elif content_type in {"text/html", "application/xhtml+xml"}:
+        is_pdf = False
+        is_markdown = False
+    else:
+        # Missing and text/plain response types are common for raw static files.
+        # Only these weak signals may be refined by the final URL suffix.
+        is_pdf = url_path.endswith(".pdf")
+        is_markdown = url_path.endswith((".md", ".markdown"))
     raw_filename = (
         "source.pdf" if is_pdf else "source.md" if is_markdown else "source.html"
     )
