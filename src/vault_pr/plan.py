@@ -574,6 +574,38 @@ def _review_purge_evidence(
     return results
 
 
+def _review_prior_rejections(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Carry bounded prior rejection reasons into a revised immutable packet."""
+    results: list[dict[str, Any]] = []
+    for entry in history:
+        assessment = entry["assessment"]
+        if assessment["status"] != "reject":
+            continue
+        transaction_sha256 = str(entry["transaction_sha256"])
+        failed_judgments = {
+            name: {
+                "reason": value["reason"],
+                "evidence_refs": value["evidence_refs"],
+            }
+            for name, value in assessment["judgments"].items()
+            if value["status"] == "fail"
+        }
+        results.append(
+            {
+                "evidence_id": f"prior_rejection:{transaction_sha256}",
+                "transaction_sha256": transaction_sha256,
+                "review_packet_sha256": str(entry["review_packet_sha256"]),
+                "instance_id": str(assessment["instance_id"]),
+                "failed_judgments": failed_judgments,
+                "reasons": assessment["reasons"],
+                "unassessed": assessment["unassessed"],
+            }
+        )
+    return results
+
+
 def _normalize_source_evidence(
     config: dict[str, Any],
     vault: Path,
@@ -1379,6 +1411,7 @@ def validate_plan(
         content_snapshots,
     )
     purge_evidence = _review_purge_evidence(config, vault, normalized)
+    prior_rejections = _review_prior_rejections(history)
     governance_sha256 = _governance_digest_snapshot(
         plan_path,
         plan_bytes,
@@ -1416,6 +1449,7 @@ def validate_plan(
         ],
         *[item["evidence_id"] for item in visible_changes],
         *[item["evidence_id"] for item in purge_evidence],
+        *[item["evidence_id"] for item in prior_rejections],
         *[item["evidence_id"] for item in proposed_contents],
         *[item["evidence_id"] for item in proposed_assets],
     ]
@@ -1432,6 +1466,7 @@ def validate_plan(
         "index_freshness": index_freshness,
         "visible_changes": visible_changes,
         "purge_captures": purge_evidence,
+        "prior_rejections": prior_rejections,
         "proposed_contents": proposed_contents,
         "obsidian_validation": review_obsidian_validation,
         "risks": risks,
@@ -1530,18 +1565,21 @@ def _validate_review_history(
         assessment = entry.get("assessment")
         digest = entry.get("transaction_sha256")
         policy = entry.get("review_policy")
+        schema_version = entry.get("schema_version")
+        expected_fields = {
+            "schema_version",
+            "plan_sha256",
+            "transaction_sha256",
+            "review_packet_sha256",
+            "assessment",
+            "review_policy",
+            "reviewed_at",
+        }
+        if schema_version == 3:
+            expected_fields.add("governance_sha256")
         if (
-            set(entry)
-            != {
-                "schema_version",
-                "plan_sha256",
-                "transaction_sha256",
-                "review_packet_sha256",
-                "assessment",
-                "review_policy",
-                "reviewed_at",
-            }
-            or entry.get("schema_version") != 2
+            set(entry) != expected_fields
+            or schema_version not in {2, 3}
             or not isinstance(assessment, dict)
             or assessment.get("status") not in {"approve", "reject"}
             or not isinstance(entry.get("reviewed_at"), str)
@@ -1563,6 +1601,11 @@ def _validate_review_history(
                 entry.get("review_packet_sha256"),
                 f"review history entry {index} packet",
             )
+            if schema_version == 3:
+                validate_digest(
+                    entry.get("governance_sha256"),
+                    f"review history entry {index} governance",
+                )
         except ReviewError as exc:
             raise PlanError(str(exc)) from exc
         instance_id = assessment.get("instance_id")
@@ -1605,7 +1648,23 @@ def record_review(
             raise PlanError(
                 "review revision limit exhausted; preserve the unapplied plan for inspection"
             )
-        if transaction_sha256 in rejected_digests:
+        rejected_governance = {
+            entry["governance_sha256"]
+            for entry in history
+            if entry["assessment"]["status"] == "reject"
+            and entry["schema_version"] == 3
+        }
+        rejected_legacy_plans = {
+            entry["plan_sha256"]
+            for entry in history
+            if entry["assessment"]["status"] == "reject"
+            and entry["schema_version"] == 2
+        }
+        if (
+            transaction_sha256 in rejected_digests
+            or validation["governance_sha256"] in rejected_governance
+            or validation["plan_sha256"] in rejected_legacy_plans
+        ):
             raise PlanError("plan and proposed content must change after rejection")
         prior_instance_ids = {
             entry["assessment"]["instance_id"] for entry in history
@@ -1619,8 +1678,9 @@ def record_review(
         except ReviewError as exc:
             raise PlanError(str(exc)) from exc
         entry = {
-            "schema_version": 2,
+            "schema_version": 3,
             "plan_sha256": validation["plan_sha256"],
+            "governance_sha256": validation["governance_sha256"],
             "transaction_sha256": transaction_sha256,
             "review_packet_sha256": validation["review_packet_sha256"],
             "assessment": assessment,

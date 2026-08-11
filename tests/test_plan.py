@@ -1009,6 +1009,13 @@ class PlanTests(unittest.TestCase):
                 )
 
             proposed.write_text(source_note_text(source_id, "Revision one"))
+            revised_packet = validate_plan(config, plan_path)[
+                "semantic_review_packet"
+            ]["payload"]
+            self.assertEqual(len(revised_packet["prior_rejections"]), 1)
+            prior = revised_packet["prior_rejections"][0]
+            self.assertEqual(prior["reasons"][0]["message"], "revise")
+            self.assertIn(prior["evidence_id"], revised_packet["evidence_ids"])
             self.record_assessment(
                 config, plan_path, "reviewer-2", "reject"
             )

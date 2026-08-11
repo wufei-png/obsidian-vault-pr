@@ -41,7 +41,9 @@ Semantic review input also binds live retrieval contexts, exact visible-note
 diffs for update/delete/rename operations, and metadata plus bounded text
 evidence for every `purge_capture` target. Retrieval candidates remain packet
 inputs only; they are separate from prospective durable links and are never
-persisted as Transaction Evidence.
+persisted as Transaction Evidence. A revised transaction also binds bounded,
+structured reasons from every prior rejection so a fresh reviewer needs no
+out-of-band conversation history.
 
 `packet_id` is the first 20 hexadecimal characters of the SHA-256 digest of the
 canonical packet input, prefixed with `pkt_`. Evidence entries use Vault-relative
