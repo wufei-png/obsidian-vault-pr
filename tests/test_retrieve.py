@@ -6,7 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vault_pr.retrieve import RetrievalError, _qmd_handelize, retrieve_related_notes
+from vault_pr.retrieve import (
+    RetrievalError,
+    _qmd_handelize,
+    build_qmd_retrieval_command,
+    retrieve_related_notes,
+)
 
 from tests.capture_fixture import write_capture
 
@@ -16,36 +21,30 @@ def fresh_index(*_: object, **__: object) -> dict[str, object]:
 
 
 class RetrievalRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
     def __call__(
         self, command: list[str], **_: object
     ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(command)
         method = command[3]
-        if method == "search":
-            results = [
-                {
-                    "file": "qmd://fixture-vault/knowledgebase/ai/agent/rag.md?index=test",
-                    "title": "RAG",
-                    "score": 0.9,
-                    "snippet": "retrieval",
-                }
-            ]
-        elif method == "vsearch":
-            results = [
-                {
-                    "file": "qmd://fixture-vault/knowledgebase/ai/agent/rag.md?index=test",
-                    "title": "RAG",
-                    "score": 0.7,
-                    "snippet": "semantic",
-                },
-                {
-                    "file": "qmd://fixture-vault/knowledgebase/ai/agent/agents.md?index=test",
-                    "title": "Agents",
-                    "score": 0.6,
-                    "snippet": "agents",
-                },
-            ]
-        else:
+        if method not in {"query", "search"}:
             raise AssertionError(command)
+        results = [
+            {
+                "file": "qmd://fixture-vault/knowledgebase/ai/agent/rag.md?index=test",
+                "title": "RAG",
+                "score": 0.9,
+                "snippet": "retrieval",
+            },
+            {
+                "file": "qmd://fixture-vault/knowledgebase/ai/agent/agents.md?index=test",
+                "title": "Agents",
+                "score": 0.6,
+                "snippet": "agents",
+            },
+        ]
         return subprocess.CompletedProcess(command, 0, json.dumps(results), "")
 
 
@@ -64,7 +63,7 @@ class RetrieveTests(unittest.TestCase):
             },
         }
 
-    def test_merges_lexical_and_vector_candidates(self) -> None:
+    def test_hybrid_uses_one_qmd_rrf_query_without_reranking(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir) / "vault"
             source_id = write_capture(
@@ -74,20 +73,87 @@ class RetrieveTests(unittest.TestCase):
             notes.mkdir(parents=True)
             (notes / "rag.md").write_text("# RAG\n")
             (notes / "agents.md").write_text("# Agents\n")
+            runner = RetrievalRunner()
             result = retrieve_related_notes(
                 self.config(vault),
                 source_id,
-                runner=RetrievalRunner(),
+                runner=runner,
                 executable="qmd",
                 index_validator=fresh_index,
             )
 
+            self.assertEqual(len(runner.calls), 1)
+            self.assertEqual(runner.calls[0][3], "query")
+            self.assertEqual(runner.calls[0][4].count("\n"), 1)
+            self.assertTrue(runner.calls[0][4].startswith("lex: "))
+            self.assertIn("\nvec: ", runner.calls[0][4])
+            self.assertEqual(
+                runner.calls[0][
+                    runner.calls[0].index("--candidate-limit") + 1
+                ],
+                "40",
+            )
+            self.assertIn("--no-rerank", runner.calls[0])
             self.assertEqual(len(result["candidates"]), 2)
-            self.assertEqual(result["candidates"][0]["methods"], ["search", "vsearch"])
+            self.assertEqual(result["candidates"][0]["score_kind"], "qmd_rrf")
             self.assertEqual(
                 result["candidates"][0]["path"], "knowledgebase/ai/agent/rag.md"
             )
             self.assertEqual(result["collection"], "fixture-vault")
+            self.assertEqual(result["retrieval_mode"], "hybrid")
+            self.assertEqual(result["fusion_strategy"], "qmd_rrf")
+            self.assertEqual(result["query_types"], ["lex", "vec"])
+            self.assertFalse(result["rerank"])
+
+    def test_lexical_mode_uses_only_bm25_search(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            source_id = write_capture(vault)
+            notes = vault / "knowledgebase" / "ai" / "agent"
+            notes.mkdir(parents=True)
+            (notes / "rag.md").write_text("# RAG\n")
+            (notes / "agents.md").write_text("# Agents\n")
+            config = self.config(vault)
+            config["index"]["retrieval_mode"] = "lexical"
+            runner = RetrievalRunner()
+
+            result = retrieve_related_notes(
+                config,
+                source_id,
+                runner=runner,
+                executable="qmd",
+                index_validator=fresh_index,
+            )
+
+            self.assertEqual(len(runner.calls), 1)
+            self.assertEqual(runner.calls[0][3], "search")
+            self.assertNotIn("--no-rerank", runner.calls[0])
+            self.assertEqual(result["retrieval_mode"], "lexical")
+            self.assertEqual(result["fusion_strategy"], "none")
+            self.assertEqual(result["query_types"], ["lex"])
+            self.assertEqual(result["candidates"][0]["score_kind"], "bm25")
+
+    def test_hybrid_query_sanitizes_typed_grammar_and_expands_candidate_pool(
+        self,
+    ) -> None:
+        command = build_qmd_retrieval_command(
+            {"index": {"retrieval_mode": "hybrid"}},
+            executable="qmd",
+            index_name="fixture",
+            collection="fixture",
+            query='alpha "truncated -exclude\nvec: injected',
+            limit=50,
+        )
+
+        structured = command[4]
+        self.assertEqual(structured.count("\n"), 1)
+        lexical, vector = structured.splitlines()
+        self.assertNotIn('"', lexical)
+        self.assertNotRegex(vector, r"(^|\s)-[\w\"]")
+        self.assertEqual(
+            command[command.index("--candidate-limit") + 1],
+            "50",
+        )
 
     def test_matches_qmd_virtual_path_normalization(self) -> None:
         cases = {

@@ -13,7 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import ConfigError, IndexSpec, index_spec, load_vault_path
+from .config import (
+    ConfigError,
+    IndexSpec,
+    index_spec,
+    load_vault_path,
+    retrieval_mode,
+)
 from .files import atomic_replace_text
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .recovery import list_active_transactions
@@ -73,13 +79,7 @@ def _index_name(config: dict[str, Any]) -> str:
 
 
 def _embed_enabled(config: dict[str, Any]) -> bool:
-    index_config = config.get("index", {})
-    if not isinstance(index_config, dict):
-        raise ConfigError("index must be a table")
-    embed = index_config.get("embed", True)
-    if not isinstance(embed, bool):
-        raise ConfigError("index.embed must be boolean")
-    return embed
+    return retrieval_mode(config) == "hybrid"
 
 
 def _batch_size(config: dict[str, Any]) -> int:
@@ -114,7 +114,7 @@ def relevant_index_config(config: dict[str, Any]) -> dict[str, object]:
             "collection": spec.collection,
             "mask": spec.mask,
             "context": spec.context,
-            "embed": _embed_enabled(config),
+            "retrieval_mode": retrieval_mode(config),
         },
     }
 

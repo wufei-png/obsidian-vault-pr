@@ -28,7 +28,7 @@ def make_config(vault: Path, *, max_retries: int = 3) -> dict[str, object]:
             "collection": "notebook-tech",
             "mask": "**/*.md",
             "context": "Technical notes.",
-            "embed": True,
+            "retrieval_mode": "hybrid",
             "max_docs_per_batch": 64,
             "max_retries": max_retries,
             "retry_backoff_seconds": [0, 0, 0, 0],
@@ -416,6 +416,25 @@ class IndexTests(unittest.TestCase):
             self.assertEqual(status["attempts"], 3)
             self.assertEqual(runner.update_calls, 3)
             self.assertTrue(any("embed" in call for call in runner.calls))
+
+    def test_lexical_mode_updates_without_embedding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            config["index"]["retrieval_mode"] = "lexical"
+            runner = QmdRunner(vault, collection_path=vault, refresh_codes=[0])
+
+            status = update_qmd_index(
+                config,
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+
+            self.assertEqual(status["status"], "indexed")
+            self.assertEqual(runner.update_calls, 1)
+            self.assertFalse(any(call[3] == "embed" for call in runner.calls))
 
     def test_refuses_to_index_before_active_transaction_is_finalized(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

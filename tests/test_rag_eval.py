@@ -262,10 +262,12 @@ class RagEvaluationTests(unittest.TestCase):
     def test_scores_retrieval_and_builds_assessor_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _vault, config, answers = self._fixture(Path(temp_dir))
+            commands: list[list[str]] = []
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
                 return subprocess.CompletedProcess(
-                    [],
+                    command,
                     0,
                     stdout=json.dumps(
                         [
@@ -288,6 +290,11 @@ class RagEvaluationTests(unittest.TestCase):
             )
 
             self.assertTrue(result["assessment_candidate_eligible"])
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0][3], "query")
+            self.assertTrue(commands[0][4].startswith("lex: "))
+            self.assertIn("\nvec: ", commands[0][4])
+            self.assertIn("--no-rerank", commands[0])
             self.assertFalse(result["baseline_recorded"])
             self.assertEqual(result["metrics"]["retrieval_passed"], 1)
             self.assertEqual(result["metrics"]["mean_recall_at_k"], 1.0)
@@ -302,6 +309,36 @@ class RagEvaluationTests(unittest.TestCase):
                 packet["payload"]["cases"][0]["evidence_note_refs"],
                 ["knowledgebase/rag.md"],
             )
+
+    def test_lexical_rag_evaluation_uses_bm25_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _vault, config, answers = self._fixture(Path(temp_dir))
+            config["index"]["retrieval_mode"] = "lexical"
+            commands: list[list[str]] = []
+
+            def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        [{"file": "qmd://fixture/knowledgebase/rag.md", "score": 12.0}]
+                    ),
+                    stderr="",
+                )
+
+            result = evaluate_rag(
+                config,
+                answers_path=answers,
+                runner=runner,
+                executable="qmd",
+                index_validator=lambda _config, _qmd: self._index_evidence(),
+            )
+
+            self.assertEqual(result["metrics"]["retrieval_passed"], 1)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0][3], "search")
+            self.assertNotIn("--no-rerank", commands[0])
 
     def test_validates_qmd_snapshot_once_under_governance_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

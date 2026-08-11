@@ -13,7 +13,12 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
 from .capture import CaptureError, load_validated_capture_artifact_text
-from .config import index_spec, load_vault_path, source_archive_dir
+from .config import (
+    index_spec,
+    load_vault_path,
+    retrieval_mode,
+    source_archive_dir,
+)
 from .errors import IngestError
 from .index import IndexUpdateError, validate_qmd_index_freshness
 from .source_note import resolve_source_note
@@ -70,6 +75,59 @@ def parse_qmd_results(output: str) -> list[dict[str, Any]]:
     if not isinstance(parsed, list):
         raise RetrievalError("qmd result must be a JSON array")
     return [item for item in parsed if isinstance(item, dict)]
+
+
+def qmd_retrieval_strategy(config: dict[str, Any]) -> dict[str, Any]:
+    """Describe the stable qmd retrieval contract for machine-readable output."""
+    mode = retrieval_mode(config)
+    if mode == "lexical":
+        return {
+            "retrieval_mode": mode,
+            "fusion_strategy": "none",
+            "score_kind": "bm25",
+            "query_types": ["lex"],
+            "rerank": False,
+        }
+    return {
+        "retrieval_mode": mode,
+        "fusion_strategy": "qmd_rrf",
+        "score_kind": "qmd_rrf",
+        "query_types": ["lex", "vec"],
+        "rerank": False,
+    }
+
+
+def _qmd_typed_query_text(query: str) -> str:
+    """Render untrusted prose as one grammar-safe qmd typed-query line."""
+    normalized = " ".join(query.split()).replace('"', " ")
+    without_negation = re.sub(r"(^|\s)-(?=[\w'])", r"\1", normalized)
+    return " ".join(without_negation.split())
+
+
+def build_qmd_retrieval_command(
+    config: dict[str, Any],
+    *,
+    executable: str,
+    index_name: str,
+    collection: str,
+    query: str,
+    limit: int,
+) -> list[str]:
+    """Build one qmd request without comparing scores from different scales."""
+    normalized_query = _qmd_typed_query_text(query)
+    mode = retrieval_mode(config)
+    if mode == "lexical":
+        command = [executable, "--index", index_name, "search", normalized_query]
+    else:
+        structured_query = f"lex: {normalized_query}\nvec: {normalized_query}"
+        command = [executable, "--index", index_name, "query", structured_query]
+    command.extend(["-c", collection, "-n", str(limit)])
+    if mode == "hybrid":
+        command.extend(
+            ["--candidate-limit", str(max(40, limit)), "--no-rerank"]
+        )
+    command.extend(["--format", "json"])
+    return command
 
 
 def _qmd_handelize(path: str) -> str:
@@ -176,7 +234,7 @@ def retrieve_related_notes(
     executable: str | None = None,
     index_validator: IndexValidator = validate_qmd_index_freshness,
 ) -> dict[str, Any]:
-    """Combine BM25 and vector candidates across the configured vault index."""
+    """Retrieve ranked candidates using the configured stable qmd mode."""
     if limit < 1 or limit > 50:
         raise RetrievalError("limit must be between 1 and 50")
     manifest, extracted = _source_artifacts(config, source_id)
@@ -203,68 +261,65 @@ def retrieve_related_notes(
         raise RetrievalError(str(exc)) from exc
     path_map = build_qmd_path_map(spec.root_dir)
 
-    merged: dict[str, dict[str, Any]] = {}
-    for method in ("search", "vsearch"):
-        result = runner(
-            [
-                qmd,
-                "--index",
-                str(index_name),
-                method,
-                query,
-                "-c",
-                spec.collection,
-                "-n",
-                str(limit),
-                "--format",
-                "json",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            raise RetrievalError(f"qmd {method} failed: {detail}")
-        for item in parse_qmd_results(result.stdout):
-            file_name = str(item.get("file", ""))
-            if not file_name:
-                continue
-            parsed_file = urlsplit(file_name)
-            if parsed_file.scheme != "qmd" or parsed_file.netloc != spec.collection:
-                raise RetrievalError("qmd result is outside the configured collection")
-            collection_relative = unquote(parsed_file.path).lstrip("/")
-            candidate_path = resolve_qmd_path(
-                spec.root_dir, collection_relative, path_map
-            )
-            vault_relative = str(candidate_path.relative_to(vault))
-            if vault_relative == source_note:
-                continue
-            try:
-                score = float(item.get("score", 0))
-            except (TypeError, ValueError) as exc:
-                raise RetrievalError("qmd result contains an invalid score") from exc
-            entry = merged.setdefault(
-                file_name,
-                {
-                    "file": file_name,
-                    "path": vault_relative,
-                    "title": item.get("title"),
-                    "snippet": item.get("snippet"),
-                    "score": score,
-                    "methods": [],
-                },
-            )
-            entry["score"] = max(entry["score"], score)
-            entry["methods"].append(method)
+    strategy = qmd_retrieval_strategy(config)
+    command = build_qmd_retrieval_command(
+        config,
+        executable=qmd,
+        index_name=str(index_name),
+        collection=spec.collection,
+        query=query,
+        limit=limit,
+    )
+    result = runner(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RetrievalError(f"qmd {strategy['retrieval_mode']} retrieval failed: {detail}")
 
-    candidates = sorted(
-        merged.values(), key=lambda item: (-item["score"], item["file"])
-    )[:limit]
+    candidates: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in parse_qmd_results(result.stdout):
+        file_name = str(item.get("file", ""))
+        if not file_name:
+            continue
+        parsed_file = urlsplit(file_name)
+        if parsed_file.scheme != "qmd" or parsed_file.netloc != spec.collection:
+            raise RetrievalError("qmd result is outside the configured collection")
+        collection_relative = unquote(parsed_file.path).lstrip("/")
+        candidate_path = resolve_qmd_path(spec.root_dir, collection_relative, path_map)
+        vault_relative = str(candidate_path.relative_to(vault))
+        if vault_relative == source_note or vault_relative in seen_paths:
+            continue
+        try:
+            score = float(item.get("score", 0))
+        except (TypeError, ValueError) as exc:
+            raise RetrievalError("qmd result contains an invalid score") from exc
+        seen_paths.add(vault_relative)
+        candidates.append(
+            {
+                "file": file_name,
+                "path": vault_relative,
+                "title": item.get("title"),
+                "snippet": item.get("snippet"),
+                "score": score,
+                "score_kind": strategy["score_kind"],
+            }
+        )
+        if len(candidates) == limit:
+            break
+
     return {
         "source_id": source_id,
         "query": query,
         "collection": spec.collection,
+        "retrieval_mode": strategy["retrieval_mode"],
+        "fusion_strategy": strategy["fusion_strategy"],
+        "query_types": strategy["query_types"],
+        "rerank": strategy["rerank"],
         "index_freshness": index_freshness,
         "candidates": candidates,
     }

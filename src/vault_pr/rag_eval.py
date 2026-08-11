@@ -30,6 +30,7 @@ from .rag_contract import (
 )
 from .retrieve import (
     RetrievalError,
+    build_qmd_retrieval_command,
     build_qmd_path_map,
     parse_qmd_results,
     resolve_qmd_path,
@@ -317,55 +318,48 @@ def _query_paths(
     spec = index_spec(config, vault)
     index_name = str(config.get("index", {}).get("name", "notebook"))
     path_map = build_qmd_path_map(spec.root_dir)
-    merged: dict[str, float] = {}
-    for method in ("search", "vsearch"):
-        result = runner(
-            [
-                executable,
-                "--index",
-                index_name,
-                method,
-                query,
-                "-c",
-                spec.collection,
-                "-n",
-                str(limit),
-                "--format",
-                "json",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            raise RagEvaluationError(f"qmd {method} failed: {detail}")
+    command = build_qmd_retrieval_command(
+        config,
+        executable=executable,
+        index_name=index_name,
+        collection=spec.collection,
+        query=query,
+        limit=limit,
+    )
+    result = runner(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RagEvaluationError(f"qmd retrieval failed: {detail}")
+    try:
+        items = parse_qmd_results(result.stdout)
+    except RetrievalError as exc:
+        raise RagEvaluationError(str(exc)) from exc
+
+    paths: list[str] = []
+    seen_paths: set[str] = set()
+    for item in items:
+        file_name = str(item.get("file", ""))
+        parsed = urlsplit(file_name)
+        if parsed.scheme != "qmd" or parsed.netloc != spec.collection:
+            raise RagEvaluationError("qmd result is outside the evaluated collection")
+        relative = unquote(parsed.path).lstrip("/")
         try:
-            items = parse_qmd_results(result.stdout)
+            resolved = resolve_qmd_path(spec.root_dir, relative, path_map)
         except RetrievalError as exc:
             raise RagEvaluationError(str(exc)) from exc
-        for item in items:
-            file_name = str(item.get("file", ""))
-            parsed = urlsplit(file_name)
-            if parsed.scheme != "qmd" or parsed.netloc != spec.collection:
-                raise RagEvaluationError("qmd result is outside the evaluated collection")
-            relative = unquote(parsed.path).lstrip("/")
-            try:
-                resolved = resolve_qmd_path(spec.root_dir, relative, path_map)
-            except RetrievalError as exc:
-                raise RagEvaluationError(str(exc)) from exc
-            vault_path = resolved.relative_to(vault).as_posix()
-            try:
-                score = float(item.get("score", 0))
-            except (TypeError, ValueError) as exc:
-                raise RagEvaluationError("qmd result contains an invalid score") from exc
-            merged[vault_path] = max(score, merged.get(vault_path, float("-inf")))
-    return [
-        path
-        for path, _score in sorted(merged.items(), key=lambda item: (-item[1], item[0]))[
-            :limit
-        ]
-    ]
+        vault_path = resolved.relative_to(vault).as_posix()
+        if vault_path in seen_paths:
+            continue
+        seen_paths.add(vault_path)
+        paths.append(vault_path)
+        if len(paths) == limit:
+            break
+    return paths
 
 
 def evaluate_rag(

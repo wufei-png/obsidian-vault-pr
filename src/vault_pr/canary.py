@@ -173,7 +173,7 @@ def run_capture_route_canary(
                     "collection": collection,
                     "context": "Disposable Vault PR capture-route canary.",
                     "mask": "**/*.md",
-                    "embed": True,
+                    "retrieval_mode": "hybrid",
                     "max_retries": 0,
                 },
             }

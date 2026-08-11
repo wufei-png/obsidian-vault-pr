@@ -36,7 +36,7 @@ _CONFIG_FIELDS: dict[str, set[str]] = {
         "collection",
         "mask",
         "context",
-        "embed",
+        "retrieval_mode",
         "max_docs_per_batch",
         "max_retries",
         "retry_backoff_seconds",
@@ -56,6 +56,7 @@ _NOTE_ROLE_FIELDS = {
     "excluded_types",
 }
 _PROTECTED_ROOTS = {".git", ".obsidian", ".vault-pr"}
+ALLOWED_RETRIEVAL_MODES = frozenset({"lexical", "hybrid"})
 
 
 def _normalized_root(value: str) -> str:
@@ -103,6 +104,11 @@ def _validate_config_shape(config: dict[str, Any]) -> None:
             continue
         if not isinstance(value, dict):
             raise ConfigError(f"{table} must be a table")
+        if table == "index" and "embed" in value:
+            raise ConfigError(
+                "index.embed was replaced by index.retrieval_mode; "
+                "use 'hybrid' for true or 'lexical' for false"
+            )
         unknown_fields = sorted(set(value) - allowed_fields)
         if unknown_fields:
             raise ConfigError(
@@ -131,7 +137,6 @@ def _validate_config_shape(config: dict[str, Any]) -> None:
     for table, field in (
         ("review", "review_all_semantic_transactions"),
         ("autonomous_repair", "enabled"),
-        ("index", "embed"),
     ):
         value = config.get(table, {}).get(field)
         if value is not None and not isinstance(value, bool):
@@ -170,6 +175,23 @@ def _validate_config_shape(config: dict[str, Any]) -> None:
         raise ConfigError(
             "index.retry_backoff_seconds must be an array of numbers"
         )
+    retrieval_mode(config)
+
+
+def retrieval_mode(config: dict[str, Any]) -> str:
+    """Return the stable retrieval mode, rejecting ambiguous legacy settings."""
+    raw_index = config.get("index", {})
+    if not isinstance(raw_index, dict):
+        raise ConfigError("index must be a table")
+    if "embed" in raw_index:
+        raise ConfigError(
+            "index.embed was replaced by index.retrieval_mode; "
+            "use 'hybrid' for true or 'lexical' for false"
+        )
+    mode = raw_index.get("retrieval_mode", "hybrid")
+    if not isinstance(mode, str) or mode not in ALLOWED_RETRIEVAL_MODES:
+        raise ConfigError("index.retrieval_mode must be one of: lexical, hybrid")
+    return mode
 
 
 def load_vault_path(config: dict[str, Any]) -> Path:

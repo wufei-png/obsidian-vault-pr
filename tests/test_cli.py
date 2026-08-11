@@ -15,6 +15,7 @@ from vault_pr.config import (
     load_config,
     load_vault_path,
     note_path_allowed,
+    retrieval_mode,
     source_notes_dir,
 )
 
@@ -67,6 +68,24 @@ class ConfigTests(unittest.TestCase):
             spec = index_spec(config, vault)
             self.assertEqual(spec.root_dir, vault)
             self.assertEqual(spec.collection, "fixture-vault")
+
+    def test_retrieval_mode_defaults_to_hybrid_and_accepts_lexical(self) -> None:
+        self.assertEqual(retrieval_mode({"index": {}}), "hybrid")
+        self.assertEqual(
+            retrieval_mode({"index": {"retrieval_mode": "lexical"}}),
+            "lexical",
+        )
+
+    def test_rejects_removed_embed_setting_with_migration_guidance(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigError,
+            r"index\.embed was replaced.*'hybrid'.*'lexical'",
+        ):
+            retrieval_mode({"index": {"embed": False}})
+
+    def test_rejects_unknown_retrieval_mode(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "lexical, hybrid"):
+            retrieval_mode({"index": {"retrieval_mode": "full"}})
 
     def test_rejects_source_notes_outside_vault(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
