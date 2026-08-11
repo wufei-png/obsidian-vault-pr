@@ -13,6 +13,7 @@ from .recovery import (
     TRANSACTION_ID_PATTERN,
     inspect_active_transaction,
     list_active_transactions,
+    verify_committed_transaction,
 )
 
 
@@ -27,7 +28,8 @@ def _git_dir(vault: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def _active_view(snapshot: dict[str, Any]) -> dict[str, Any]:
+def _active_view(vault: Path, active_dir: Path) -> dict[str, Any]:
+    snapshot = inspect_active_transaction(vault, active_dir)
     phase = snapshot["phase"]
     if phase == "prepared":
         state = "RECOVERY_REQUIRED"
@@ -40,9 +42,16 @@ def _active_view(snapshot: dict[str, Any]) -> dict[str, Any]:
         allowed_actions = ["recover"]
         blocking_reasons = ["vault_not_clean_after_head_change"]
     elif snapshot["commit_observed"]:
-        state = "COMMITTED"
-        allowed_actions = ["finalize", "recover"]
-        blocking_reasons = []
+        try:
+            verify_committed_transaction(vault, active_dir)
+        except RecoveryError:
+            state = "RECOVERY_REQUIRED"
+            allowed_actions = ["recover"]
+            blocking_reasons = ["commit_does_not_match_transaction"]
+        else:
+            state = "COMMITTED"
+            allowed_actions = ["finalize", "recover"]
+            blocking_reasons = []
     else:
         state = "APPLIED"
         allowed_actions = ["commit", "recover"]
@@ -123,7 +132,7 @@ def _transaction_views(config: dict[str, Any]) -> list[dict[str, Any]]:
     try:
         with vault_write_lock(vault):
             active = [
-                _active_view(inspect_active_transaction(vault, path))
+                _active_view(vault, path)
                 for path in list_active_transactions(git_dir)
             ]
             active_ids = {item["transaction_id"] for item in active}

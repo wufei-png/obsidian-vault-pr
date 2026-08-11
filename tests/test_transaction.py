@@ -183,6 +183,66 @@ class TransactionObservabilityTests(unittest.TestCase):
                 ["vault_not_clean_after_head_change"],
             )
 
+    def test_exact_manual_commit_reports_committed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, note, config = self._vault(Path(temp_dir))
+            self._apply_mutation(vault, note)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "add",
+                    "--",
+                    "knowledgebase/note.md",
+                    ".vault-pr/transaction-receipts/txn_observability_fixture.json",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "Exact transaction"],
+                check=True,
+            )
+
+            shown = show_transaction(config, "txn_observability_fixture")
+
+            self.assertEqual(shown["state"], "COMMITTED")
+            self.assertEqual(shown["allowed_actions"], ["finalize", "recover"])
+            self.assertEqual(shown["blocking_reasons"], [])
+
+    def test_commit_with_unrelated_path_requires_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, note, config = self._vault(Path(temp_dir))
+            self._apply_mutation(vault, note)
+            unrelated = vault / "unrelated.md"
+            unrelated.write_text("unrelated\n")
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "add",
+                    "--",
+                    "knowledgebase/note.md",
+                    ".vault-pr/transaction-receipts/txn_observability_fixture.json",
+                    "unrelated.md",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "Mixed commit"],
+                check=True,
+            )
+
+            shown = show_transaction(config, "txn_observability_fixture")
+
+            self.assertEqual(shown["state"], "RECOVERY_REQUIRED")
+            self.assertEqual(shown["allowed_actions"], ["recover"])
+            self.assertEqual(
+                shown["blocking_reasons"],
+                ["commit_does_not_match_transaction"],
+            )
+
     def test_show_rejects_invalid_transaction_id_before_inventory(self) -> None:
         with self.assertRaisesRegex(TransactionError, "invalid transaction id"):
             show_transaction({"vault": {"path": "/unused"}}, "../escape")

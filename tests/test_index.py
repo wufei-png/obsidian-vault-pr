@@ -454,9 +454,75 @@ class IndexTests(unittest.TestCase):
             self.assertEqual(runner.update_calls, 3)
             self.assertTrue(any("embed" in call for call in runner.calls))
             embed_call = next(call for call in runner.calls if call[3] == "embed")
+            self.assertIn("-f", embed_call)
+            self.assertEqual(
+                embed_call[embed_call.index("-c") + 1], "notebook-tech"
+            )
             self.assertEqual(
                 embed_call[embed_call.index("--chunk-strategy") + 1],
                 "regex",
+            )
+
+    def test_matching_indexed_runtime_uses_incremental_embedding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            first_runner = QmdRunner(vault, collection_path=vault)
+            update_qmd_index(
+                config,
+                runner=first_runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+            second_runner = QmdRunner(vault, collection_path=vault)
+
+            update_qmd_index(
+                config,
+                runner=second_runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+
+            embed_call = next(
+                call for call in second_runner.calls if call[3] == "embed"
+            )
+            self.assertNotIn("-f", embed_call)
+            self.assertNotIn("-c", embed_call)
+
+    def test_changed_model_identity_forces_collection_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            update_qmd_index(
+                config,
+                runner=QmdRunner(vault, collection_path=vault),
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+            changed_runner = QmdRunner(vault, collection_path=vault)
+
+            update_qmd_index(
+                config,
+                runner=changed_runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=(
+                    lambda _executable, *, index_name, retrieval_mode: qmd_snapshot(
+                        retrieval_mode=retrieval_mode,
+                        model="replacement-model-bytes",
+                    )
+                ),
+            )
+
+            embed_call = next(
+                call for call in changed_runner.calls if call[3] == "embed"
+            )
+            self.assertIn("-f", embed_call)
+            self.assertEqual(
+                embed_call[embed_call.index("-c") + 1], "notebook-tech"
             )
 
     def test_refuses_fresh_status_when_qmd_identity_changes_during_refresh(

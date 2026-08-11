@@ -943,6 +943,13 @@ def _verify_committed_transaction_unlocked(
     return journal, head, expected_committed_paths
 
 
+def verify_committed_transaction(vault: Path, active_dir: Path) -> None:
+    """Verify read-only exact commit evidence while the caller holds the vault lock."""
+    _verify_committed_transaction_unlocked(
+        vault.resolve(), active_dir.resolve(), require_clean=True
+    )
+
+
 def _finalize_active_transaction_unlocked(
     vault: Path, active_dir: Path
 ) -> dict[str, Any]:

@@ -568,6 +568,24 @@ def load_index_status(vault: Path) -> tuple[dict[str, Any], str]:
     return _validate_status(parsed), hashlib.sha256(content).hexdigest()
 
 
+def _incremental_embed_is_trusted(
+    vault: Path, qmd_snapshot: dict[str, object]
+) -> bool:
+    """Return whether existing vectors are bound to the current runtime identity."""
+    try:
+        status, _status_sha256 = load_index_status(vault)
+    except IndexUpdateError:
+        return False
+    prior_qmd = status.get("qmd")
+    return (
+        status.get("status") == "indexed"
+        and isinstance(prior_qmd, dict)
+        and prior_qmd.get("retrieval_mode") == "hybrid"
+        and prior_qmd.get("runtime_identity_sha256")
+        == qmd_snapshot.get("runtime_identity_sha256")
+    )
+
+
 def validate_qmd_index_freshness(
     config: dict[str, Any],
     *,
@@ -691,6 +709,10 @@ def update_qmd_index(
         reconciliation = reconcile_qmd_collection(config, runner=runner, executable=qmd)
         embed = _embed_enabled(config)
         batch_size = _batch_size(config)
+        force_embed = embed and not _incremental_embed_is_trusted(
+            vault, qmd_snapshot
+        )
+        collection = _configured_collection(config, vault).collection
 
         attempts = 0
         last_error = ""
@@ -699,11 +721,13 @@ def update_qmd_index(
             updated = _run_qmd(runner, qmd, index_name, "update")
             result = updated
             if updated.returncode == 0 and embed:
+                rebuild_args = ["-f", "-c", collection] if force_embed else []
                 result = _run_qmd(
                     runner,
                     qmd,
                     index_name,
                     "embed",
+                    *rebuild_args,
                     "--max-docs-per-batch",
                     str(batch_size),
                     "--chunk-strategy",

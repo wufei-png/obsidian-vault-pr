@@ -91,7 +91,7 @@ def _probe_source_note(
             str(index["name"]),
             "search",
             source_id,
-            "-c",
+            "--collection",
             str(index["collection"]),
             "-n",
             "5",

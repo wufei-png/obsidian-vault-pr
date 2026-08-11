@@ -162,7 +162,7 @@ def probe_qmd_capabilities(
         CapabilityProbe(
             "lexical_search",
             ("--index", index_name, "search", "--help"),
-            ("--format",),
+            ("--format", "--collection", "-n <"),
         ),
     ]
     if retrieval_mode == "hybrid":
@@ -171,12 +171,26 @@ def probe_qmd_capabilities(
                 CapabilityProbe(
                     "bounded_embedding_batch",
                     ("--index", index_name, "embed", "--help"),
-                    ("--max-docs-per-batch", "--chunk-strategy"),
+                    (
+                        "[-f]",
+                        "[-c <name>]",
+                        "--max-docs-per-batch",
+                        "--chunk-strategy",
+                    ),
                 ),
                 CapabilityProbe(
                     "structured_hybrid_query",
                     ("--index", index_name, "query", "--help"),
-                    ("lex:", "vec:", "--no-rerank", "--chunk-strategy"),
+                    (
+                        "lex:",
+                        "vec:",
+                        "--candidate-limit",
+                        "--no-rerank",
+                        "--chunk-strategy",
+                        "--format",
+                        "--collection",
+                        "-n <",
+                    ),
                 ),
             ]
         )

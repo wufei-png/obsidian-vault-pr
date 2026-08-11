@@ -38,17 +38,23 @@ class ProbeRunner:
         if values[-2:] == ["update", "--help"]:
             return LimitedProcessResult(0, "Update the index", "")
         if values[-2:] == ["search", "--help"]:
-            return LimitedProcessResult(0, "Options: --format", "")
+            return LimitedProcessResult(
+                0,
+                "Options: --format --collection -n <num>",
+                "",
+            )
         if values[-2:] == ["embed", "--help"]:
             return LimitedProcessResult(
                 0,
+                "Usage: qmd embed [-f] [-c <name>]\n"
                 "Options: --max-docs-per-batch --chunk-strategy",
                 "",
             )
         if values[-2:] == ["query", "--help"]:
             return LimitedProcessResult(
                 0,
-                "Syntax: lex: vec: --no-rerank --chunk-strategy",
+                "Syntax: lex: vec: --candidate-limit --no-rerank "
+                "--chunk-strategy --format --collection -n <num>",
                 "",
             )
         raise AssertionError(f"unexpected probe command: {values}")
@@ -90,6 +96,86 @@ class ToolingTests(unittest.TestCase):
             hashlib.sha256(b"model-fixture").hexdigest(),
         )
         self.assertEqual(len(runner.calls), 8)
+
+    def test_hybrid_probe_requires_every_runtime_query_marker(self) -> None:
+        full_help = (
+            "Syntax: lex: vec: --candidate-limit --no-rerank "
+            "--chunk-strategy --format --collection -n <num>"
+        )
+        for missing in (
+            "--candidate-limit",
+            "--no-rerank",
+            "--chunk-strategy",
+            "--format",
+            "--collection",
+            "-n <num>",
+        ):
+            with self.subTest(missing=missing):
+                runner = ProbeRunner()
+
+                def omit_marker(command: Sequence[str]) -> LimitedProcessResult:
+                    if list(command)[-2:] == ["query", "--help"]:
+                        return LimitedProcessResult(
+                            0, full_help.replace(missing, ""), ""
+                        )
+                    return runner(command)
+
+                with self.assertRaisesRegex(
+                    ToolProbeError, "structured_hybrid_query"
+                ):
+                    probe_qmd_capabilities(
+                        "qmd",
+                        index_name="fixture",
+                        runner=omit_marker,
+                        embedding_model_reader=lambda _name, _version: "model-fixture",
+                    )
+
+    def test_hybrid_probe_requires_forced_embed_markers(self) -> None:
+        full_help = (
+            "Usage: qmd embed [-f] [-c <name>]\n"
+            "Options: --max-docs-per-batch --chunk-strategy"
+        )
+        for missing in ("[-f]", "[-c <name>]"):
+            with self.subTest(missing=missing):
+                runner = ProbeRunner()
+
+                def omit_marker(command: Sequence[str]) -> LimitedProcessResult:
+                    if list(command)[-2:] == ["embed", "--help"]:
+                        return LimitedProcessResult(
+                            0, full_help.replace(missing, ""), ""
+                        )
+                    return runner(command)
+
+                with self.assertRaisesRegex(
+                    ToolProbeError, "bounded_embedding_batch"
+                ):
+                    probe_qmd_capabilities(
+                        "qmd",
+                        index_name="fixture",
+                        runner=omit_marker,
+                        embedding_model_reader=lambda _name, _version: "model-fixture",
+                    )
+
+    def test_lexical_probe_requires_every_runtime_search_marker(self) -> None:
+        full_help = "Options: --format --collection -n <num>"
+        for missing in ("--format", "--collection", "-n <num>"):
+            with self.subTest(missing=missing):
+                runner = ProbeRunner()
+
+                def omit_marker(command: Sequence[str]) -> LimitedProcessResult:
+                    if list(command)[-2:] == ["search", "--help"]:
+                        return LimitedProcessResult(
+                            0, full_help.replace(missing, ""), ""
+                        )
+                    return runner(command)
+
+                with self.assertRaisesRegex(ToolProbeError, "lexical_search"):
+                    probe_qmd_capabilities(
+                        "qmd",
+                        index_name="fixture",
+                        retrieval_mode="lexical",
+                        runner=omit_marker,
+                    )
 
     def test_capability_fingerprint_is_stable_across_version_changes(self) -> None:
         first = probe_qmd_capabilities(

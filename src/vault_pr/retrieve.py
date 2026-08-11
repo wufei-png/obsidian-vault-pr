@@ -123,7 +123,7 @@ def build_qmd_retrieval_command(
     else:
         structured_query = f"lex: {normalized_query}\nvec: {normalized_query}"
         command = [executable, "--index", index_name, "query", structured_query]
-    command.extend(["-c", collection, "-n", str(limit)])
+    command.extend(["--collection", collection, "-n", str(limit)])
     if mode == "hybrid":
         command.extend(
             [
