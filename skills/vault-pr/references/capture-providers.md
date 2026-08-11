@@ -23,6 +23,14 @@ Keep source acquisition and vault governance as separate boundaries.
 | Authenticated or interactive page | Approved browser or connector | HTML, Markdown, or PDF snapshot |
 | User-provided local material | No network provider | `--adapter local_file` single regular file |
 
+A Markdown `data:` URI is part of the primary local file, not an implicitly
+declared Asset. Preserve it in the immutable Capture, but do not copy a large
+inline payload into a visible Source Note or concept note. The `local_file`
+route cannot promote that inline payload. If the image itself is required
+evidence, stop and request a supported acquisition route that can declare the
+image as an Asset. Do not silently decode it or relabel a local source as an
+authenticated or WeChat Snapshot Bundle.
+
 `defuddle` the executable is part of the ordinary-HTML CLI route. The separate
 `defuddle` skill is useful for ad hoc reading, but `vault-pr` does not need the
 agent to invoke it during normal ingestion.

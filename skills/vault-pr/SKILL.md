@@ -46,8 +46,15 @@ Baseline.
 
 ## Resolve the vault
 
-1. Read `vault-pr.local.toml` from the project root when it exists.
-2. Run `vault-pr doctor --config vault-pr.local.toml` before planning a write.
+1. Resolve the CLI checkout before selecting configuration. Here, project root
+   means the checkout whose `vault-pr` implementation and schema you are
+   executing, not the target Vault or the caller's current directory. When
+   multiple `vault-pr.local.toml` files exist, pass the chosen checkout-local
+   path explicitly; never combine a CLI from one checkout with an unverified
+   config from another directory. Execute the checkout's environment, such as
+   `uv run vault-pr` or its `.venv/bin/vault-pr`, instead of an unrelated global
+   executable.
+2. Run `vault-pr doctor --config <config>` before planning a write.
 3. Refuse an automatic write when the target vault is dirty and cannot be tied
    to an active transaction.
 4. Keep code commits in this repository and knowledge commits in the vault.
@@ -77,6 +84,9 @@ Baseline.
    through the same authenticated adapter. For a user-provided ordinary local
    file, use `--adapter local_file --logical-name <name>`; the Kernel determines
    MIME type and size and computes the hash, and never stores the absolute path.
+   For more than one local Markdown file, read
+   [the batch-local ingestion contract](references/batch-local-ingestion.md)
+   before the first write.
 4. Read the returned `transaction_id`, then run `vault-pr commit
    <transaction-id> --message <behavior-and-intent> --config <config>`. This
    stages exactly the journal paths, commits them under the vault lock, and
@@ -86,7 +96,8 @@ Baseline.
    --config <config>` to deduplicate and find related notes across the vault.
    Retrieval and every plan command revalidate the immutable capture identity,
    declared artifact set, hashes, and visible source-note linkage before use.
-6. Run `vault-pr plan init <source-id> --summary <summary> --config <config>`.
+6. Run `vault-pr plan init --source-id <source-id> --summary <summary>
+   --authorization-summary <write-authority> --config <config>`.
    Read [the plan schema](references/plan-schema.md), create proposed note files,
    and fill the plan. Prefer updating a related concept page over creating a
    duplicate page. Infer which declared Capture assets the proposed Markdown
@@ -118,6 +129,12 @@ Baseline.
     initial attempt, then record `index_failed` without reverting the content
     commit. Run `vault-pr index --config <config>` only after commit finalization;
     it reconciles managed collections and incrementally refreshes embeddings.
+16. Treat collection alignment as configuration evidence, not retrieval
+    evidence. After indexing, inspect the configured qmd index for a nonzero
+    document count and re-run `vault-pr retrieve` for every integrated source.
+    Report a concept that remains absent from its bounded candidates as
+    retrieval noise or a quality gap; do not call it verified merely because
+    the collection is aligned.
 
 ## Apply review policy
 
