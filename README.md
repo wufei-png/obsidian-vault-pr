@@ -356,13 +356,15 @@ transaction receipt. A new apply returns its domain status with
 `requires_commit: true`. If an exact schema-v3 Capture and Source Note are
 already committed but their receipt is absent, ingest returns `adopted` and
 creates a receipt-only transaction without rewriting those artifacts. Retrying
-the exact request returns `already_active` with `next_action: commit` or
-`recover`; after finalization it returns `already_committed`. Reusing a
+the exact request returns `already_active` with `next_action: commit`,
+`recover`, or `null` when unrelated Vault changes temporarily block every safe
+write action; after finalization it returns `already_committed`. Reusing a
 transaction ID with a different request digest is an integrity error. Run
 `vault-pr commit <transaction-id> --message <message>
 --config vault-pr.local.toml`; it holds the vault lock, stages only journal paths,
-constructs the commit through a temporary index, atomically advances the
-expected branch HEAD, and finalizes. Finalization verifies the clean worktree,
+constructs the commit through a temporary index without invoking Git hooks,
+atomically advances the exact branch ref or detached HEAD captured at prepare
+time, and finalizes. Finalization verifies the clean worktree,
 new commit, complete commit-path range, every committed file hash, and Git mode,
 plus the transaction receipt before removing the journal. Recovery
 journals bind to a one-way `vault_id`; they do not persist or print the absolute
@@ -380,7 +382,8 @@ journal, backup, file-state, and Git-state verification succeeds.
 
 Use `vault-pr transaction list|show|diff` for the implemented lifecycle view:
 `APPLIED` permits commit or recovery, `COMMITTED` permits finalize or recovery,
-`RECOVERY_REQUIRED` permits recovery, and `FINALIZED` has no write action. The
+`RECOVERY_REQUIRED` permits recovery unless unrelated Vault changes temporarily
+block every write action, and `FINALIZED` has no write action. The
 views expose paths, hashes, modes, and blocking reasons, never note content. See
 [Transaction state machine](docs/transaction-state-machine.md) and
 [CLI protocol](docs/cli-protocol.md).

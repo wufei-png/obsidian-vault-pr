@@ -15,6 +15,44 @@ class GitSafetyError(RuntimeError):
     """Raised when a target vault is unsafe to modify."""
 
 
+_GIT_REPOSITORY_ENVIRONMENT = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_EXEC_PATH",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
+
+
+def git_environment(*, index_file: Path | None = None) -> dict[str, str]:
+    """Return ambient process state without Git repository-routing overrides."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _GIT_REPOSITORY_ENVIRONMENT
+        and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE"))
+    }
+    if index_file is not None:
+        environment["GIT_INDEX_FILE"] = str(index_file)
+    return environment
+
+
 def run_git(vault: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run Git against the target vault."""
     return subprocess.run(
@@ -22,16 +60,26 @@ def run_git(vault: Path, *args: str) -> subprocess.CompletedProcess[str]:
         check=False,
         capture_output=True,
         text=True,
+        env=git_environment(),
     )
+
+
+def resolve_git_dir(vault: Path) -> Path:
+    """Resolve the configured vault's own Git directory under a clean environment."""
+    vault = vault.resolve()
+    root = run_git(vault, "rev-parse", "--show-toplevel")
+    if root.returncode != 0 or Path(root.stdout.strip()).resolve() != vault:
+        raise GitSafetyError("configured vault is not the Git repository root")
+    result = run_git(vault, "rev-parse", "--absolute-git-dir")
+    if result.returncode != 0 or not result.stdout.strip():
+        raise GitSafetyError("unable to resolve vault Git directory")
+    return Path(result.stdout.strip()).resolve()
 
 
 def require_clean_git_root(vault: Path) -> None:
     """Require the vault to be the root of a clean Git working tree."""
-    root = run_git(vault, "rev-parse", "--show-toplevel")
-    if root.returncode != 0:
-        raise GitSafetyError("vault is not a Git repository")
-    if Path(root.stdout.strip()).resolve() != vault:
-        raise GitSafetyError("configured vault is not the Git repository root")
+    vault = vault.resolve()
+    resolve_git_dir(vault)
 
     status = run_git(vault, "status", "--porcelain=v1")
     if status.returncode != 0:
@@ -43,10 +91,7 @@ def require_clean_git_root(vault: Path) -> None:
 @contextmanager
 def vault_write_lock(vault: Path) -> Iterator[None]:
     """Serialize writers with a kernel-released lock in the Git directory."""
-    git_dir_result = run_git(vault, "rev-parse", "--absolute-git-dir")
-    if git_dir_result.returncode != 0:
-        raise GitSafetyError("unable to resolve vault Git directory")
-    lock_path = Path(git_dir_result.stdout.strip()) / "vault-pr.lock"
+    lock_path = resolve_git_dir(vault) / "vault-pr.lock"
     try:
         existing = lock_path.lstat()
     except FileNotFoundError:

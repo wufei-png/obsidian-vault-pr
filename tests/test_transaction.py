@@ -243,6 +243,38 @@ class TransactionObservabilityTests(unittest.TestCase):
                 ["commit_does_not_match_transaction"],
             )
 
+    def test_unrelated_dirty_path_blocks_advertised_write_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, note, config = self._vault(Path(temp_dir))
+            self._apply_mutation(vault, note)
+            (vault / "unrelated.md").write_text("human work\n")
+
+            shown = show_transaction(config, "txn_observability_fixture")
+            retry = self._apply_mutation(vault, note)
+
+            self.assertEqual(shown["state"], "RECOVERY_REQUIRED")
+            self.assertEqual(shown["allowed_actions"], [])
+            self.assertEqual(
+                shown["blocking_reasons"], ["unrelated_vault_changes"]
+            )
+            self.assertFalse(retry["requires_commit"])
+            self.assertIsNone(retry["next_action"])
+
+    def test_same_base_branch_switch_allows_only_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, note, config = self._vault(Path(temp_dir))
+            self._apply_mutation(vault, note)
+            subprocess.run(
+                ["git", "-C", str(vault), "switch", "-qc", "alternate"],
+                check=True,
+            )
+
+            shown = show_transaction(config, "txn_observability_fixture")
+
+            self.assertEqual(shown["state"], "RECOVERY_REQUIRED")
+            self.assertEqual(shown["allowed_actions"], ["recover"])
+            self.assertEqual(shown["blocking_reasons"], ["head_identity_changed"])
+
     def test_show_rejects_invalid_transaction_id_before_inventory(self) -> None:
         with self.assertRaisesRegex(TransactionError, "invalid transaction id"):
             show_transaction({"vault": {"path": "/unused"}}, "../escape")

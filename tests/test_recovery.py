@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -91,6 +92,7 @@ class RecoveryTests(unittest.TestCase):
 
             self.assertEqual(journal["schema_version"], 3)
             self.assertEqual(journal["phase"], "prepared")
+            self.assertRegex(journal["head_ref"], r"^refs/heads/")
             self.assertNotIn("vault", journal)
             self.assertRegex(journal["vault_id"], r"^[0-9a-f]{64}$")
             self.assertNotIn(str(vault), json.dumps(journal))
@@ -897,7 +899,7 @@ else:
             )
             mark_active_applied(active)
             marker = vault / "hook-ran"
-            for name in ("pre-commit", "commit-msg"):
+            for name in ("pre-commit", "commit-msg", "post-commit"):
                 hook = vault / ".git" / "hooks" / name
                 hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
                 hook.chmod(0o755)
@@ -910,11 +912,10 @@ else:
             )
 
             self.assertEqual(result["status"], "committed_and_finalized")
-            self.assertEqual(result["post_commit_hook"], "not_configured")
             self.assertFalse(marker.exists())
             self.assertFalse(active.exists())
 
-    def test_post_commit_failure_is_reported_without_rolling_back_commit(self) -> None:
+    def test_post_commit_hook_is_not_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault, _existing, _created, active = self.prepare_interrupted(
                 Path(temp_dir)
@@ -929,13 +930,168 @@ else:
                 vault,
                 vault / ".git",
                 "txn_recovery_fixture",
-                "Commit despite reporting hook failure",
+                "Commit without running hooks",
             )
 
             self.assertEqual(result["status"], "committed_and_finalized")
-            self.assertEqual(result["post_commit_hook"], "failed")
-            self.assertTrue(marker.exists())
+            self.assertNotIn("post_commit_hook", result)
+            self.assertFalse(marker.exists())
             self.assertFalse(active.exists())
+
+    def test_repository_routing_environment_cannot_redirect_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, _existing, _created, active = self.prepare_interrupted(root)
+            mark_active_applied(active)
+            other = root / "other"
+            other.mkdir()
+            subprocess.run(["git", "init", "-q", str(other)], check=True)
+            subprocess.run(
+                ["git", "-C", str(other), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(other), "config", "user.name", "Test"],
+                check=True,
+            )
+            (other / "other.md").write_text("other\n")
+            subprocess.run(["git", "-C", str(other), "add", "other.md"], check=True)
+            subprocess.run(
+                ["git", "-C", str(other), "commit", "-qm", "Other base"],
+                check=True,
+            )
+            vault_base = recovery_module.run_git(
+                vault, "rev-parse", "HEAD"
+            ).stdout.strip()
+            other_base = subprocess.run(
+                ["git", "-C", str(other), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "GIT_DIR": str(other / ".git"),
+                    "GIT_WORK_TREE": str(vault),
+                    "GIT_INDEX_FILE": str(other / ".git" / "index"),
+                    "GIT_OBJECT_DIRECTORY": str(other / ".git" / "objects"),
+                },
+            ):
+                result = commit_applied_transaction(
+                    vault,
+                    vault / ".git",
+                    "txn_recovery_fixture",
+                    "Environment-isolated commit",
+                )
+
+            self.assertEqual(result["status"], "committed_and_finalized")
+            self.assertNotEqual(
+                recovery_module.run_git(vault, "rev-parse", "HEAD").stdout.strip(),
+                vault_base,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(other), "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                other_base,
+            )
+
+    def test_commit_rejects_switch_to_same_base_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, _existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            mark_active_applied(active)
+            original_branch = recovery_module.run_git(
+                vault, "symbolic-ref", "--short", "HEAD"
+            ).stdout.strip()
+            base_commit = recovery_module.run_git(
+                vault, "rev-parse", "HEAD"
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "-C", str(vault), "switch", "-qc", "alternate"],
+                check=True,
+            )
+
+            with self.assertRaisesRegex(RecoveryError, "HEAD changed since"):
+                commit_applied_transaction(
+                    vault,
+                    vault / ".git",
+                    "txn_recovery_fixture",
+                    "Wrong branch must not advance",
+                )
+
+            self.assertEqual(
+                recovery_module.run_git(
+                    vault, "rev-parse", f"refs/heads/{original_branch}"
+                ).stdout.strip(),
+                base_commit,
+            )
+            self.assertEqual(
+                recovery_module.run_git(
+                    vault, "rev-parse", "refs/heads/alternate"
+                ).stdout.strip(),
+                base_commit,
+            )
+            self.assertTrue(active.exists())
+
+    def test_detached_head_commit_updates_only_detached_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, existing = self.make_vault(root)
+            original_branch = recovery_module.run_git(
+                vault, "symbolic-ref", "--short", "HEAD"
+            ).stdout.strip()
+            base_commit = recovery_module.run_git(
+                vault, "rev-parse", "HEAD"
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "-C", str(vault), "switch", "--detach", "-q"],
+                check=True,
+            )
+            active = prepare_active_transaction(
+                vault=vault,
+                git_dir=vault / ".git",
+                transaction_id="txn_detached_fixture",
+                transaction_sha256="d" * 64,
+                affected={existing},
+                expected_original_sha256={existing: digest(b"original\n")},
+                expected_original_mode={existing: "100644"},
+                final_sha256={existing: digest(b"detached update\n")},
+                final_mode={existing: "100644"},
+            )
+            existing.write_bytes(b"detached update\n")
+            mark_active_applied(active)
+
+            result = commit_applied_transaction(
+                vault,
+                vault / ".git",
+                "txn_detached_fixture",
+                "Detached governed commit",
+            )
+
+            self.assertEqual(result["status"], "committed_and_finalized")
+            self.assertEqual(
+                recovery_module.run_git(
+                    vault, "symbolic-ref", "-q", "HEAD"
+                ).returncode,
+                1,
+            )
+            self.assertNotEqual(
+                recovery_module.run_git(vault, "rev-parse", "HEAD").stdout.strip(),
+                base_commit,
+            )
+            self.assertEqual(
+                recovery_module.run_git(
+                    vault, "rev-parse", f"refs/heads/{original_branch}"
+                ).stdout.strip(),
+                base_commit,
+            )
 
     def test_commit_ref_cas_never_overwrites_concurrent_head(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -949,7 +1105,12 @@ else:
 
             def race_update_ref(path: Path, *args: str):
                 nonlocal raced
-                if not raced and args[:2] == ("update-ref", "HEAD"):
+                if (
+                    not raced
+                    and len(args) > 1
+                    and args[0] == "update-ref"
+                    and args[1].startswith("refs/heads/")
+                ):
                     raced = True
                     tree = real_run_git(
                         path, "rev-parse", f"{base_commit}^{{tree}}"
@@ -964,7 +1125,7 @@ else:
                         "Concurrent commit",
                     ).stdout.strip()
                     advanced = real_run_git(
-                        path, "update-ref", "HEAD", concurrent, base_commit
+                        path, "update-ref", args[1], concurrent, base_commit
                     )
                     self.assertEqual(advanced.returncode, 0)
                 return real_run_git(path, *args)
@@ -1000,7 +1161,9 @@ else:
                 result = real_run_git(path, *args)
                 if (
                     not edited
-                    and args[:2] == ("update-ref", "HEAD")
+                    and len(args) > 1
+                    and args[0] == "update-ref"
+                    and args[1].startswith("refs/heads/")
                     and result.returncode == 0
                 ):
                     edited = True
@@ -1042,7 +1205,12 @@ else:
 
             def crash_after_cas(path: Path, *args: str):
                 result = real_run_git(path, *args)
-                if args[:2] == ("update-ref", "HEAD") and result.returncode == 0:
+                if (
+                    len(args) > 1
+                    and args[0] == "update-ref"
+                    and args[1].startswith("refs/heads/")
+                    and result.returncode == 0
+                ):
                     raise SystemExit("simulated process death after ref CAS")
                 return result
 
@@ -1091,7 +1259,12 @@ else:
 
             def crash_after_cas(path: Path, *args: str):
                 result = real_run_git(path, *args)
-                if args[:2] == ("update-ref", "HEAD") and result.returncode == 0:
+                if (
+                    len(args) > 1
+                    and args[0] == "update-ref"
+                    and args[1].startswith("refs/heads/")
+                    and result.returncode == 0
+                ):
                     raise SystemExit("simulated process death after ref CAS")
                 return result
 

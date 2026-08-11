@@ -19,7 +19,7 @@ private staging artifacts, not durable mutation transactions.
 | --- | --- | --- | --- |
 | `APPLIED` | Active journal, expected bytes in the worktree, base HEAD unchanged | `commit`, `recover` | Mutation reached the worktree but no exact commit is observed. |
 | `COMMITTED` | Active journal and exact governed commit observed | `finalize`, `recover` | Commit exists; final receipt and cleanup still need verification. |
-| `RECOVERY_REQUIRED` | Prepared journal, or active state that cannot safely continue normally | `recover` | Recovery must verify the journal and either roll back or finalize. |
+| `RECOVERY_REQUIRED` | Prepared journal, or active state that cannot safely continue normally | `recover`, or none while unrelated Vault changes remain | Recovery must verify the journal and either roll back or finalize. Resolve unrelated changes before invoking any write action. |
 | `FINALIZED` | Valid transaction receipt committed at HEAD | none | The transaction is closed. |
 
 Inspect state with:

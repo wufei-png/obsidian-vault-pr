@@ -91,7 +91,10 @@ Baseline.
    `requires_commit=true` and a `transaction_id`, then run `vault-pr commit
    <transaction-id> --message <behavior-and-intent> --config <config>` exactly
    once. For `already_active` with `next_action=recover`, use the recovery flow
-   without committing. `adopted` is a receipt-only transaction for an exact
+   without committing. For `already_active` with `next_action=null`, inspect
+   `vault-pr transaction show`, leave the active transaction untouched, and
+   resolve the reported unrelated Vault changes before invoking any write
+   action. `adopted` is a receipt-only transaction for an exact
    Capture and Source Note already committed at the current HEAD; it does not
    rewrite either artifact. Reuse `already_committed` only after Kernel
    validation. Fail closed on any inconsistent or unknown combination; never

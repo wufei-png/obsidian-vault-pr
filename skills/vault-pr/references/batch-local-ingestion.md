@@ -53,7 +53,10 @@ For each distinct byte hash in the current chunk, in frozen order:
    verification boundary. `adopted` is a receipt-only transaction for exact
    Capture and Source Note bytes already committed at the current HEAD. For
    `already_active` with `next_action=recover`, use the main recovery flow
-   without committing. Reuse `already_committed` only after Kernel validation.
+   without committing. For `already_active` with `next_action=null`, leave the
+   transaction untouched and resolve the unrelated Vault changes reported by
+   `vault-pr transaction show` before any write action. Reuse
+   `already_committed` only after Kernel validation.
    Fail closed on any inconsistent or unknown combination; do not manufacture
    a transaction ID or silently call it deduplicated.
 5. A later semantic transaction must reference the committed Capture, never the

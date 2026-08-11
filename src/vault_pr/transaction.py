@@ -31,10 +31,18 @@ def _git_dir(vault: Path) -> Path:
 def _active_view(vault: Path, active_dir: Path) -> dict[str, Any]:
     snapshot = inspect_active_transaction(vault, active_dir)
     phase = snapshot["phase"]
-    if phase == "prepared":
+    if snapshot["unrelated_changes"]:
+        state = "RECOVERY_REQUIRED"
+        allowed_actions = []
+        blocking_reasons = ["unrelated_vault_changes"]
+    elif phase == "prepared":
         state = "RECOVERY_REQUIRED"
         allowed_actions = ["recover"]
         blocking_reasons = ["transaction_not_applied"]
+    elif not snapshot["head_identity_matches"]:
+        state = "RECOVERY_REQUIRED"
+        allowed_actions = ["recover"]
+        blocking_reasons = ["head_identity_changed"]
     elif snapshot["head_commit"] != snapshot["base_commit"] and not snapshot[
         "git_clean"
     ]:
@@ -68,7 +76,9 @@ def _active_view(vault: Path, active_dir: Path) -> dict[str, Any]:
         "commit_observed": snapshot["commit_observed"],
         "base_commit": snapshot["base_commit"],
         "head_commit": snapshot["head_commit"],
+        "head_identity_matches": snapshot["head_identity_matches"],
         "git_clean": snapshot["git_clean"],
+        "unrelated_changes": snapshot["unrelated_changes"],
         "completion_path": snapshot["completion_path"],
         "files": [
             {

@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from .files import atomic_replace_text
-from .git import run_git, vault_write_lock
+from .git import (
+    GitSafetyError,
+    git_environment,
+    resolve_git_dir,
+    run_git,
+    vault_write_lock,
+)
 
 
 class RecoveryError(RuntimeError):
@@ -33,6 +39,17 @@ def _sha256(path: Path) -> str | None:
 def _vault_id(vault: Path) -> str:
     """Bind a journal to one configured vault without storing its path."""
     return hashlib.sha256(str(vault.resolve()).encode("utf-8")).hexdigest()
+
+
+def _validated_git_dir(vault: Path, git_dir: Path) -> Path:
+    try:
+        expected = resolve_git_dir(vault)
+    except GitSafetyError as exc:
+        raise RecoveryError(str(exc)) from exc
+    supplied = git_dir.resolve()
+    if supplied != expected:
+        raise RecoveryError("Git directory does not belong to the configured vault")
+    return expected
 
 
 def worktree_file_mode(path: Path) -> str | None:
@@ -86,6 +103,39 @@ def _head_commit(vault: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _head_reference(vault: Path) -> str | None:
+    result = run_git(vault, "symbolic-ref", "-q", "HEAD")
+    if result.returncode == 1:
+        return None
+    reference = result.stdout.strip()
+    if result.returncode != 0 or not reference.startswith("refs/"):
+        raise RecoveryError("unable to resolve vault HEAD identity")
+    valid = run_git(vault, "check-ref-format", reference)
+    if valid.returncode != 0:
+        raise RecoveryError("vault HEAD references an invalid ref")
+    return reference
+
+
+def _head_identity(vault: Path) -> tuple[str | None, str | None]:
+    """Read a stable symbolic-or-detached HEAD identity and its commit."""
+    reference = _head_reference(vault)
+    commit = _head_commit(vault)
+    if _head_reference(vault) != reference or _head_commit(vault) != commit:
+        raise RecoveryError("vault HEAD changed while its identity was inspected")
+    return reference, commit
+
+
+def _journal_head_reference(journal: dict[str, Any]) -> str | None:
+    if "head_ref" not in journal:
+        raise RecoveryError(
+            "recovery journal predates exact HEAD identity binding; recover it"
+        )
+    reference = journal["head_ref"]
+    if reference is not None and not isinstance(reference, str):
+        raise RecoveryError("recovery journal contains an invalid HEAD ref")
+    return reference
+
+
 def _git_worktree_blob_oid(vault: Path, relative: str) -> str | None:
     """Return the blob OID Git would stage after applying configured filters."""
     path = vault / relative
@@ -96,6 +146,7 @@ def _git_worktree_blob_oid(vault: Path, relative: str) -> str | None:
         check=False,
         capture_output=True,
         text=True,
+        env=git_environment(),
     )
     if result.returncode != 0:
         raise RecoveryError(f"unable to hash filtered worktree path: {relative}")
@@ -112,6 +163,7 @@ def _git_revision_file_metadata(
         ["git", "-C", str(vault), "ls-tree", "-z", revision, "--", relative],
         check=False,
         capture_output=True,
+        env=git_environment(),
     )
     if result.returncode != 0:
         raise RecoveryError(f"unable to inspect committed path: {relative}")
@@ -187,14 +239,12 @@ def _run_git_with_index(
     index_path: Path,
     *args: str,
 ) -> subprocess.CompletedProcess[str]:
-    environment = os.environ.copy()
-    environment["GIT_INDEX_FILE"] = str(index_path)
     return subprocess.run(
         ["git", "-C", str(vault), *args],
         check=False,
         capture_output=True,
         text=True,
-        env=environment,
+        env=git_environment(index_file=index_path),
     )
 
 
@@ -206,11 +256,7 @@ def _git_index_file_oid(
         ["git", "-C", str(vault), *command],
         check=False,
         capture_output=True,
-        env=(
-            {**os.environ, "GIT_INDEX_FILE": str(index_path)}
-            if index_path is not None
-            else None
-        ),
+        env=git_environment(index_file=index_path),
     )
     if result.returncode != 0:
         raise RecoveryError(f"unable to inspect staged blob: {relative}")
@@ -233,11 +279,7 @@ def _git_index_file_mode(
         ["git", "-C", str(vault), *command],
         check=False,
         capture_output=True,
-        env=(
-            {**os.environ, "GIT_INDEX_FILE": str(index_path)}
-            if index_path is not None
-            else None
-        ),
+        env=git_environment(index_file=index_path),
     )
     if result.returncode != 0:
         raise RecoveryError(f"unable to inspect staged mode: {relative}")
@@ -312,6 +354,7 @@ def _committed_paths(vault: Path, base_commit: str | None, head: str) -> set[str
             ],
             check=False,
             capture_output=True,
+            env=git_environment(),
         )
         if changed.returncode != 0:
             raise RecoveryError("unable to inspect transaction commit paths")
@@ -370,7 +413,7 @@ def prepare_active_transaction(
     """Persist originals and allowed states before the first vault mutation."""
     lexical_vault = Path(os.path.abspath(vault.expanduser()))
     vault = vault.resolve()
-    git_dir = git_dir.resolve()
+    git_dir = _validated_git_dir(vault, git_dir)
     affected = {
         _normalize_transaction_path(vault, path, lexical_vault) for path in affected
     }
@@ -489,6 +532,7 @@ def prepare_active_transaction(
                 if not parent.exists():
                     created_dirs.add(parent)
                 parent = parent.parent
+        head_ref, base_commit = _head_identity(vault)
         journal = {
             "schema_version": 3,
             "transaction_id": transaction_id,
@@ -497,7 +541,8 @@ def prepare_active_transaction(
             "operation": operation,
             "vault_id": _vault_id(vault),
             "phase": "prepared",
-            "base_commit": _head_commit(vault),
+            "base_commit": base_commit,
+            "head_ref": head_ref,
             "created_dirs": [
                 str(path.relative_to(vault))
                 for path in sorted(
@@ -534,6 +579,16 @@ def _read_journal(vault: Path, active_dir: Path) -> dict[str, Any]:
         raise RecoveryError("recovery journal has no affected paths")
     if journal.get("schema_version") != 3:
         raise RecoveryError("recovery journal has an unsupported schema version")
+    if "head_ref" in journal:
+        head_ref = journal["head_ref"]
+        if head_ref is not None and (
+            not isinstance(head_ref, str) or not head_ref.startswith("refs/")
+        ):
+            raise RecoveryError("recovery journal contains an invalid HEAD ref")
+        if isinstance(head_ref, str):
+            valid_ref = run_git(vault, "check-ref-format", head_ref)
+            if valid_ref.returncode != 0:
+                raise RecoveryError("recovery journal contains an invalid HEAD ref")
     if not isinstance(journal.get("transaction_sha256"), str) or not SHA256_PATTERN.fullmatch(
         journal["transaction_sha256"]
     ):
@@ -575,11 +630,18 @@ def inspect_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]:
             raise RecoveryError(
                 f"prepared transaction path has an unexpected state: {entry['path']}"
             )
-    git_clean = _git_is_clean(vault)
-    head_commit = _head_commit(vault)
+    dirty_paths, _staged_paths = _git_status_paths(vault)
+    git_clean = not dirty_paths
+    expected_dirty = _changed_journal_paths(journal)
+    unrelated_changes = bool(dirty_paths - expected_dirty)
+    current_head_ref, head_commit = _head_identity(vault)
+    head_identity_matches = (
+        "head_ref" in journal and current_head_ref == journal.get("head_ref")
+    )
     commit_observed = (
         journal["phase"] == "applied"
         and git_clean
+        and head_identity_matches
         and head_commit != journal.get("base_commit")
     )
     return {
@@ -591,7 +653,9 @@ def inspect_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]:
         "commit_observed": commit_observed,
         "base_commit": journal.get("base_commit"),
         "head_commit": head_commit,
+        "head_identity_matches": head_identity_matches,
         "git_clean": git_clean,
+        "unrelated_changes": unrelated_changes,
         "completion_path": journal.get("completion_path"),
         "files": [
             {
@@ -889,7 +953,9 @@ def _verify_committed_transaction_unlocked(
         raise RecoveryError("transaction has not reached the applied phase")
     if require_clean and not _git_is_clean(vault):
         raise RecoveryError("applied transaction must be committed before finalization")
-    head = _head_commit(vault)
+    current_head_ref, head = _head_identity(vault)
+    if "head_ref" in journal and current_head_ref != journal.get("head_ref"):
+        raise RecoveryError("vault HEAD identity changed since transaction prepare")
     base_commit = journal.get("base_commit")
     if base_commit is not None and not isinstance(base_commit, str):
         raise RecoveryError("recovery journal contains an invalid base commit")
@@ -1015,7 +1081,7 @@ def finalize_applied_transaction(
 ) -> dict[str, Any]:
     """Finalize one applied transaction only after its exact result is committed."""
     vault = vault.resolve()
-    git_dir = git_dir.resolve()
+    git_dir = _validated_git_dir(vault, git_dir)
     if not TRANSACTION_ID_PATTERN.fullmatch(transaction_id):
         raise RecoveryError("invalid transaction id")
     with vault_write_lock(vault):
@@ -1047,32 +1113,23 @@ def _temporary_index_paths(
 
 
 def _rollback_committed_ref(
-    vault: Path, base_commit: str | None, commit_oid: str
+    vault: Path,
+    head_ref: str | None,
+    base_commit: str | None,
+    commit_oid: str,
 ) -> bool:
+    target = head_ref or "HEAD"
     if base_commit is None:
-        rolled_back = run_git(vault, "update-ref", "-d", "HEAD", commit_oid)
+        rolled_back = run_git(vault, "update-ref", "-d", target, commit_oid)
     else:
         rolled_back = run_git(
             vault,
             "update-ref",
-            "HEAD",
+            target,
             base_commit,
             commit_oid,
         )
     return rolled_back.returncode == 0
-
-
-def _run_post_commit_hook(vault: Path) -> str:
-    hook_path_result = run_git(vault, "rev-parse", "--git-path", "hooks/post-commit")
-    if hook_path_result.returncode != 0:
-        return "lookup_failed"
-    hook_path = Path(hook_path_result.stdout.strip())
-    if not hook_path.is_absolute():
-        hook_path = vault / hook_path
-    if not hook_path.is_file() or not os.access(hook_path, os.X_OK):
-        return "not_configured"
-    hook = run_git(vault, "hook", "run", "post-commit")
-    return "passed" if hook.returncode == 0 else "failed"
 
 
 def commit_applied_transaction(
@@ -1083,7 +1140,7 @@ def commit_applied_transaction(
 ) -> dict[str, Any]:
     """Commit an exact temporary-index tree with an expected-old ref CAS."""
     vault = vault.resolve()
-    git_dir = git_dir.resolve()
+    git_dir = _validated_git_dir(vault, git_dir)
     if not TRANSACTION_ID_PATTERN.fullmatch(transaction_id):
         raise RecoveryError("invalid transaction id")
     message = " ".join(message.split()).strip()
@@ -1100,7 +1157,9 @@ def commit_applied_transaction(
         base_commit = journal.get("base_commit")
         if base_commit is not None and not isinstance(base_commit, str):
             raise RecoveryError("recovery journal contains an invalid base commit")
-        if _head_commit(vault) != base_commit:
+        head_ref = _journal_head_reference(journal)
+        current_head_ref, current_head = _head_identity(vault)
+        if current_head_ref != head_ref or current_head != base_commit:
             raise RecoveryError("vault HEAD changed since transaction prepare")
         entries = _validated_entries(vault, active_dir, journal)
         expected_paths: set[str] = set()
@@ -1205,10 +1264,11 @@ def commit_applied_transaction(
                 detail = (committed.stderr or committed.stdout).strip()
                 raise RecoveryError(f"unable to create transaction commit: {detail}")
             expected_old = base_commit or ("0" * len(commit_oid))
+            ref_target = head_ref or "HEAD"
             updated = run_git(
                 vault,
                 "update-ref",
-                "HEAD",
+                ref_target,
                 commit_oid,
                 expected_old,
             )
@@ -1216,16 +1276,27 @@ def commit_applied_transaction(
                 raise RecoveryError(
                     "vault HEAD changed before transaction commit CAS"
                 )
+            if _head_identity(vault) != (head_ref, commit_oid):
+                rolled_back = _rollback_committed_ref(
+                    vault, head_ref, base_commit, commit_oid
+                )
+                suffix = "" if rolled_back else "; ref rollback also failed"
+                raise RecoveryError(
+                    "vault HEAD identity changed after transaction commit CAS"
+                    + suffix
+                )
             synchronized = run_git(
                 vault,
                 "reset",
                 "--quiet",
-                "HEAD",
+                commit_oid,
                 "--",
                 *sorted(expected_paths),
             )
             if synchronized.returncode != 0 or not _git_is_clean(vault):
-                rolled_back = _rollback_committed_ref(vault, base_commit, commit_oid)
+                rolled_back = _rollback_committed_ref(
+                    vault, head_ref, base_commit, commit_oid
+                )
                 restored = False
                 if rolled_back:
                     if base_commit is None:
@@ -1243,7 +1314,7 @@ def commit_applied_transaction(
                             vault,
                             "reset",
                             "--quiet",
-                            "HEAD",
+                            base_commit,
                             "--",
                             *sorted(expected_paths),
                         )
@@ -1262,19 +1333,17 @@ def commit_applied_transaction(
             index_path.unlink(missing_ok=True)
             index_lock_path.unlink(missing_ok=True)
         finalized = _finalize_active_transaction_unlocked(vault, active_dir)
-        hook_status = _run_post_commit_hook(vault)
         return {
             **finalized,
             "status": "committed_and_finalized",
             "message": message,
-            "post_commit_hook": hook_status,
         }
 
 
 def recover_interrupted_transaction(vault: Path, git_dir: Path) -> dict[str, Any]:
     """Recover the single active transaction under the vault write lock."""
     vault = vault.resolve()
-    git_dir = git_dir.resolve()
+    git_dir = _validated_git_dir(vault, git_dir)
     with vault_write_lock(vault):
         active = list_active_transactions(git_dir)
         if len(active) != 1:

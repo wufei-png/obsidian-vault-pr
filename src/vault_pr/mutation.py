@@ -198,12 +198,23 @@ def _active_outcome(vault: Path, active_dir: Path) -> dict[str, Any]:
         raise MutationError(str(exc)) from exc
     phase = identity["phase"]
     commit_observed = identity["commit_observed"]
+    commit_allowed = (
+        phase == "applied"
+        and not commit_observed
+        and identity["head_identity_matches"]
+        and identity["head_commit"] == identity["base_commit"]
+        and not identity["unrelated_changes"]
+    )
     outcome: dict[str, Any] = {
         **identity,
         "status": "already_active",
-        "requires_commit": phase == "applied" and not commit_observed,
+        "requires_commit": commit_allowed,
         "next_action": (
-            "commit" if phase == "applied" and not commit_observed else "recover"
+            "commit"
+            if commit_allowed
+            else None
+            if identity["unrelated_changes"]
+            else "recover"
         ),
     }
     if phase == "applied":
