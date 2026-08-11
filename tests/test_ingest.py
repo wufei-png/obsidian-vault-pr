@@ -928,6 +928,29 @@ class IngestTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(journal.read_text())["phase"], "applied")
 
+    def test_http_markdown_suffix_normalizes_text_plain_primary_mime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            fetched = replace(
+                markdown_fetch(),
+                headers={"content-type": "text/plain; charset=utf-8"},
+            )
+
+            with patch("vault_pr.ingest.fetch_url", return_value=fetched):
+                result = ingest_url(
+                    config=make_config(vault),
+                    url="https://example.com/article.md",
+                    apply=True,
+                )
+
+            manifest = json.loads(
+                (vault / result["capture_dir"] / "manifest.json").read_text()
+            )
+            self.assertEqual(manifest["primary"]["path"], "source.md")
+            self.assertEqual(manifest["primary"]["mime"], "text/markdown")
+
     def test_apply_retry_returns_active_then_committed_ingest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir) / "vault"

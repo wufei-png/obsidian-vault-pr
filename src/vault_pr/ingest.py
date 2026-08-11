@@ -36,6 +36,7 @@ from .mutation import (
 )
 from .recovery import committed_file_matches_worktree
 from .acquisition import (
+    ExtractedSource,
     FetchedSource,
     canonicalize_url,
     extract_source,
@@ -93,6 +94,26 @@ def _acquisition(
         "adapter": adapter,
         **({"provider": provider} if provider is not None else {}),
     }
+
+
+def _primary_mime(extracted: ExtractedSource, fetched: FetchedSource) -> str:
+    """Normalize known artifact formats while preserving custom extractor MIME."""
+    by_suffix = {
+        ".htm": "text/html",
+        ".html": "text/html",
+        ".markdown": "text/markdown",
+        ".md": "text/markdown",
+        ".pdf": "application/pdf",
+    }
+    normalized = by_suffix.get(Path(extracted.raw_filename).suffix.casefold())
+    if normalized is not None:
+        return normalized
+    return (
+        fetched.headers.get("content-type", "application/octet-stream")
+        .split(";", 1)[0]
+        .strip()
+        .lower()
+    )
 
 
 def _install_note(path: Path, content: str, staging: Path) -> None:
@@ -320,11 +341,7 @@ def ingest_source(
                 "path": extracted.raw_filename,
                 "sha256": raw_sha256,
                 "size": raw_path.stat().st_size,
-                "mime": fetched.headers.get(
-                    "content-type", "application/octet-stream"
-                )
-                .split(";", 1)[0]
-                .strip(),
+                "mime": _primary_mime(extracted, fetched),
             }
         else:
             primary = {
