@@ -24,12 +24,12 @@ Keep source acquisition and vault governance as separate boundaries.
 | User-provided local material | No network provider | `--adapter local_file` single regular file |
 
 A Markdown `data:` URI is part of the primary local file, not an implicitly
-declared Asset. Preserve it in the immutable Capture, but do not copy a large
-inline payload into a visible Source Note or concept note. The `local_file`
-route cannot promote that inline payload. If the image itself is required
-evidence, stop and request a supported acquisition route that can declare the
-image as an Asset. Do not silently decode it or relabel a local source as an
-authenticated or WeChat Snapshot Bundle.
+declared Asset. Skill policy forbids copying or promoting any inline `data:`
+payload into a visible Source Note or concept note, even when Markdown
+validation accepts it. Preserve it only in the immutable Capture. If the image
+is material evidence, require a supported acquisition route that emits a
+manifest-declared Asset with an allowed MIME type. Do not silently decode it or
+relabel a local source as an authenticated or WeChat Snapshot Bundle.
 
 `defuddle` the executable is part of the ordinary-HTML CLI route. The separate
 `defuddle` skill is useful for ad hoc reading, but `vault-pr` does not need the

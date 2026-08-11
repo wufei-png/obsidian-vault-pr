@@ -87,8 +87,16 @@ Baseline.
    For more than one local Markdown file, read
    [the batch-local ingestion contract](references/batch-local-ingestion.md)
    before the first write.
-4. Read the returned `transaction_id`, then run `vault-pr commit
-   <transaction-id> --message <behavior-and-intent> --config <config>`. This
+4. Take exactly one branch from the returned status and `next_action`. For
+   `captured`, or `already_active` with `next_action=commit`, require
+   `requires_commit=true` and a `transaction_id`, then run `vault-pr commit
+   <transaction-id> --message <behavior-and-intent> --config <config>` exactly
+   once. For `already_active` with `next_action=recover`, use the recovery flow
+   without committing. Reuse `already_committed` only after Kernel validation.
+   Treat `already_captured` as an audit-integrity blocker: stop and report it
+   because the current Kernel has no supported adoption path for a receipt-less
+   Capture. Fail closed on any inconsistent or unknown combination; never
+   invent a transaction ID. A successful commit
    stages exactly the journal paths, commits them under the vault lock, and
    finalizes the journal. Never use bare `git add` or `git commit` for an active
    transaction. Do not index while an active journal remains.
@@ -129,12 +137,10 @@ Baseline.
     initial attempt, then record `index_failed` without reverting the content
     commit. Run `vault-pr index --config <config>` only after commit finalization;
     it reconciles managed collections and incrementally refreshes embeddings.
-16. Treat collection alignment as configuration evidence, not retrieval
-    evidence. After indexing, inspect the configured qmd index for a nonzero
-    document count and re-run `vault-pr retrieve` for every integrated source.
-    Report a concept that remains absent from its bounded candidates as
-    retrieval noise or a quality gap; do not call it verified merely because
-    the collection is aligned.
+16. After each semantic commit, index and re-run `vault-pr retrieve` for every
+    integrated source. Treat collection alignment and document counts as
+    diagnostics, not retrieval proof. Report absent expected concepts as empty
+    or noisy retrieval evidence rather than success.
 
 ## Apply review policy
 
@@ -154,13 +160,19 @@ Baseline.
 
 ## Handle failure
 
-- If `doctor` reports an active transaction, use `vault-pr commit` for an
-  uncommitted completed apply. Use `finalize` only if Git commit already
-  completed, or run `vault-pr recover --config <config>` after an interruption.
-  Recovery verifies the durable journal, backups, affected path hashes and Git
-  modes, rejects symlink traversal, checks Git staging state, and requires the
-  absence of unrelated changes. It auto-finalizes an exact
-  committed result; otherwise it rolls an uncommitted result back.
+- `doctor` reports active transaction IDs, not `next_action`; never infer a
+  phase from an ID. If the originating command response was retained, follow
+  its `next_action`. Otherwise, only when the complete original request can be
+  reconstructed and its inputs remain unchanged, retry that exact governed
+  command to obtain `already_active.next_action`. If the request cannot be
+  reconstructed, stop and report the preserved transaction rather than
+  guessing. For `next_action=commit`, use `vault-pr commit`. For
+  `next_action=recover`, run `vault-pr recover --config <config>`; it verifies
+  the durable journal, backups, affected path hashes and Git modes, rejects
+  symlink traversal, checks Git staging state, and requires the absence of
+  unrelated changes. It auto-finalizes an exact committed result; otherwise it
+  rolls an uncommitted result back. Use `finalize` directly only when the
+  completed Git commit is independently known.
 - If recovery refuses because any path, backup, or Git state is unexpected, stop
   without writing and report the preserved recovery directory.
 - Never discard unrelated changes or use destructive Git recovery implicitly.
