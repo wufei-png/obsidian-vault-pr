@@ -5,6 +5,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1050,6 +1051,98 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(history[0]["assessment"]["instance_id"], "reviewer-1")
             self.assertEqual(history[0]["assessment"]["status"], "approve")
 
+    def test_record_review_serializes_history_and_assessment_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            config = make_config(vault, review_all=True)
+            real_lock = plan_module.vault_write_lock
+            real_atomic_write = plan_module._atomic_write
+            held = False
+            writes: list[Path] = []
+
+            @contextmanager
+            def tracking_lock(path: Path):
+                nonlocal held
+                with real_lock(path):
+                    held = True
+                    try:
+                        yield
+                    finally:
+                        held = False
+
+            def checked_write(path: Path, content: bytes) -> None:
+                self.assertTrue(held)
+                writes.append(path)
+                real_atomic_write(path, content)
+
+            with patch("vault_pr.plan.vault_write_lock", tracking_lock), patch(
+                "vault_pr.plan._atomic_write", side_effect=checked_write
+            ):
+                self.record_assessment(
+                    config, plan_path, "serialized-reviewer", "approve"
+                )
+
+            self.assertEqual(
+                {path.name for path in writes},
+                {"assessment.json", "review-history.json"},
+            )
+
+    def test_record_review_rolls_back_assessment_if_history_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            config = make_config(vault, review_all=True)
+            real_atomic_write = plan_module._atomic_write
+
+            def fail_history(path: Path, content: bytes) -> None:
+                if path.name == "review-history.json":
+                    raise OSError("injected history failure")
+                real_atomic_write(path, content)
+
+            with patch("vault_pr.plan._atomic_write", side_effect=fail_history):
+                with self.assertRaisesRegex(PlanError, "assessment was rolled back"):
+                    self.record_assessment(
+                        config, plan_path, "retryable-reviewer", "approve"
+                    )
+
+            self.assertFalse((plan_path.parent / "assessment.json").exists())
+            self.assertFalse((plan_path.parent / "review-history.json").exists())
+            retried = self.record_assessment(
+                config, plan_path, "retryable-reviewer", "approve"
+            )
+            self.assertEqual(retried["assessment"]["status"], "approve")
+
+    def test_bundle_validation_uses_frozen_proposed_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            bundle = plan_module._freeze_plan_bundle(make_config(vault), plan_path)
+            proposed = root / "plan" / "files" / "source.md"
+            proposed.write_text("not valid Markdown frontmatter")
+
+            checked = validate_plan(
+                make_config(vault),
+                plan_path,
+                bundle=bundle,
+            )
+
+            self.assertEqual(checked["status"], "valid")
+            self.assertRegex(checked["transaction_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_plan_bundle_rejects_broken_review_metadata_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            (plan_path.parent / "review-history.json").symlink_to("missing.json")
+
+            with self.assertRaisesRegex(PlanError, "regular file"):
+                plan_module._freeze_plan_bundle(make_config(vault), plan_path)
+
     def test_apply_rejects_content_changed_after_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1059,9 +1152,11 @@ class PlanTests(unittest.TestCase):
             real_validate = validate_plan
 
             def validate_then_mutate(
-                config: dict[str, object], path: Path
+                config: dict[str, object],
+                path: Path,
+                **kwargs: object,
             ) -> dict[str, object]:
-                result = real_validate(config, path)
+                result = real_validate(config, path, **kwargs)
                 proposed.write_text(note("Source", "Mutated after validation"))
                 return result
 
@@ -1108,9 +1203,11 @@ class PlanTests(unittest.TestCase):
             real_validate = validate_plan
 
             def validate_then_mutate(
-                config: dict[str, object], path: Path
+                config: dict[str, object],
+                path: Path,
+                **kwargs: object,
             ) -> dict[str, object]:
-                result = real_validate(config, path)
+                result = real_validate(config, path, **kwargs)
                 target.write_text(note("Existing", "Concurrent edit"))
                 return result
 

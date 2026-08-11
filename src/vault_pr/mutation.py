@@ -249,8 +249,9 @@ def inspect_journaled_mutation(
     transaction_id: str,
     transaction_sha256: str | None,
     request_sha256: str | None = None,
+    lock: bool = True,
 ) -> dict[str, Any] | None:
-    """Recognize an exact active or committed mutation before domain validation."""
+    """Recognize a mutation; callers disabling locking must hold the vault lock."""
     request_sha256 = request_sha256 or transaction_sha256
     if request_sha256 is None:
         raise MutationError("request digest is required")
@@ -260,15 +261,24 @@ def inspect_journaled_mutation(
         transaction_sha256=transaction_sha256,
         request_sha256=request_sha256,
     )
-    with vault_write_lock(vault):
-        return _inspect_journaled_mutation_unlocked(
-            vault=vault,
-            git_dir=git_dir,
-            operation=operation,
-            transaction_id=transaction_id,
-            transaction_sha256=transaction_sha256,
-            request_sha256=request_sha256,
-        )
+    if lock:
+        with vault_write_lock(vault):
+            return _inspect_journaled_mutation_unlocked(
+                vault=vault,
+                git_dir=git_dir,
+                operation=operation,
+                transaction_id=transaction_id,
+                transaction_sha256=transaction_sha256,
+                request_sha256=request_sha256,
+            )
+    return _inspect_journaled_mutation_unlocked(
+        vault=vault,
+        git_dir=git_dir,
+        operation=operation,
+        transaction_id=transaction_id,
+        transaction_sha256=transaction_sha256,
+        request_sha256=request_sha256,
+    )
 
 
 def inspect_active_operation(

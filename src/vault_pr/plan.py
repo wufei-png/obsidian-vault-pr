@@ -7,6 +7,7 @@ import json
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,7 @@ from .review import (
     validate_assessment,
     validate_digest,
 )
-from .source_note import resolve_source_note, source_note_has_id
+from .source_note import resolve_source_note, source_note_bytes_have_id
 from .quality_record import (
     QualityRecordError,
     load_quality_record,
@@ -104,6 +105,19 @@ QUALITY_RECORD_ID_PATTERN = re.compile(r"quality_[0-9a-f]{20}")
 TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
 HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
 MAX_EVIDENCE_EXCERPT_CHARACTERS = 12_000
+
+
+@dataclass(frozen=True)
+class PlanBundle:
+    """Immutable bytes that identify one apply request."""
+
+    plan_path: Path
+    transaction_id: str
+    plan_bytes: bytes
+    content_snapshots: tuple[tuple[Path, bytes], ...]
+    assessment_bytes: bytes | None
+    review_history_bytes: bytes | None
+    request_sha256: str
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -287,14 +301,21 @@ def _frontmatter_ok(content: bytes) -> bool:
     return isinstance(frontmatter, dict)
 
 
-def _content_file(plan_path: Path, operation: dict[str, Any]) -> Path:
+def _content_file(
+    plan_path: Path,
+    operation: dict[str, Any],
+    content_snapshots: dict[Path, bytes] | None = None,
+) -> Path:
     raw_content_file = operation.get("content_file")
     if not isinstance(raw_content_file, str) or not raw_content_file.strip():
         raise PlanError("create/update operation requires content_file")
     content_path = (plan_path.parent / raw_content_file).resolve()
     if not content_path.is_relative_to(plan_path.parent.resolve()):
         raise PlanError("content_file escapes the plan directory")
-    if not content_path.is_file():
+    if content_snapshots is not None:
+        if content_path not in content_snapshots:
+            raise PlanError(f"content_file is missing from plan bundle: {raw_content_file}")
+    elif not content_path.is_file():
         raise PlanError(f"content_file does not exist: {raw_content_file}")
     return content_path
 
@@ -496,7 +517,33 @@ def _assessment_status(
     assessment_path = plan_dir / "assessment.json"
     if not assessment_path.is_file() or not history:
         return False, None
-    assessment = _read_json(assessment_path, "semantic review assessment")
+    try:
+        assessment_bytes = assessment_path.read_bytes()
+    except OSError as exc:
+        raise PlanError("unable to read semantic review assessment") from exc
+    valid = _assessment_status_snapshot(
+        assessment_bytes,
+        transaction_sha256,
+        packet,
+        history,
+    )
+    return valid, str(assessment_path)
+
+
+def _assessment_status_snapshot(
+    assessment_bytes: bytes | None,
+    transaction_sha256: str,
+    packet: dict[str, Any],
+    history: list[dict[str, Any]],
+) -> bool:
+    if assessment_bytes is None or not history:
+        return False
+    try:
+        assessment = json.loads(assessment_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlanError("invalid semantic review assessment") from exc
+    if not isinstance(assessment, dict):
+        raise PlanError("semantic review assessment must be a JSON object")
     last = history[-1]
     try:
         validate_assessment(
@@ -507,21 +554,37 @@ def _assessment_status(
             },
         )
     except (KeyError, ReviewError):
-        return False, str(assessment_path)
-    valid = bool(
+        return False
+    return bool(
         last.get("transaction_sha256") == transaction_sha256
         and last.get("review_packet_sha256") == packet_sha256(packet)
         and last.get("assessment") == assessment
         and assessment.get("status") == "approve"
     )
-    return valid, str(assessment_path)
 
 
-def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
+def validate_plan(
+    config: dict[str, Any],
+    plan_path: Path,
+    *,
+    bundle: PlanBundle | None = None,
+) -> dict[str, Any]:
     """Validate paths, hashes, note count, risk, and reviewer approval."""
     vault = load_vault_path(config)
     plan_path = plan_path.expanduser().resolve()
-    plan = _read_json(plan_path, "plan")
+    if bundle is None:
+        plan = _read_json(plan_path, "plan")
+        bundle_contents: dict[Path, bytes] | None = None
+    else:
+        if bundle.plan_path != plan_path:
+            raise PlanError("plan bundle path does not match validation path")
+        try:
+            plan = json.loads(bundle.plan_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PlanError("invalid plan") from exc
+        if not isinstance(plan, dict):
+            raise PlanError("plan must be a JSON object")
+        bundle_contents = dict(bundle.content_snapshots)
     plan_schema_version = plan.get("schema_version")
     if plan_schema_version not in ALLOWED_PLAN_SCHEMA_VERSIONS:
         raise PlanError("unsupported plan schema_version")
@@ -775,8 +838,12 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         if action in {"create", "update"} or (
             action == "rename" and raw_operation.get("content_file")
         ):
-            content_path = _content_file(plan_path, raw_operation)
-            content = content_path.read_bytes()
+            content_path = _content_file(plan_path, raw_operation, bundle_contents)
+            content = (
+                bundle_contents[content_path]
+                if bundle_contents is not None
+                else content_path.read_bytes()
+            )
             if not _frontmatter_ok(content):
                 raise PlanError(f"operation {index} content has invalid frontmatter")
             operation["content_file"] = content_path
@@ -810,8 +877,14 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                     f"plan must update source note for {source['source_id']}"
                 )
             try:
-                preserves_source_id = source_note_has_id(
-                    source_updates[0]["content_file"], source["source_id"]
+                content_path = source_updates[0]["content_file"]
+                content = (
+                    bundle_contents[content_path]
+                    if bundle_contents is not None
+                    else content_path.read_bytes()
+                )
+                preserves_source_id = source_note_bytes_have_id(
+                    content, source["source_id"]
                 )
             except IngestError as exc:
                 raise PlanError(f"proposed source note is invalid: {exc}") from exc
@@ -856,13 +929,20 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             if operation["action"] == "delete":
                 proposed_by_path[operation["path"]] = None
             elif operation["action"] in {"create", "update"}:
-                proposed_by_path[operation["path"]] = operation[
-                    "content_file"
-                ].read_bytes()
+                content_path = operation["content_file"]
+                proposed_by_path[operation["path"]] = (
+                    bundle_contents[content_path]
+                    if bundle_contents is not None
+                    else content_path.read_bytes()
+                )
             elif operation["action"] == "rename":
                 proposed_by_path[operation["from"]] = None
                 proposed_by_path[operation["path"]] = (
-                    operation["content_file"].read_bytes()
+                    (
+                        bundle_contents[operation["content_file"]]
+                        if bundle_contents is not None
+                        else operation["content_file"].read_bytes()
+                    )
                     if operation.get("content_file")
                     else operation["from"].read_bytes()
                 )
@@ -916,6 +996,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 for operation in normalized
                 if not operation.get("capture_artifact")
             ],
+            bundle_contents,
         )
     except ObsidianValidationError as exc:
         raise PlanError(str(exc)) from exc
@@ -1083,7 +1164,11 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         risks.append("autonomous_repair")
     if policy.review_all_semantic_transactions and not risks:
         risks.append("vault_policy")
-    history = _review_history(plan_path.parent / "review-history.json")
+    history = (
+        _review_history_snapshot(bundle.review_history_bytes)
+        if bundle is not None
+        else _review_history(plan_path.parent / "review-history.json")
+    )
     _, rejection_count = _validate_review_history(history)
     if history and not risks:
         risks.append("review_history")
@@ -1093,8 +1178,15 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         for operation in normalized
         if operation.get("content_file")
     ]
-    plan_bytes = plan_path.read_bytes()
-    content_snapshots = {path: path.read_bytes() for path in content_paths}
+    plan_bytes = bundle.plan_bytes if bundle is not None else plan_path.read_bytes()
+    content_snapshots = {
+        path: (
+            bundle_contents[path]
+            if bundle_contents is not None
+            else path.read_bytes()
+        )
+        for path in content_paths
+    }
     governance_sha256 = _governance_digest_snapshot(
         plan_path,
         plan_bytes,
@@ -1152,12 +1244,25 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         raise PlanError(str(exc)) from exc
     transaction_sha256 = _transaction_digest(governance_sha256, review_packet)
     revision_limit_exhausted = rejection_count > policy.max_revision_rounds
-    approval_valid, approval_path = _assessment_status(
-        plan_path.parent,
-        transaction_sha256,
-        review_packet,
-        history,
-    )
+    if bundle is None:
+        approval_valid, approval_path = _assessment_status(
+            plan_path.parent,
+            transaction_sha256,
+            review_packet,
+            history,
+        )
+    else:
+        approval_valid = _assessment_status_snapshot(
+            bundle.assessment_bytes,
+            transaction_sha256,
+            review_packet,
+            history,
+        )
+        approval_path = (
+            str(plan_path.parent / "assessment.json")
+            if bundle.assessment_bytes is not None
+            else None
+        )
     return {
         "status": "valid",
         "transaction_id": transaction_id,
@@ -1167,7 +1272,7 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         "retrieval": retrieval,
         "index_freshness": index_freshness,
         "source_ids": [item["source_id"] for item in source_evidence],
-        "plan_sha256": _plan_hash(plan_path),
+        "plan_sha256": _sha256_bytes(plan_bytes),
         "governance_sha256": governance_sha256,
         "transaction_sha256": transaction_sha256,
         "semantic_review_packet": review_packet,
@@ -1187,18 +1292,28 @@ def validate_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     }
 
 
-def _review_history(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
+def _review_history_snapshot(content: bytes | None) -> list[dict[str, Any]]:
+    if content is None:
         return []
     try:
-        history = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        history = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PlanError("invalid review history") from exc
     if not isinstance(history, list) or not all(
         isinstance(entry, dict) for entry in history
     ):
         raise PlanError("review history must be an array")
     return history
+
+
+def _review_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise PlanError("unable to read review history") from exc
+    return _review_history_snapshot(content)
 
 
 def _validate_review_history(
@@ -1269,62 +1384,85 @@ def record_review(
     assessment_path: Path,
 ) -> dict[str, Any]:
     """Validate and record a structured decision for the current review packet."""
+    vault = load_vault_path(config)
     plan_path = plan_path.expanduser().resolve()
-    validation = validate_plan(config, plan_path)
     assessment_path = assessment_path.expanduser().resolve()
-    assessment = _read_json(assessment_path, "semantic review assessment")
-    transaction_sha256 = validation["transaction_sha256"]
-    policy = review_policy(config)
-    history_path = plan_path.parent / "review-history.json"
-    history = _review_history(history_path)
-    rejected_digests, rejection_count = _validate_review_history(history)
-    if rejection_count > policy.max_revision_rounds:
-        raise PlanError(
-            "review revision limit exhausted; preserve the unapplied plan for inspection"
+    with vault_write_lock(vault):
+        bundle = _freeze_plan_bundle(config, plan_path)
+        validation = validate_plan(config, plan_path, bundle=bundle)
+        if _freeze_plan_bundle(config, plan_path).request_sha256 != bundle.request_sha256:
+            raise PlanError("plan bundle changed during review validation")
+        assessment = _read_json(assessment_path, "semantic review assessment")
+        transaction_sha256 = validation["transaction_sha256"]
+        policy = review_policy(config)
+        history_path = plan_path.parent / "review-history.json"
+        history = _review_history_snapshot(bundle.review_history_bytes)
+        rejected_digests, rejection_count = _validate_review_history(history)
+        if rejection_count > policy.max_revision_rounds:
+            raise PlanError(
+                "review revision limit exhausted; preserve the unapplied plan for inspection"
+            )
+        if transaction_sha256 in rejected_digests:
+            raise PlanError("plan and proposed content must change after rejection")
+        prior_instance_ids = {
+            entry["assessment"]["instance_id"] for entry in history
+        }
+        try:
+            validate_assessment(
+                assessment,
+                validation["semantic_review_packet"],
+                prior_instance_ids=prior_instance_ids,
+            )
+        except ReviewError as exc:
+            raise PlanError(str(exc)) from exc
+        entry = {
+            "schema_version": 2,
+            "plan_sha256": validation["plan_sha256"],
+            "transaction_sha256": transaction_sha256,
+            "review_packet_sha256": validation["review_packet_sha256"],
+            "assessment": assessment,
+            "review_policy": {
+                "review_all_semantic_transactions": policy.review_all_semantic_transactions,
+                "max_revision_rounds": policy.max_revision_rounds,
+            },
+            "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        history.append(entry)
+        stored_assessment_path = plan_path.parent / "assessment.json"
+        _atomic_write(
+            stored_assessment_path,
+            (json.dumps(assessment, ensure_ascii=False, indent=2) + "\n").encode(
+                "utf-8"
+            ),
         )
-    if transaction_sha256 in rejected_digests:
-        raise PlanError("plan and proposed content must change after rejection")
-    prior_instance_ids = {
-        entry["assessment"]["instance_id"] for entry in history
-    }
-    try:
-        validate_assessment(
-            assessment,
-            validation["semantic_review_packet"],
-            prior_instance_ids=prior_instance_ids,
-        )
-    except ReviewError as exc:
-        raise PlanError(str(exc)) from exc
-    entry = {
-        "schema_version": 2,
-        "plan_sha256": validation["plan_sha256"],
-        "transaction_sha256": transaction_sha256,
-        "review_packet_sha256": validation["review_packet_sha256"],
-        "assessment": assessment,
-        "review_policy": {
-            "review_all_semantic_transactions": policy.review_all_semantic_transactions,
-            "max_revision_rounds": policy.max_revision_rounds,
-        },
-        "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    history.append(entry)
-    _atomic_write(
-        history_path,
-        (json.dumps(history, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-    )
-    stored_assessment_path = plan_path.parent / "assessment.json"
-    _atomic_write(
-        stored_assessment_path,
-        (json.dumps(assessment, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-    )
-    return {
-        "assessment_path": str(stored_assessment_path),
-        "review_history": str(history_path),
-        "remaining_revision_rounds": max(
-            0, policy.max_revision_rounds - rejection_count
-        ),
-        **entry,
-    }
+        try:
+            _atomic_write(
+                history_path,
+                (json.dumps(history, ensure_ascii=False, indent=2) + "\n").encode(
+                    "utf-8"
+                ),
+            )
+        except Exception as exc:
+            try:
+                if bundle.assessment_bytes is None:
+                    stored_assessment_path.unlink(missing_ok=True)
+                else:
+                    _atomic_write(stored_assessment_path, bundle.assessment_bytes)
+            except Exception as rollback_exc:
+                raise PlanError(
+                    "unable to record review history; assessment rollback also failed"
+                ) from rollback_exc
+            raise PlanError(
+                "unable to record review history; assessment was rolled back"
+            ) from exc
+        return {
+            "assessment_path": str(stored_assessment_path),
+            "review_history": str(history_path),
+            "remaining_revision_rounds": max(
+                0, policy.max_revision_rounds - rejection_count
+            ),
+            **entry,
+        }
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
@@ -1345,13 +1483,34 @@ def _install_staged(
         staging_path.unlink(missing_ok=True)
 
 
-def _plan_request_identity(
+def _optional_regular_bytes(path: Path, label: str) -> bytes | None:
+    if path.is_symlink():
+        raise PlanError(f"{label} must be a regular file")
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise PlanError(f"{label} must be a regular file")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise PlanError(f"unable to read {label}") from exc
+
+
+def _freeze_plan_bundle(
     config: dict[str, Any],
     plan_path: Path,
-) -> tuple[str, str]:
-    """Hash the immutable apply request without depending on current vault state."""
+) -> PlanBundle:
+    """Read all plan-controlled bytes once for validation and application."""
     plan_path = plan_path.expanduser().resolve()
-    plan = _read_json(plan_path, "plan")
+    try:
+        plan_bytes = plan_path.read_bytes()
+        plan = json.loads(plan_bytes)
+    except FileNotFoundError as exc:
+        raise PlanError("plan not found") from exc
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlanError("invalid plan") from exc
+    if not isinstance(plan, dict):
+        raise PlanError("plan must be a JSON object")
     transaction_id = plan.get("transaction_id")
     if not isinstance(transaction_id, str) or not TRANSACTION_ID_PATTERN.fullmatch(
         transaction_id
@@ -1359,20 +1518,31 @@ def _plan_request_identity(
         raise PlanError("invalid transaction_id")
     digest = hashlib.sha256()
     digest.update(b"plan\0")
-    digest.update(plan_path.read_bytes())
+    digest.update(plan_bytes)
+    content_snapshots: list[tuple[Path, bytes]] = []
     for content_path in _proposed_content_paths(plan_path, plan):
+        try:
+            content = content_path.read_bytes()
+        except OSError as exc:
+            raise PlanError("unable to read proposed content") from exc
+        content_snapshots.append((content_path, content))
         digest.update(b"content\0")
         digest.update(
             content_path.relative_to(plan_path.parent).as_posix().encode("utf-8")
         )
         digest.update(b"\0")
-        digest.update(content_path.read_bytes())
-    for name in ("assessment.json", "review-history.json"):
-        path = plan_path.parent / name
+        digest.update(content)
+    optional: dict[str, bytes | None] = {}
+    for name, label in (
+        ("assessment.json", "semantic review assessment"),
+        ("review-history.json", "review history"),
+    ):
+        content = _optional_regular_bytes(plan_path.parent / name, label)
+        optional[name] = content
         digest.update(name.encode("ascii"))
         digest.update(b"\0")
-        if path.is_file():
-            digest.update(path.read_bytes())
+        if content is not None:
+            digest.update(content)
     config_keys = [
         "semantic",
         "sources",
@@ -1387,37 +1557,55 @@ def _plan_request_identity(
     relevant_config = {key: config.get(key, {}) for key in config_keys}
     digest.update(b"config\0")
     digest.update(canonical_json(relevant_config))
-    return transaction_id, digest.hexdigest()
+    return PlanBundle(
+        plan_path=plan_path,
+        transaction_id=transaction_id,
+        plan_bytes=plan_bytes,
+        content_snapshots=tuple(content_snapshots),
+        assessment_bytes=optional["assessment.json"],
+        review_history_bytes=optional["review-history.json"],
+        request_sha256=digest.hexdigest(),
+    )
+
+
+def _plan_request_identity(
+    config: dict[str, Any],
+    plan_path: Path,
+) -> tuple[str, str]:
+    bundle = _freeze_plan_bundle(config, plan_path)
+    return bundle.transaction_id, bundle.request_sha256
 
 
 def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     """Apply a validated plan atomically and archive its audit record."""
     vault = load_vault_path(config)
-    transaction_id, request_sha256 = _plan_request_identity(config, plan_path)
     git_dir = _git_dir(vault)
-    try:
-        existing = inspect_journaled_mutation(
-            vault=vault,
-            git_dir=git_dir,
-            operation="semantic_plan",
-            transaction_id=transaction_id,
-            transaction_sha256=None,
-            request_sha256=request_sha256,
-        )
-    except MutationError as exc:
-        raise PlanError(str(exc)) from exc
-    if existing is not None:
-        return mutation_response(existing, applied_status="applied")
     with vault_write_lock(vault):
+        bundle = _freeze_plan_bundle(config, plan_path)
+        try:
+            existing = inspect_journaled_mutation(
+                vault=vault,
+                git_dir=git_dir,
+                operation="semantic_plan",
+                transaction_id=bundle.transaction_id,
+                transaction_sha256=None,
+                request_sha256=bundle.request_sha256,
+                lock=False,
+            )
+        except MutationError as exc:
+            raise PlanError(str(exc)) from exc
+        if existing is not None:
+            return mutation_response(existing, applied_status="applied")
         require_clean_git_root(vault)
-        validation = validate_plan(config, plan_path)
+        validation = validate_plan(config, plan_path, bundle=bundle)
+        verified_bundle = _freeze_plan_bundle(config, plan_path)
+        if verified_bundle.request_sha256 != bundle.request_sha256:
+            raise PlanError("plan bundle changed during validation")
+        if validation["transaction_id"] != bundle.transaction_id:
+            raise PlanError("plan bundle transaction changed during validation")
         frozen_plan_path = validation["plan_path"]
-        plan_bytes = frozen_plan_path.read_bytes()
-        content_snapshots = {
-            operation["content_file"]: operation["content_file"].read_bytes()
-            for operation in validation["operations"]
-            if operation.get("content_file")
-        }
+        plan_bytes = bundle.plan_bytes
+        content_snapshots = dict(bundle.content_snapshots)
         promotions = [
             operation
             for operation in validation["operations"]
@@ -1444,23 +1632,19 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         )
         if transaction_sha256 != validation["transaction_sha256"]:
             raise PlanError("plan or proposed content changed during validation")
-        assessment_path = frozen_plan_path.parent / "assessment.json"
-        assessment_bytes = (
-            assessment_path.read_bytes() if assessment_path.is_file() else None
-        )
-        review_history_path = frozen_plan_path.parent / "review-history.json"
-        review_history_bytes = (
-            review_history_path.read_bytes() if review_history_path.is_file() else None
-        )
-        if validation["revision_limit_exhausted"]:
+        assessment_bytes = bundle.assessment_bytes
+        review_history_bytes = bundle.review_history_bytes
+        frozen_history = _review_history_snapshot(bundle.review_history_bytes)
+        _, rejection_count = _validate_review_history(frozen_history)
+        if rejection_count > review_policy(config).max_revision_rounds:
             raise PlanError(
                 "review revision limit exceeded under the configured vault policy"
             )
-        approval_valid, _assessment_record_path = _assessment_status(
-            frozen_plan_path.parent,
+        approval_valid = _assessment_status_snapshot(
+            bundle.assessment_bytes,
             transaction_sha256,
             validation["semantic_review_packet"],
-            _review_history(review_history_path),
+            frozen_history,
         )
         if validation["approval_required"] and not approval_valid:
             raise PlanError(
@@ -1719,7 +1903,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 git_dir=git_dir,
                 transaction_id=validation["transaction_id"],
                 transaction_sha256=validation["transaction_sha256"],
-                request_sha256=request_sha256,
+                request_sha256=bundle.request_sha256,
                 operation="semantic_plan",
                 receipt_data=result,
                 affected=affected,

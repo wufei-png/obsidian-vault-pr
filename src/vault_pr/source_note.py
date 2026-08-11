@@ -17,15 +17,14 @@ import yaml
 from .config import source_notes_dir
 from .errors import IngestError
 
-def source_note_has_id(path: Path, source_id: str) -> bool:
-    """Check the exact source_id property in one visible source note."""
-    if path.is_symlink() or not path.is_file():
-        raise IngestError("source note is not a regular file")
+
+def source_note_bytes_have_id(content: bytes, source_id: str) -> bool:
+    """Check the exact source_id property in frozen source-note bytes."""
     try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise IngestError("unable to inspect source note") from exc
-    lines = content.splitlines()
+    lines = text.splitlines()
     if not lines or lines[0] != "---":
         return False
     end = next(
@@ -39,6 +38,17 @@ def source_note_has_id(path: Path, source_id: str) -> bool:
     except yaml.YAMLError as exc:
         raise IngestError("source note has invalid frontmatter") from exc
     return isinstance(frontmatter, dict) and frontmatter.get("source_id") == source_id
+
+
+def source_note_has_id(path: Path, source_id: str) -> bool:
+    """Check the exact source_id property in one visible source note."""
+    if path.is_symlink() or not path.is_file():
+        raise IngestError("source note is not a regular file")
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise IngestError("unable to inspect source note") from exc
+    return source_note_bytes_have_id(content, source_id)
 
 
 def resolve_source_note(

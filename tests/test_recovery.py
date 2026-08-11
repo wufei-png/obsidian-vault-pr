@@ -8,7 +8,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import vault_pr.recovery as recovery_module
 from vault_pr.recovery import (
     RecoveryError,
     commit_applied_transaction,
@@ -500,6 +502,54 @@ class RecoveryTests(unittest.TestCase):
             ).stdout.split()[0]
             self.assertEqual(mode, "100755")
 
+    def test_commit_supports_transaction_as_first_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.name", "Test"],
+                check=True,
+            )
+            created = vault / "knowledgebase" / "created.md"
+            active = prepare_active_transaction(
+                vault=vault,
+                git_dir=vault / ".git",
+                transaction_id="txn_first_commit_cas_fixture",
+                transaction_sha256="a" * 64,
+                affected={created},
+                expected_original_sha256={created: None},
+                expected_original_mode={created: None},
+                final_sha256={created: digest(b"created\n")},
+                final_mode={created: "100644"},
+            )
+            created.parent.mkdir(parents=True)
+            created.write_bytes(b"created\n")
+            mark_active_applied(active)
+
+            result = commit_applied_transaction(
+                vault,
+                vault / ".git",
+                "txn_first_commit_cas_fixture",
+                "First governed commit",
+            )
+
+            self.assertEqual(result["status"], "committed_and_finalized")
+            self.assertFalse(active.exists())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(vault), "log", "-1", "--format=%s"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                "First governed commit",
+            )
+
     def test_commit_validates_content_through_configured_clean_filter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -840,31 +890,145 @@ else:
             )
             self.assertTrue(active.exists())
 
-    def test_failed_commit_unstages_transaction_paths_for_retry(self) -> None:
+    def test_commit_bypasses_non_governance_commit_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault, _existing, _created, active = self.prepare_interrupted(
                 Path(temp_dir)
             )
             mark_active_applied(active)
-            hook = vault / ".git" / "hooks" / "pre-commit"
-            hook.write_text("#!/bin/sh\nexit 1\n")
+            marker = vault / "hook-ran"
+            for name in ("pre-commit", "commit-msg"):
+                hook = vault / ".git" / "hooks" / name
+                hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+                hook.chmod(0o755)
+
+            result = commit_applied_transaction(
+                vault,
+                vault / ".git",
+                "txn_recovery_fixture",
+                "Governed fixture",
+            )
+
+            self.assertEqual(result["status"], "committed_and_finalized")
+            self.assertEqual(result["post_commit_hook"], "not_configured")
+            self.assertFalse(marker.exists())
+            self.assertFalse(active.exists())
+
+    def test_post_commit_failure_is_reported_without_rolling_back_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, _existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            mark_active_applied(active)
+            marker = vault / "post-commit-ran"
+            hook = vault / ".git" / "hooks" / "post-commit"
+            hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
             hook.chmod(0o755)
 
-            with self.assertRaisesRegex(RecoveryError, "unable to commit"):
-                commit_applied_transaction(
-                    vault,
-                    vault / ".git",
-                    "txn_recovery_fixture",
-                    "Blocked fixture",
-                )
-
-            staged = subprocess.run(
-                ["git", "-C", str(vault), "diff", "--cached", "--name-only"],
-                check=True,
-                capture_output=True,
-                text=True,
+            result = commit_applied_transaction(
+                vault,
+                vault / ".git",
+                "txn_recovery_fixture",
+                "Commit despite reporting hook failure",
             )
-            self.assertEqual(staged.stdout, "")
+
+            self.assertEqual(result["status"], "committed_and_finalized")
+            self.assertEqual(result["post_commit_hook"], "failed")
+            self.assertTrue(marker.exists())
+            self.assertFalse(active.exists())
+
+    def test_commit_ref_cas_never_overwrites_concurrent_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, _existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            mark_active_applied(active)
+            real_run_git = recovery_module.run_git
+            base_commit = real_run_git(vault, "rev-parse", "HEAD").stdout.strip()
+            raced = False
+
+            def race_update_ref(path: Path, *args: str):
+                nonlocal raced
+                if not raced and args[:2] == ("update-ref", "HEAD"):
+                    raced = True
+                    tree = real_run_git(
+                        path, "rev-parse", f"{base_commit}^{{tree}}"
+                    ).stdout.strip()
+                    concurrent = real_run_git(
+                        path,
+                        "commit-tree",
+                        tree,
+                        "-p",
+                        base_commit,
+                        "-m",
+                        "Concurrent commit",
+                    ).stdout.strip()
+                    advanced = real_run_git(
+                        path, "update-ref", "HEAD", concurrent, base_commit
+                    )
+                    self.assertEqual(advanced.returncode, 0)
+                return real_run_git(path, *args)
+
+            with patch("vault_pr.recovery.run_git", side_effect=race_update_ref):
+                with self.assertRaisesRegex(RecoveryError, "commit CAS"):
+                    commit_applied_transaction(
+                        vault,
+                        vault / ".git",
+                        "txn_recovery_fixture",
+                        "Losing transaction commit",
+                    )
+
+            subject = real_run_git(
+                vault, "log", "-1", "--format=%s"
+            ).stdout.strip()
+            self.assertEqual(subject, "Concurrent commit")
+            self.assertTrue(active.exists())
+            self.assertFalse((active / "commit-index").exists())
+
+    def test_commit_rollback_preserves_concurrent_worktree_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            mark_active_applied(active)
+            real_run_git = recovery_module.run_git
+            base_commit = real_run_git(vault, "rev-parse", "HEAD").stdout.strip()
+            edited = False
+
+            def edit_after_cas(path: Path, *args: str):
+                nonlocal edited
+                result = real_run_git(path, *args)
+                if (
+                    not edited
+                    and args[:2] == ("update-ref", "HEAD")
+                    and result.returncode == 0
+                ):
+                    edited = True
+                    existing.write_bytes(b"external edit\n")
+                return result
+
+            with patch("vault_pr.recovery.run_git", side_effect=edit_after_cas):
+                with self.assertRaisesRegex(
+                    RecoveryError, "index synchronization failed"
+                ):
+                    commit_applied_transaction(
+                        vault,
+                        vault / ".git",
+                        "txn_recovery_fixture",
+                        "Transaction racing a worktree edit",
+                    )
+
+            self.assertEqual(existing.read_bytes(), b"external edit\n")
+            self.assertEqual(
+                real_run_git(vault, "rev-parse", "HEAD").stdout.strip(),
+                base_commit,
+            )
+            self.assertEqual(
+                real_run_git(
+                    vault, "diff", "--cached", "--name-only"
+                ).stdout,
+                "",
+            )
             self.assertTrue(active.exists())
 
     def test_removes_incomplete_prepare_only_when_vault_is_clean(self) -> None:

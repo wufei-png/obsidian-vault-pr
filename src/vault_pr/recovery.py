@@ -180,11 +180,35 @@ def _git_status_paths(vault: Path) -> tuple[set[str], set[str]]:
     return _parse_git_status_paths(status.stdout)
 
 
-def _git_index_file_oid(vault: Path, relative: str) -> str | None:
-    result = subprocess.run(
-        ["git", "-C", str(vault), "ls-files", "--stage", "-z", "--", relative],
+def _run_git_with_index(
+    vault: Path,
+    index_path: Path,
+    *args: str,
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["GIT_INDEX_FILE"] = str(index_path)
+    return subprocess.run(
+        ["git", "-C", str(vault), *args],
         check=False,
         capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
+def _git_index_file_oid(
+    vault: Path, relative: str, *, index_path: Path | None = None
+) -> str | None:
+    command = ["ls-files", "--stage", "-z", "--", relative]
+    result = subprocess.run(
+        ["git", "-C", str(vault), *command],
+        check=False,
+        capture_output=True,
+        env=(
+            {**os.environ, "GIT_INDEX_FILE": str(index_path)}
+            if index_path is not None
+            else None
+        ),
     )
     if result.returncode != 0:
         raise RecoveryError(f"unable to inspect staged blob: {relative}")
@@ -199,11 +223,19 @@ def _git_index_file_oid(vault: Path, relative: str) -> str | None:
     return fields[1].decode("ascii")
 
 
-def _git_index_file_mode(vault: Path, relative: str) -> str | None:
+def _git_index_file_mode(
+    vault: Path, relative: str, *, index_path: Path | None = None
+) -> str | None:
+    command = ["ls-files", "--stage", "-z", "--", relative]
     result = subprocess.run(
-        ["git", "-C", str(vault), "ls-files", "--stage", "-z", "--", relative],
+        ["git", "-C", str(vault), *command],
         check=False,
         capture_output=True,
+        env=(
+            {**os.environ, "GIT_INDEX_FILE": str(index_path)}
+            if index_path is not None
+            else None
+        ),
     )
     if result.returncode != 0:
         raise RecoveryError(f"unable to inspect staged mode: {relative}")
@@ -907,13 +939,63 @@ def finalize_applied_transaction(
         return _finalize_active_transaction_unlocked(vault, active_dir.resolve())
 
 
+def _temporary_index_paths(
+    vault: Path, index_path: Path, base_commit: str | None
+) -> set[str]:
+    if base_commit is None:
+        result = _run_git_with_index(vault, index_path, "ls-files", "-z")
+    else:
+        result = _run_git_with_index(
+            vault,
+            index_path,
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            base_commit,
+        )
+    if result.returncode != 0:
+        raise RecoveryError("unable to inspect temporary transaction index")
+    return {path for path in result.stdout.split("\0") if path}
+
+
+def _rollback_committed_ref(
+    vault: Path, base_commit: str | None, commit_oid: str
+) -> bool:
+    if base_commit is None:
+        rolled_back = run_git(vault, "update-ref", "-d", "HEAD", commit_oid)
+    else:
+        rolled_back = run_git(
+            vault,
+            "update-ref",
+            "HEAD",
+            base_commit,
+            commit_oid,
+        )
+    return rolled_back.returncode == 0
+
+
+def _run_post_commit_hook(vault: Path) -> str:
+    hook_path_result = run_git(vault, "rev-parse", "--git-path", "hooks/post-commit")
+    if hook_path_result.returncode != 0:
+        return "lookup_failed"
+    hook_path = Path(hook_path_result.stdout.strip())
+    if not hook_path.is_absolute():
+        hook_path = vault / hook_path
+    if not hook_path.is_file() or not os.access(hook_path, os.X_OK):
+        return "not_configured"
+    hook = run_git(vault, "hook", "run", "post-commit")
+    return "passed" if hook.returncode == 0 else "failed"
+
+
 def commit_applied_transaction(
     vault: Path,
     git_dir: Path,
     transaction_id: str,
     message: str,
 ) -> dict[str, Any]:
-    """Stage exact journal paths, commit them under lock, and finalize."""
+    """Commit an exact temporary-index tree with an expected-old ref CAS."""
     vault = vault.resolve()
     git_dir = git_dir.resolve()
     if not TRANSACTION_ID_PATTERN.fullmatch(transaction_id):
@@ -929,6 +1011,11 @@ def commit_applied_transaction(
         journal = _read_journal(vault, active_dir)
         if journal.get("phase") != "applied":
             raise RecoveryError("transaction has not reached the applied phase")
+        base_commit = journal.get("base_commit")
+        if base_commit is not None and not isinstance(base_commit, str):
+            raise RecoveryError("recovery journal contains an invalid base commit")
+        if _head_commit(vault) != base_commit:
+            raise RecoveryError("vault HEAD changed since transaction prepare")
         entries = _validated_entries(vault, active_dir, journal)
         expected_paths: set[str] = set()
         final_by_path: dict[str, tuple[str | None, str | None]] = {}
@@ -960,45 +1047,141 @@ def commit_applied_transaction(
                 "unrelated staged changes block commit: " + ", ".join(unexpected_staged)
             )
 
-        added = run_git(vault, "add", "--all", "--", *sorted(expected_paths))
-        if added.returncode != 0:
-            detail = (added.stderr or added.stdout).strip()
-            raise RecoveryError(f"unable to stage transaction paths: {detail}")
-        _dirty_after, staged_after = _git_status_paths(vault)
-        if staged_after != expected_paths:
-            extra = sorted(staged_after - expected_paths)
-            missing = sorted(expected_paths - staged_after)
-            details = []
-            if extra:
-                details.append("extra=" + ", ".join(extra))
-            if missing:
-                details.append("missing=" + ", ".join(missing))
-            raise RecoveryError(
-                "staged paths do not match transaction journal: " + "; ".join(details)
+        index_path = active_dir / "commit-index"
+        index_lock_path = active_dir / "commit-index.lock"
+        for temporary_path in (index_path, index_lock_path):
+            if temporary_path.is_symlink() or (
+                temporary_path.exists() and not temporary_path.is_file()
+            ):
+                raise RecoveryError("temporary transaction index is unsafe")
+            temporary_path.unlink(missing_ok=True)
+        try:
+            initialized = _run_git_with_index(
+                vault,
+                index_path,
+                "read-tree",
+                base_commit if base_commit is not None else "--empty",
             )
-        for relative, (final, final_mode) in final_by_path.items():
-            if _git_index_file_oid(vault, relative) != _git_worktree_blob_oid(
-                vault, relative
-            ) or _git_index_file_mode(vault, relative) != final_mode:
+            if initialized.returncode != 0:
+                raise RecoveryError("unable to initialize temporary transaction index")
+            added = _run_git_with_index(
+                vault,
+                index_path,
+                "add",
+                "--all",
+                "--",
+                *sorted(expected_paths),
+            )
+            if added.returncode != 0:
+                detail = (added.stderr or added.stdout).strip()
+                raise RecoveryError(f"unable to stage transaction paths: {detail}")
+            staged_after = _temporary_index_paths(vault, index_path, base_commit)
+            if staged_after != expected_paths:
+                extra = sorted(staged_after - expected_paths)
+                missing = sorted(expected_paths - staged_after)
+                details = []
+                if extra:
+                    details.append("extra=" + ", ".join(extra))
+                if missing:
+                    details.append("missing=" + ", ".join(missing))
                 raise RecoveryError(
-                    f"staged state does not match transaction journal: {relative}"
+                    "temporary index paths do not match transaction journal: "
+                    + "; ".join(details)
                 )
-
-        committed = run_git(vault, "commit", "-m", message)
-        if committed.returncode != 0:
-            detail = (committed.stderr or committed.stdout).strip()
-            try:
-                _unstage_paths(vault, expected_paths)
-            except RecoveryError as unstage_exc:
+            for relative, (final, final_mode) in final_by_path.items():
+                if _git_index_file_oid(
+                    vault,
+                    relative,
+                    index_path=index_path,
+                ) != _git_worktree_blob_oid(
+                    vault, relative
+                ) or _git_index_file_mode(
+                    vault,
+                    relative,
+                    index_path=index_path,
+                ) != final_mode:
+                    raise RecoveryError(
+                        f"temporary index state does not match journal: {relative}"
+                    )
+            tree = _run_git_with_index(vault, index_path, "write-tree")
+            tree_oid = tree.stdout.strip()
+            if tree.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", tree_oid):
+                raise RecoveryError("unable to write transaction tree")
+            commit_args = ["commit-tree", tree_oid]
+            if base_commit is not None:
+                commit_args.extend(["-p", base_commit])
+            commit_args.extend(["-m", message])
+            committed = run_git(vault, *commit_args)
+            commit_oid = committed.stdout.strip()
+            if committed.returncode != 0 or not re.fullmatch(
+                r"[0-9a-f]{40,64}", commit_oid
+            ):
+                detail = (committed.stderr or committed.stdout).strip()
+                raise RecoveryError(f"unable to create transaction commit: {detail}")
+            expected_old = base_commit or ("0" * len(commit_oid))
+            updated = run_git(
+                vault,
+                "update-ref",
+                "HEAD",
+                commit_oid,
+                expected_old,
+            )
+            if updated.returncode != 0:
                 raise RecoveryError(
-                    f"unable to commit transaction: {detail}; {unstage_exc}"
-                ) from unstage_exc
-            raise RecoveryError(f"unable to commit transaction: {detail}")
+                    "vault HEAD changed before transaction commit CAS"
+                )
+            synchronized = run_git(
+                vault,
+                "reset",
+                "--quiet",
+                "HEAD",
+                "--",
+                *sorted(expected_paths),
+            )
+            if synchronized.returncode != 0 or not _git_is_clean(vault):
+                rolled_back = _rollback_committed_ref(vault, base_commit, commit_oid)
+                restored = False
+                if rolled_back:
+                    if base_commit is None:
+                        restored_index = run_git(
+                            vault,
+                            "rm",
+                            "--cached",
+                            "--quiet",
+                            "--ignore-unmatch",
+                            "--",
+                            *sorted(expected_paths),
+                        )
+                    else:
+                        restored_index = run_git(
+                            vault,
+                            "reset",
+                            "--quiet",
+                            "HEAD",
+                            "--",
+                            *sorted(expected_paths),
+                        )
+                    restored = restored_index.returncode == 0
+                details = []
+                if not rolled_back:
+                    details.append("ref rollback also failed")
+                elif not restored:
+                    details.append("index restoration also failed")
+                suffix = "; " + "; ".join(details) if details else ""
+                raise RecoveryError(
+                    "transaction commit succeeded but index synchronization failed"
+                    + suffix
+                )
+        finally:
+            index_path.unlink(missing_ok=True)
+            index_lock_path.unlink(missing_ok=True)
         finalized = _finalize_active_transaction_unlocked(vault, active_dir)
+        hook_status = _run_post_commit_hook(vault)
         return {
             **finalized,
             "status": "committed_and_finalized",
             "message": message,
+            "post_commit_hook": hook_status,
         }
 
 

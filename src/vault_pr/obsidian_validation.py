@@ -192,6 +192,7 @@ def _prospective_state(
     config: dict[str, Any],
     vault: Path,
     operations: list[dict[str, Any]],
+    content_snapshots: dict[Path, bytes] | None = None,
 ) -> tuple[dict[str, str], set[str]]:
     tracked = _listed_files(vault)
     contents = _markdown_contents(config, vault, tracked)
@@ -200,6 +201,24 @@ def _prospective_state(
         for relative in tracked
         if (vault / relative).is_file() and not (vault / relative).is_symlink()
     }
+
+    def proposed_text(path: Path) -> str:
+        try:
+            content = (
+                content_snapshots[path]
+                if content_snapshots is not None
+                else path.read_bytes()
+            )
+            return content.decode("utf-8")
+        except KeyError as exc:
+            raise ObsidianValidationError(
+                "proposed content is missing from the frozen plan bundle"
+            ) from exc
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ObsidianValidationError(
+                "proposed Markdown content is not readable UTF-8"
+            ) from exc
+
     for operation in operations:
         action = operation["action"]
         target = str(operation["path"].relative_to(vault))
@@ -211,14 +230,14 @@ def _prospective_state(
             source_content = contents.pop(source, None)
             existing_files.discard(source)
             if operation.get("content_file") is not None:
-                source_content = operation["content_file"].read_text(encoding="utf-8")
+                source_content = proposed_text(operation["content_file"])
             if source_content is not None:
                 contents[target] = source_content
             existing_files.add(target)
         else:
             content_file = operation.get("content_file")
             if content_file is not None:
-                contents[target] = content_file.read_text(encoding="utf-8")
+                contents[target] = proposed_text(content_file)
             existing_files.add(target)
     return contents, existing_files
 
@@ -422,6 +441,7 @@ def validate_proposed_obsidian_state(
     config: dict[str, Any],
     vault: Path,
     operations: list[dict[str, Any]],
+    content_snapshots: dict[Path, bytes] | None = None,
 ) -> dict[str, Any]:
     """Reject only reference defects newly introduced by a transaction."""
     tracked = _listed_files(vault)
@@ -437,7 +457,7 @@ def validate_proposed_obsidian_state(
         baseline_files,
     )
     prospective_contents, prospective_files = _prospective_state(
-        config, vault, operations
+        config, vault, operations, content_snapshots
     )
     modified_anchor_paths = {
         str(operation["path"].relative_to(vault))
