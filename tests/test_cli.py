@@ -5,10 +5,11 @@ import json
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
-from vault_pr.cli import build_parser, doctor
+from vault_pr.cli import build_parser, doctor, main
 from vault_pr.config import (
     ConfigError,
     index_spec,
@@ -35,7 +36,7 @@ class ConfigTests(unittest.TestCase):
         parser = build_parser()
         parsed = parser.parse_args(["ingest", "https://example.com/article"])
         self.assertFalse(hasattr(parsed, "domain"))
-        with self.assertRaises(SystemExit):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(
                 ["ingest", "https://example.com/article", "--domain", "tech"]
             )
@@ -52,8 +53,134 @@ class ConfigTests(unittest.TestCase):
         ]
         parsed = parser.parse_args(base_args)
         self.assertFalse(hasattr(parsed, "chain_id"))
-        with self.assertRaises(SystemExit):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args([*base_args, "--chain-id", "chain_example"])
+
+    def test_parser_errors_use_one_json_envelope(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+            build_parser().parse_args(["ingest"])
+
+        self.assertEqual(raised.exception.code, 2)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["command"], "cli")
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error"]["code"], "invalid_arguments")
+        self.assertIn("usage", payload["error"]["details"])
+
+    def test_unexpected_runtime_error_is_redacted_json_without_debug(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            config = Path(temp_dir) / "config.toml"
+            config.write_text(f'[vault]\npath = "{vault.resolve()}"\n')
+            output = io.StringIO()
+
+            with patch(
+                "vault_pr.cli.ingest_source",
+                side_effect=RuntimeError(f"secret failure at {vault}"),
+            ), redirect_stderr(output):
+                status = main(
+                    [
+                        "ingest",
+                        "https://example.com/article",
+                        "--config",
+                        str(config),
+                    ]
+                )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(status, 2)
+            self.assertEqual(payload["command"], "ingest")
+            self.assertEqual(payload["error"]["code"], "execution_error")
+            self.assertEqual(
+                payload["error"]["message"], "unexpected execution failure"
+            )
+            self.assertNotIn(str(vault), output.getvalue())
+
+    def test_debug_reraises_unexpected_runtime_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            config = Path(temp_dir) / "config.toml"
+            config.write_text(f'[vault]\npath = "{vault.resolve()}"\n')
+
+            with patch(
+                "vault_pr.cli.ingest_source",
+                side_effect=RuntimeError("debug fixture"),
+            ), self.assertRaisesRegex(RuntimeError, "debug fixture"):
+                main(
+                    [
+                        "--debug",
+                        "ingest",
+                        "https://example.com/article",
+                        "--config",
+                        str(config),
+                    ]
+                )
+
+    def test_transaction_subcommands_parse_stable_arguments(self) -> None:
+        parser = build_parser()
+
+        listed = parser.parse_args(["transaction", "list"])
+        shown = parser.parse_args(["transaction", "show", "txn_fixture"])
+        diffed = parser.parse_args(["transaction", "diff", "txn_fixture"])
+
+        self.assertEqual(listed.transaction_command, "list")
+        self.assertEqual(shown.transaction_id, "txn_fixture")
+        self.assertEqual(diffed.transaction_command, "diff")
+
+    def test_transaction_list_emits_success_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            config = Path(temp_dir) / "config.toml"
+            config.write_text(f'[vault]\npath = "{vault.resolve()}"\n')
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                status = main(
+                    ["transaction", "list", "--config", str(config)]
+                )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(status, 0)
+            self.assertEqual(payload["command"], "transaction.list")
+            self.assertEqual(payload["status"], "listed")
+            self.assertEqual(payload["data"]["transactions"], [])
+
+    def test_plan_init_rejects_half_of_authorization_request_pair_as_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            config = Path(temp_dir) / "config.toml"
+            config.write_text(f'[vault]\npath = "{vault.resolve()}"\n')
+            output = io.StringIO()
+
+            with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "plan",
+                        "init",
+                        "--summary",
+                        "Fixture plan",
+                        "--authorization-summary",
+                        "Fixture authority",
+                        "--request-ref",
+                        "request-1",
+                        "--config",
+                        str(config),
+                    ]
+                )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(raised.exception.code, 2)
+            self.assertEqual(payload["error"]["code"], "invalid_arguments")
+            self.assertIn("provided together", payload["error"]["message"])
 
     def test_loads_single_vault_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

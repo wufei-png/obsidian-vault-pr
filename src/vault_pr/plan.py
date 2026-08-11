@@ -238,6 +238,10 @@ def init_plan(
         "kind": authorization_kind,
         "summary": authorization_summary,
     }
+    if (request_ref is None) != (request_sha256 is None):
+        raise PlanError(
+            "authorization request_ref and request_sha256 must be provided together"
+        )
     if request_ref is not None or request_sha256 is not None:
         authorization["request_ref"] = request_ref
         authorization["request_sha256"] = request_sha256

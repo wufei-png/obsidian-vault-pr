@@ -573,10 +573,12 @@ def inspect_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]:
             raise RecoveryError(
                 f"prepared transaction path has an unexpected state: {entry['path']}"
             )
+    git_clean = _git_is_clean(vault)
+    head_commit = _head_commit(vault)
     commit_observed = (
         journal["phase"] == "applied"
-        and _git_is_clean(vault)
-        and _head_commit(vault) != journal.get("base_commit")
+        and git_clean
+        and head_commit != journal.get("base_commit")
     )
     return {
         "transaction_id": journal["transaction_id"],
@@ -585,7 +587,20 @@ def inspect_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]:
         "operation": journal["operation"],
         "phase": journal["phase"],
         "commit_observed": commit_observed,
+        "base_commit": journal.get("base_commit"),
+        "head_commit": head_commit,
+        "git_clean": git_clean,
         "completion_path": journal.get("completion_path"),
+        "files": [
+            {
+                "path": entry["path"],
+                "original_sha256": entry.get("original_sha256"),
+                "original_mode": entry.get("original_mode"),
+                "final_sha256": entry.get("final_sha256"),
+                "final_mode": entry.get("final_mode"),
+            }
+            for entry in journal["entries"]
+        ],
     }
 
 

@@ -40,6 +40,44 @@ from .tooling import (
     probe_defuddle_capabilities,
     probe_qmd_capabilities,
 )
+from .transaction import (
+    TransactionError,
+    diff_transaction,
+    list_transactions,
+    show_transaction,
+)
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    """Emit parser failures through the stable JSON protocol."""
+
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if (
+            getattr(parsed, "command", None) == "plan"
+            and getattr(parsed, "plan_command", None) == "init"
+            and (parsed.request_ref is None) != (parsed.request_sha256 is None)
+        ):
+            self.error(
+                "--request-ref and --request-sha256 must be provided together"
+            )
+        return parsed
+
+    def error(self, message: str) -> None:
+        emit(
+            error_envelope(
+                "cli",
+                "invalid_arguments",
+                message,
+                {"usage": self.format_usage().strip()},
+            ),
+            stream=sys.stderr,
+        )
+        self.exit(EXIT_ERROR)
 
 
 def doctor(config_path: Path) -> int:
@@ -184,7 +222,8 @@ def doctor(config_path: Path) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
-    parser = argparse.ArgumentParser(prog="vault-pr")
+    parser = JsonArgumentParser(prog="vault-pr")
+    parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor_parser = subparsers.add_parser(
         "doctor", help="check the configured target vault without modifying it"
@@ -385,6 +424,27 @@ def build_parser() -> argparse.ArgumentParser:
     commit_parser.add_argument(
         "--config", type=Path, default=Path("vault-pr.local.toml")
     )
+    transaction_parser = subparsers.add_parser(
+        "transaction", help="inspect governed transaction lifecycle state"
+    )
+    transaction_subparsers = transaction_parser.add_subparsers(
+        dest="transaction_command", required=True
+    )
+    transaction_list = transaction_subparsers.add_parser(
+        "list", help="list active and finalized transactions"
+    )
+    transaction_list.add_argument(
+        "--config", type=Path, default=Path("vault-pr.local.toml")
+    )
+    for name, help_text in (
+        ("show", "show one validated transaction state"),
+        ("diff", "show transaction path hash and mode transitions"),
+    ):
+        transaction_detail = transaction_subparsers.add_parser(name, help=help_text)
+        transaction_detail.add_argument("transaction_id")
+        transaction_detail.add_argument(
+            "--config", type=Path, default=Path("vault-pr.local.toml")
+        )
     return parser
 
 
@@ -425,6 +485,8 @@ def _exception_code(exc: Exception) -> str:
         return "migration_error"
     if isinstance(exc, CanaryError):
         return "canary_error"
+    if isinstance(exc, TransactionError):
+        return "transaction_error"
     return "execution_error"
 
 
@@ -439,7 +501,8 @@ def _emit_failure(command: str, exc: Exception) -> int:
             )
         )
         return EXIT_OK
-    emit(error_envelope(command, code, str(exc)), stream=sys.stderr)
+    message = "unexpected execution failure" if code == "execution_error" else str(exc)
+    emit(error_envelope(command, code, message), stream=sys.stderr)
     if code in {
         "maintenance_request_required",
         "review_required",
@@ -468,9 +531,21 @@ def _emit_success(
     return EXIT_OK if achieved else EXIT_NOT_ACHIEVED
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI."""
-    args = build_parser().parse_args(argv)
+def _command_name(args: argparse.Namespace) -> str:
+    if args.command == "migrate":
+        return f"migrate.{args.migrate_command.replace('-', '_')}"
+    if args.command == "quality":
+        return f"quality.{args.quality_command.replace('-', '_')}"
+    if args.command == "plan":
+        return f"plan.{args.plan_command}"
+    if args.command == "transaction":
+        return f"transaction.{args.transaction_command}"
+    if args.command == "index":
+        return "index.check" if args.check else "index.update"
+    return str(args.command)
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         return doctor(args.config)
     if args.command == "ingest":
@@ -667,7 +742,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (ConfigError, GitSafetyError, RecoveryError) as exc:
             return _emit_failure(command, exc)
         return _emit_success(command, result)
+    if args.command == "transaction":
+        command = f"transaction.{args.transaction_command}"
+        try:
+            config = load_config(args.config)
+            if args.transaction_command == "list":
+                result = list_transactions(config)
+            elif args.transaction_command == "show":
+                result = show_transaction(config, args.transaction_id)
+            elif args.transaction_command == "diff":
+                result = diff_transaction(config, args.transaction_id)
+            else:
+                raise AssertionError(
+                    f"unhandled transaction command: {args.transaction_command}"
+                )
+        except (ConfigError, GitSafetyError, TransactionError) as exc:
+            return _emit_failure(command, exc)
+        return _emit_success(command, result)
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI with one machine-readable failure boundary."""
+    args = build_parser().parse_args(argv)
+    try:
+        return _dispatch(args)
+    except Exception as exc:
+        if args.debug:
+            raise
+        return _emit_failure(_command_name(args), exc)
 
 
 if __name__ == "__main__":

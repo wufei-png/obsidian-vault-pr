@@ -8,6 +8,7 @@ import socket
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +29,7 @@ from vault_pr.acquisition import (
     snapshot_source,
 )
 from vault_pr.ingest import ingest_source
+from vault_pr.mutation import execute_journaled_mutation as execute_mutation
 from vault_pr.source_files import copy_snapshot_assets as _copy_snapshot_assets
 from vault_pr.source_note import (
     build_source_note,
@@ -973,6 +975,248 @@ class IngestTests(unittest.TestCase):
                 committed_retry["transaction_id"], first["transaction_id"]
             )
             self.assertFalse(committed_retry["requires_commit"])
+
+    def test_apply_adopts_valid_committed_capture_without_a_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.name", "Test"],
+                check=True,
+            )
+            config = make_config(vault)
+            with patch("vault_pr.ingest.fetch_url", return_value=markdown_fetch()):
+                first = ingest_url(
+                    config=config,
+                    url="https://example.com/article.md",
+                    apply=True,
+                )
+            commit_applied_transaction(
+                vault,
+                vault / ".git",
+                first["transaction_id"],
+                "Capture fixture source",
+            )
+            receipt = (
+                vault
+                / ".vault-pr"
+                / "transaction-receipts"
+                / f"{first['transaction_id']}.json"
+            )
+            receipt.unlink()
+            subprocess.run(
+                ["git", "-C", str(vault), "add", "--update", "--", str(receipt)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "Remove legacy receipt"],
+                check=True,
+            )
+            adoption_base = subprocess.run(
+                ["git", "-C", str(vault), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            refetched = replace(
+                markdown_fetch(),
+                captured_at="2026-07-15T01:00:00+00:00",
+            )
+            with patch("vault_pr.ingest.fetch_url", return_value=refetched):
+                adopted = ingest_url(
+                    config=config,
+                    url="https://example.com/article.md",
+                    apply=True,
+                )
+
+            self.assertEqual(adopted["status"], "adopted")
+            self.assertTrue(adopted["adopted_existing"])
+            self.assertEqual(adopted["adopted_from_commit"], adoption_base)
+            self.assertTrue(adopted["requires_commit"])
+            dirty = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+            self.assertEqual(len(dirty), 1)
+            self.assertIn(first["transaction_id"], dirty[0])
+
+            commit_applied_transaction(
+                vault,
+                vault / ".git",
+                adopted["transaction_id"],
+                "Adopt existing capture audit record",
+            )
+            with patch("vault_pr.ingest.fetch_url", return_value=refetched):
+                retried = ingest_url(
+                    config=config,
+                    url="https://example.com/article.md",
+                    apply=True,
+                )
+            self.assertEqual(retried["status"], "already_committed")
+            self.assertTrue(retried["adopted_existing"])
+
+    def test_adoption_rejects_capture_artifacts_not_tracked_in_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.name", "Test"],
+                check=True,
+            )
+            config = make_config(vault)
+            source = markdown_fetch()
+            with patch("vault_pr.ingest.fetch_url", return_value=source):
+                first = ingest_url(
+                    config=config,
+                    url="https://example.com/article.md",
+                    apply=True,
+                )
+            commit_applied_transaction(
+                vault,
+                vault / ".git",
+                first["transaction_id"],
+                "Capture fixture source",
+            )
+            receipt = (
+                vault
+                / ".vault-pr"
+                / "transaction-receipts"
+                / f"{first['transaction_id']}.json"
+            )
+            receipt.unlink()
+            capture_dir = vault / first["capture_dir"]
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "rm",
+                    "-qr",
+                    "--cached",
+                    "--",
+                    str(capture_dir),
+                ],
+                check=True,
+            )
+            (vault / ".gitignore").write_text(
+                f"/{first['capture_dir']}/\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "add", "--all"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "Legacy untracked capture"],
+                check=True,
+            )
+
+            with patch("vault_pr.ingest.fetch_url", return_value=source):
+                with self.assertRaisesRegex(IngestError, "match HEAD"):
+                    ingest_url(
+                        config=config,
+                        url="https://example.com/article.md",
+                        apply=True,
+                    )
+
+            self.assertFalse(receipt.exists())
+
+    def test_adoption_rejects_head_change_before_journal_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            vault.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "config", "user.name", "Test"],
+                check=True,
+            )
+            config = make_config(vault)
+            source = markdown_fetch()
+            with patch("vault_pr.ingest.fetch_url", return_value=source):
+                first = ingest_url(
+                    config=config,
+                    url="https://example.com/article.md",
+                    apply=True,
+                )
+            commit_applied_transaction(
+                vault,
+                vault / ".git",
+                first["transaction_id"],
+                "Capture fixture source",
+            )
+            receipt = (
+                vault
+                / ".vault-pr"
+                / "transaction-receipts"
+                / f"{first['transaction_id']}.json"
+            )
+            receipt.unlink()
+            subprocess.run(
+                ["git", "-C", str(vault), "add", "--update", "--", str(receipt)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-qm", "Remove legacy receipt"],
+                check=True,
+            )
+
+            def advance_head(**kwargs: object) -> dict[str, object]:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(vault),
+                        "commit",
+                        "--allow-empty",
+                        "-qm",
+                        "Concurrent head advance",
+                    ],
+                    check=True,
+                )
+                return execute_mutation(**kwargs)
+
+            with patch(
+                "vault_pr.ingest.fetch_url", return_value=source
+            ), patch(
+                "vault_pr.ingest.execute_journaled_mutation",
+                side_effect=advance_head,
+            ):
+                with self.assertRaisesRegex(IngestError, "HEAD changed"):
+                    ingest_url(
+                        config=config,
+                        url="https://example.com/article.md",
+                        apply=True,
+                    )
+
+            self.assertFalse(receipt.exists())
+            active_root = vault / ".git" / "vault-pr-active"
+            self.assertFalse(
+                active_root.exists() and any(active_root.iterdir())
+            )
 
     def test_same_capture_with_different_title_is_a_request_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

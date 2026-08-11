@@ -103,12 +103,35 @@ def _read_receipt(path: Path) -> dict[str, Any]:
         raise MutationError("transaction receipt is invalid") from exc
     if (
         not isinstance(receipt, dict)
+        or set(receipt)
+        != {
+            "schema_version",
+            "record_type",
+            "operation",
+            "transaction_id",
+            "transaction_sha256",
+            "request_sha256",
+            "completion_path",
+            "result",
+            "files",
+        }
         or receipt.get("schema_version") != _RECEIPT_SCHEMA_VERSION
         or receipt.get("record_type") != "vault_pr_transaction_receipt"
         or not isinstance(receipt.get("result"), dict)
         or not isinstance(receipt.get("files"), list)
     ):
         raise MutationError("transaction receipt schema is invalid")
+    completion_path = receipt.get("completion_path")
+    if completion_path is not None:
+        if not isinstance(completion_path, str):
+            raise MutationError("transaction receipt completion path is invalid")
+        relative = Path(completion_path)
+        if (
+            relative.is_absolute()
+            or relative == Path(".")
+            or ".." in relative.parts
+        ):
+            raise MutationError("transaction receipt completion path is unsafe")
     return receipt
 
 
@@ -352,6 +375,67 @@ def latest_committed_operation(
         "next_action": None,
         "receipt_data": receipt["result"],
     }
+
+
+def list_committed_mutation_receipts(
+    vault: Path,
+    *,
+    lock: bool = True,
+    exclude_transaction_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return every valid receipt committed exactly in the current HEAD."""
+    lock_context = vault_write_lock(vault) if lock else nullcontext()
+    with lock_context:
+        root = vault / ".vault-pr" / "transaction-receipts"
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            raise MutationError("transaction receipt directory is unsafe")
+        if not root.exists():
+            return []
+        excluded = exclude_transaction_ids or set()
+        results: list[dict[str, Any]] = []
+        for path in sorted(root.iterdir()):
+            if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+                raise MutationError(
+                    "transaction receipt directory contains an invalid entry"
+                )
+            if path.stem in excluded:
+                continue
+            receipt = _read_receipt(path)
+            transaction_id = receipt.get("transaction_id")
+            operation = receipt.get("operation")
+            transaction_sha256 = receipt.get("transaction_sha256")
+            request_sha256 = receipt.get("request_sha256")
+            if not all(
+                isinstance(value, str)
+                for value in (
+                    transaction_id,
+                    operation,
+                    transaction_sha256,
+                    request_sha256,
+                )
+            ):
+                raise MutationError("transaction receipt identity is invalid")
+            assert isinstance(transaction_id, str)
+            assert isinstance(operation, str)
+            assert isinstance(transaction_sha256, str)
+            assert isinstance(request_sha256, str)
+            _validate_request_fields(
+                operation=operation,
+                transaction_id=transaction_id,
+                transaction_sha256=transaction_sha256,
+                request_sha256=request_sha256,
+            )
+            if path.name != f"{transaction_id}.json":
+                raise MutationError("transaction receipt filename is invalid")
+            _validate_committed_receipt(vault, path, receipt)
+            results.append(
+                {
+                    "receipt": receipt,
+                    "receipt_path": path.relative_to(vault).as_posix(),
+                    "receipt_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        return results
 
 
 def validate_committed_mutation_receipt(

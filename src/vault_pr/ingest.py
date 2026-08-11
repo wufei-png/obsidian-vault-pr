@@ -34,6 +34,7 @@ from .mutation import (
     inspect_journaled_mutation,
     mutation_response,
 )
+from .recovery import committed_file_matches_worktree
 from .acquisition import (
     FetchedSource,
     canonicalize_url,
@@ -486,7 +487,7 @@ def ingest_source(
 
         if capture_dir.exists():
             try:
-                load_validated_capture(
+                existing_manifest = load_validated_capture(
                     capture_dir,
                     source_id=source_id,
                     vault=vault,
@@ -496,12 +497,110 @@ def ingest_source(
                 raise IngestError(
                     f"existing capture is incomplete or inconsistent: {exc}"
                 ) from exc
-            return {
-                **result,
-                "status": "already_captured",
-                "source_note": str(existing_note.relative_to(vault)),
-                "requires_commit": False,
+            expected_without_capture_time = {
+                key: value for key, value in manifest.items() if key != "captured_at"
             }
+            existing_without_capture_time = {
+                key: value
+                for key, value in existing_manifest.items()
+                if key != "captured_at"
+            }
+            if existing_without_capture_time != expected_without_capture_time:
+                raise IngestError(
+                    "existing capture metadata does not match the adoption request"
+                )
+            adoption_result = {
+                **result,
+                "status": "planned",
+                "title": existing_manifest["title"],
+                "source_note": str(existing_note.relative_to(vault)),
+                "adopted_existing": True,
+            }
+            head = run_git(vault, "rev-parse", "--verify", "HEAD")
+            if head.returncode != 0:
+                raise IngestError(
+                    "existing capture adoption requires a committed Git HEAD"
+                )
+            adoption_base = head.stdout.strip()
+            adoption_result.update(
+                {
+                    "adopted_from_commit": adoption_base,
+                    "capture_manifest_sha256": hashlib.sha256(
+                        (capture_dir / "manifest.json").read_bytes()
+                    ).hexdigest(),
+                    "source_note_sha256": hashlib.sha256(
+                        existing_note.read_bytes()
+                    ).hexdigest(),
+                }
+            )
+
+            def validate_adoption() -> None:
+                current_head = run_git(vault, "rev-parse", "--verify", "HEAD")
+                if (
+                    current_head.returncode != 0
+                    or current_head.stdout.strip() != adoption_base
+                ):
+                    raise IngestError("vault HEAD changed before capture adoption")
+                current_manifest = load_validated_capture(
+                    capture_dir,
+                    source_id=source_id,
+                    vault=vault,
+                )
+                current_without_capture_time = {
+                    key: value
+                    for key, value in current_manifest.items()
+                    if key != "captured_at"
+                }
+                if current_without_capture_time != expected_without_capture_time:
+                    raise IngestError(
+                        "existing capture changed before adoption"
+                    )
+                current_note = resolve_source_note(config, vault, source_id)
+                if current_note != existing_note or not source_note_has_id(
+                    current_note, source_id
+                ):
+                    raise IngestError(
+                        "existing Source Note changed before adoption"
+                    )
+                governed_paths = {
+                    capture_dir / relative for relative in staged_hashes
+                } | {existing_note}
+                if not all(
+                    committed_file_matches_worktree(vault, path)
+                    for path in governed_paths
+                ):
+                    raise IngestError(
+                        "existing capture adoption requires every artifact and "
+                        "Source Note to match HEAD"
+                    )
+
+            validate_adoption()
+            try:
+                outcome = execute_journaled_mutation(
+                    vault=vault,
+                    git_dir=git_dir,
+                    transaction_id=transaction_id,
+                    transaction_sha256=identity_sha256,
+                    request_sha256=request_sha256,
+                    operation="ingest",
+                    receipt_data=adoption_result,
+                    affected=set(),
+                    expected_original_sha256={},
+                    expected_original_mode={},
+                    final_sha256={},
+                    final_mode={},
+                    write=lambda _active_dir: None,
+                    precondition=validate_adoption,
+                    postcondition=lambda _active_dir: validate_adoption(),
+                    completion_path=str(
+                        (capture_dir / "manifest.json").relative_to(vault)
+                    ),
+                )
+            except (GitSafetyError, MutationError) as exc:
+                raise IngestError(
+                    f"unable to adopt existing capture: {exc}"
+                ) from exc
+            return mutation_response(outcome, applied_status="adopted")
         if note_path.exists() and not source_note_has_id(note_path, source_id):
             raise IngestError(
                 "source note already exists for different content: "
