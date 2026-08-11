@@ -1031,6 +1031,111 @@ else:
             )
             self.assertTrue(active.exists())
 
+    def test_recovery_finishes_index_sync_after_crash_following_ref_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, existing, created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            mark_active_applied(active)
+            real_run_git = recovery_module.run_git
+            base_commit = real_run_git(vault, "rev-parse", "HEAD").stdout.strip()
+
+            def crash_after_cas(path: Path, *args: str):
+                result = real_run_git(path, *args)
+                if args[:2] == ("update-ref", "HEAD") and result.returncode == 0:
+                    raise SystemExit("simulated process death after ref CAS")
+                return result
+
+            with patch("vault_pr.recovery.run_git", side_effect=crash_after_cas):
+                with self.assertRaisesRegex(SystemExit, "after ref CAS"):
+                    commit_applied_transaction(
+                        vault,
+                        vault / ".git",
+                        "txn_recovery_fixture",
+                        "Commit interrupted after ref CAS",
+                    )
+
+            committed_head = real_run_git(
+                vault, "rev-parse", "HEAD"
+            ).stdout.strip()
+            self.assertNotEqual(committed_head, base_commit)
+            self.assertEqual(existing.read_bytes(), b"updated\n")
+            self.assertEqual(created.read_bytes(), b"created\n")
+            self.assertEqual(
+                set(
+                    real_run_git(
+                        vault, "diff", "--cached", "--name-only"
+                    ).stdout.splitlines()
+                ),
+                {"knowledgebase/existing.md", "knowledgebase/created.md"},
+            )
+            self.assertTrue(active.exists())
+
+            result = recover_interrupted_transaction(vault, vault / ".git")
+
+            self.assertEqual(result["status"], "finalized")
+            self.assertEqual(result["commit"], committed_head)
+            self.assertFalse(active.exists())
+            self.assertEqual(
+                real_run_git(vault, "status", "--porcelain=v1").stdout,
+                "",
+            )
+
+    def test_post_cas_recovery_refuses_changed_index_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault, _existing, _created, active = self.prepare_interrupted(
+                Path(temp_dir)
+            )
+            mark_active_applied(active)
+            real_run_git = recovery_module.run_git
+
+            def crash_after_cas(path: Path, *args: str):
+                result = real_run_git(path, *args)
+                if args[:2] == ("update-ref", "HEAD") and result.returncode == 0:
+                    raise SystemExit("simulated process death after ref CAS")
+                return result
+
+            with patch("vault_pr.recovery.run_git", side_effect=crash_after_cas):
+                with self.assertRaises(SystemExit):
+                    commit_applied_transaction(
+                        vault,
+                        vault / ".git",
+                        "txn_recovery_fixture",
+                        "Commit interrupted before index synchronization",
+                    )
+
+            external_blob = subprocess.run(
+                ["git", "-C", str(vault), "hash-object", "-w", "--stdin"],
+                input="external staged content\n",
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "update-index",
+                    "--cacheinfo",
+                    "100644",
+                    external_blob,
+                    "knowledgebase/existing.md",
+                ],
+                check=True,
+            )
+
+            with self.assertRaisesRegex(RecoveryError, "does not match its base"):
+                recover_interrupted_transaction(vault, vault / ".git")
+
+            self.assertEqual(
+                recovery_module._git_index_file_oid(
+                    vault, "knowledgebase/existing.md"
+                ),
+                external_blob,
+            )
+            self.assertTrue(active.exists())
+
     def test_removes_incomplete_prepare_only_when_vault_is_clean(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault, _existing = self.make_vault(Path(temp_dir))

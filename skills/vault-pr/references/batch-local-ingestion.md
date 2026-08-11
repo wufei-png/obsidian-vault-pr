@@ -46,17 +46,16 @@ For each distinct byte hash in the current chunk, in frozen order:
 3. In the ephemeral batch ledger, record returned `source_id`, status, and
    `requires_commit`, plus `next_action` and `transaction_id` when present,
    together with every frozen filename represented by that hash.
-4. Take exactly one mutually exclusive branch. For `captured`, or
+4. Take exactly one mutually exclusive branch. For `captured`, `adopted`, or
    `already_active` with `next_action=commit`, require `requires_commit=true`
    and a `transaction_id`, then run `vault-pr commit <transaction-id> ...`
    exactly once; its successful `committed_and_finalized` response is the
-   verification boundary. For `already_active` with `next_action=recover`, use
-   the main recovery flow without committing. Reuse `already_committed` only
-   after Kernel validation. Treat `already_captured` as an audit-integrity
-   blocker: stop and report it because the current Kernel has no supported
-   adoption path for a receipt-less Capture. Fail closed on any inconsistent or
-   unknown combination; do not manufacture a transaction ID or silently call
-   it deduplicated.
+   verification boundary. `adopted` is a receipt-only transaction for exact
+   Capture and Source Note bytes already committed at the current HEAD. For
+   `already_active` with `next_action=recover`, use the main recovery flow
+   without committing. Reuse `already_committed` only after Kernel validation.
+   Fail closed on any inconsistent or unknown combination; do not manufacture
+   a transaction ID or silently call it deduplicated.
 5. A later semantic transaction must reference the committed Capture, never the
    mutable local path. Never leave several ingest journals active.
 

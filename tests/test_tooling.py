@@ -134,7 +134,9 @@ class ToolingTests(unittest.TestCase):
         )
         self.assertEqual(len(runner.calls), 6)
 
-    def test_hybrid_probe_hashes_exact_model_without_exposing_it(self) -> None:
+    def test_hybrid_probe_hashes_unmaterialized_locator_without_path_leak(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_dir = Path(temp_dir)
             model = "/private/models/custom-embedding.gguf"
@@ -161,6 +163,132 @@ class ToolingTests(unittest.TestCase):
                 hashlib.sha256(model.encode("utf-8")).hexdigest(),
             )
             self.assertNotIn(model, str(snapshot))
+
+    def test_hybrid_probe_detects_changed_bytes_at_the_same_model_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            model = root / "private-model.gguf"
+            model.write_bytes(b"GGUF-first-model-bytes")
+            (config_dir / "fixture.yml").write_text(
+                f"models:\n  embed: {model}\n",
+                encoding="utf-8",
+            )
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"XDG_CONFIG_HOME", "QMD_EMBED_MODEL"}
+            }
+            environment["QMD_CONFIG_DIR"] = str(config_dir)
+
+            with patch.dict(os.environ, environment, clear=True):
+                first = probe_qmd_capabilities(
+                    "qmd",
+                    index_name="fixture",
+                    runner=ProbeRunner(),
+                )
+                model.write_bytes(b"GGUF-second-model-bytes")
+                second = probe_qmd_capabilities(
+                    "qmd",
+                    index_name="fixture",
+                    runner=ProbeRunner(),
+                )
+
+            self.assertEqual(
+                first["embedding_model_sha256"],
+                hashlib.sha256(b"GGUF-first-model-bytes").hexdigest(),
+            )
+            self.assertEqual(
+                second["embedding_model_sha256"],
+                hashlib.sha256(b"GGUF-second-model-bytes").hexdigest(),
+            )
+            self.assertNotEqual(
+                first["runtime_identity_sha256"],
+                second["runtime_identity_sha256"],
+            )
+            self.assertNotIn(str(model), str(first))
+            self.assertNotIn(str(model), str(second))
+
+    def test_hybrid_probe_hashes_materialized_huggingface_cache_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            cache_root = root / "cache"
+            model_cache = cache_root / "qmd" / "models"
+            model_cache.mkdir(parents=True)
+            locator = "hf:example/model/example-Q8.gguf"
+            content = b"GGUF-cached-model-bytes"
+            (model_cache / "hf_example_model_example-Q8.gguf").write_bytes(content)
+            (config_dir / "fixture.yml").write_text(
+                f"models:\n  embed: {locator}\n",
+                encoding="utf-8",
+            )
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"QMD_EMBED_MODEL", "XDG_CONFIG_HOME"}
+            }
+            environment.update(
+                {
+                    "QMD_CONFIG_DIR": str(config_dir),
+                    "XDG_CACHE_HOME": str(cache_root),
+                }
+            )
+
+            with patch.dict(os.environ, environment, clear=True):
+                snapshot = probe_qmd_capabilities(
+                    "qmd",
+                    index_name="fixture",
+                    runner=ProbeRunner(),
+                )
+
+            self.assertEqual(
+                snapshot["embedding_model_sha256"],
+                hashlib.sha256(content).hexdigest(),
+            )
+            self.assertNotIn(locator, str(snapshot))
+
+    def test_hybrid_probe_does_not_adopt_another_hf_repository_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            cache_root = root / "cache"
+            model_cache = cache_root / "qmd" / "models"
+            model_cache.mkdir(parents=True)
+            locator = "hf:example/model/shared-Q8.gguf"
+            (model_cache / "hf_other_model_shared-Q8.gguf").write_bytes(
+                b"GGUF-unrelated-model-bytes"
+            )
+            (config_dir / "fixture.yml").write_text(
+                f"models:\n  embed: {locator}\n",
+                encoding="utf-8",
+            )
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"QMD_EMBED_MODEL", "XDG_CONFIG_HOME"}
+            }
+            environment.update(
+                {
+                    "QMD_CONFIG_DIR": str(config_dir),
+                    "XDG_CACHE_HOME": str(cache_root),
+                }
+            )
+
+            with patch.dict(os.environ, environment, clear=True):
+                snapshot = probe_qmd_capabilities(
+                    "qmd",
+                    index_name="fixture",
+                    runner=ProbeRunner(),
+                )
+
+            self.assertEqual(
+                snapshot["embedding_model_sha256"],
+                hashlib.sha256(locator.encode("utf-8")).hexdigest(),
+            )
 
     def test_path_like_index_name_uses_lexical_absolute_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

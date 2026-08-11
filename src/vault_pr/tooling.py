@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -191,7 +193,7 @@ def probe_qmd_capabilities(
         model = reader(index_name, str(snapshot["version"]))
         if not model.strip():
             raise ToolProbeError("qmd embedding model identity is empty")
-        model_sha256 = hashlib.sha256(model.encode("utf-8")).hexdigest()
+        model_sha256 = _embedding_model_sha256(model)
         chunk_strategy = "regex"
 
     capabilities = snapshot["capabilities"]
@@ -233,6 +235,116 @@ def _qmd_config_path(index_name: str) -> Path:
     else:
         config_dir = Path.home() / ".config" / "qmd"
     return config_dir / f"{config_name}.yml"
+
+
+def _qmd_model_cache_dir() -> Path:
+    configured = os.environ.get("XDG_CACHE_HOME")
+    cache_root = (
+        Path(configured).expanduser() if configured else Path.home() / ".cache"
+    )
+    return cache_root / "qmd" / "models"
+
+
+def _qmd_huggingface_cache_filename(model: str) -> str | None:
+    """Return qmd's exact key for a conservative explicit-file hf URI subset."""
+    matched = re.fullmatch(
+        r"hf:([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)",
+        model,
+    )
+    if matched is None:
+        return None
+    user, repository, filename = matched.groups()
+    prefix = ["hf", user]
+    repository_stem = repository[:-5] if repository.casefold().endswith("-gguf") else None
+    filename_stem = filename[:-5] if filename.casefold().endswith(".gguf") else None
+    filename_matches_repository = (
+        repository_stem is not None
+        and filename_stem is not None
+        and filename_stem.casefold().startswith(repository_stem.casefold())
+    )
+    if not filename_matches_repository:
+        prefix.append(repository)
+    return "_".join(prefix) + "_" + filename
+
+
+def _cached_huggingface_model(model: str) -> Path | None:
+    """Locate the exact valid single-file GGUF cache entry for one hf URI."""
+    cache_filename = _qmd_huggingface_cache_filename(model)
+    if cache_filename is None:
+        return None
+    cache_dir = _qmd_model_cache_dir()
+    candidate = cache_dir / cache_filename
+    try:
+        if not candidate.exists():
+            return None
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ToolProbeError("qmd embedding model cache entry is unsafe")
+        with candidate.open("rb") as stream:
+            if stream.read(4) != b"GGUF":
+                raise ToolProbeError("qmd embedding model cache entry is not GGUF")
+    except ToolProbeError:
+        raise
+    except OSError as exc:
+        raise ToolProbeError("qmd embedding model cache cannot be inspected") from exc
+    return candidate
+
+
+def _embedding_model_artifact(model: str) -> Path | None:
+    cached = _cached_huggingface_model(model)
+    if cached is not None:
+        return cached
+    if model.startswith("hf:") or "://" in model:
+        return None
+    candidate = Path(model).expanduser()
+    if candidate.exists() and not candidate.is_file():
+        raise ToolProbeError("qmd embedding model artifact is not a regular file")
+    return candidate if candidate.is_file() else None
+
+
+def _hash_stable_file(path: Path) -> str:
+    """Stream a file digest and reject replacement or mutation during the read."""
+    try:
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ToolProbeError(
+                    "qmd embedding model artifact is not a regular file"
+                )
+            digest = hashlib.sha256()
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+            after = os.fstat(stream.fileno())
+        current = path.stat()
+    except ToolProbeError:
+        raise
+    except OSError as exc:
+        raise ToolProbeError("qmd embedding model artifact cannot be hashed") from exc
+    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    descriptor_changed = any(
+        getattr(before, name) != getattr(after, name) for name in identity_fields
+    )
+    path_changed = any(
+        getattr(after, name) != getattr(current, name) for name in identity_fields
+    )
+    if descriptor_changed or path_changed:
+        raise ToolProbeError("qmd embedding model artifact changed during hashing")
+    return digest.hexdigest()
+
+
+def _embedding_model_sha256(model: str) -> str:
+    """Hash active model bytes when materialized, else bind its exact locator."""
+    if model.startswith("hf:"):
+        cached = _cached_huggingface_model(model)
+        if cached is None:
+            return hashlib.sha256(model.encode("utf-8")).hexdigest()
+        digest = _hash_stable_file(cached)
+        if _cached_huggingface_model(model) != cached:
+            raise ToolProbeError("qmd embedding model cache changed during hashing")
+        return digest
+    artifact = _embedding_model_artifact(model)
+    if artifact is not None:
+        return _hash_stable_file(artifact)
+    return hashlib.sha256(model.encode("utf-8")).hexdigest()
 
 
 def _read_qmd_embedding_model(index_name: str, qmd_version: str) -> str:

@@ -1,7 +1,6 @@
 ---
 name: vault-pr
 description: Safely ingest web links, WeChat articles, PDFs, authenticated-page snapshots, and other sources into an existing Git-managed Obsidian vault; retrieve related notes, create auditable semantic change plans, require independent review for risky operations, update interlinked knowledge, and refresh local qmd RAG indexes. Use when an agent must add or integrate knowledge, query or reorganize notes, or autonomously maintain an existing vault without replacing its organization.
-disable-model-invocation: true
 ---
 
 # Vault PR
@@ -88,14 +87,14 @@ Baseline.
    [the batch-local ingestion contract](references/batch-local-ingestion.md)
    before the first write.
 4. Take exactly one branch from the returned status and `next_action`. For
-   `captured`, or `already_active` with `next_action=commit`, require
+   `captured`, `adopted`, or `already_active` with `next_action=commit`, require
    `requires_commit=true` and a `transaction_id`, then run `vault-pr commit
    <transaction-id> --message <behavior-and-intent> --config <config>` exactly
    once. For `already_active` with `next_action=recover`, use the recovery flow
-   without committing. Reuse `already_committed` only after Kernel validation.
-   Treat `already_captured` as an audit-integrity blocker: stop and report it
-   because the current Kernel has no supported adoption path for a receipt-less
-   Capture. Fail closed on any inconsistent or unknown combination; never
+   without committing. `adopted` is a receipt-only transaction for an exact
+   Capture and Source Note already committed at the current HEAD; it does not
+   rewrite either artifact. Reuse `already_committed` only after Kernel
+   validation. Fail closed on any inconsistent or unknown combination; never
    invent a transaction ID. A successful commit
    stages exactly the journal paths, commits them under the vault lock, and
    finalizes the journal. Never use bare `git add` or `git commit` for an active
@@ -144,9 +143,9 @@ Baseline.
 
 ## Apply review policy
 
-- Allow create, rewrite, rename, and split after deterministic validation.
-- Require an independent reviewer agent for merge, delete, contradictions, and
-  `purge_capture`, autonomous repair, and every transaction when
+- Allow create, rewrite, and rename after deterministic validation.
+- Require an independent reviewer agent for split, merge, delete,
+  contradictions, `purge_capture`, autonomous repair, and every transaction when
   `review_all_semantic_transactions` is enabled.
 - Quality Findings remain transient unless the agent will use an eligible
   deterministic finding to propose autonomous repair. Only then create a
@@ -160,14 +159,14 @@ Baseline.
 
 ## Handle failure
 
-- `doctor` reports active transaction IDs, not `next_action`; never infer a
-  phase from an ID. If the originating command response was retained, follow
-  its `next_action`. Otherwise, only when the complete original request can be
-  reconstructed and its inputs remain unchanged, retry that exact governed
-  command to obtain `already_active.next_action`. If the request cannot be
-  reconstructed, stop and report the preserved transaction rather than
-  guessing. For `next_action=commit`, use `vault-pr commit`. For
-  `next_action=recover`, run `vault-pr recover --config <config>`; it verifies
+- `doctor` reports active transaction IDs, not `next_action`. Inspect them with
+  `vault-pr transaction list --config <config>` and `vault-pr transaction show
+  <transaction-id> --config <config>` instead of inferring state from an ID or
+  error text. For `state=APPLIED`, use the listed `commit` or `recover` action;
+  for `COMMITTED`, use `finalize` or `recover`; for `RECOVERY_REQUIRED`, use
+  `recover`; and take no write action for `FINALIZED`. Use `vault-pr transaction
+  diff <transaction-id> --config <config>` when hash-and-mode path transitions
+  are needed without note content. Recovery verifies
   the durable journal, backups, affected path hashes and Git modes, rejects
   symlink traversal, checks Git staging state, and requires the absence of
   unrelated changes. It auto-finalizes an exact committed result; otherwise it

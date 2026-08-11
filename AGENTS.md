@@ -41,8 +41,8 @@ use temporary directories or synthetic vaults.
   synthesis and confidence instead of silently overwriting history.
 - Touch at most 15 notes in one transaction; split larger changes into multiple
   bounded transactions and commit each before starting the next.
-- Allow create, rewrite, rename, and split automatically after validation.
-  Require an independent reviewer agent for merge, delete, contradictions, and
+- Allow create, rewrite, and rename automatically after validation. Require an
+  independent reviewer agent for split, merge, delete, contradictions, and
   every transaction when the configured vault enables review-all policy.
 - Commit content even if qmd indexing fails. Retry indexing at most 3 times
   after the initial attempt, then record `index_failed` without rolling back the

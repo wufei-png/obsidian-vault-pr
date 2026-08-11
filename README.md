@@ -9,9 +9,9 @@ Obsidian vaults. It lets an agent ingest sources, update interlinked notes, run
 deterministic checks, request semantic review for risky changes, and leave an
 auditable Git transaction.
 
-The repository is private during incubation. The first development target is a
-real existing vault configured in the Git-ignored `vault-pr.local.toml` file;
-private vault content and machine-specific paths must never be committed here.
+The project is under active incubation. The first development target is a real
+existing vault configured in the Git-ignored `vault-pr.local.toml` file; private
+vault content and machine-specific paths must never be committed here.
 
 ## Names
 
@@ -27,15 +27,19 @@ The implemented workflow provides:
 - Capture schema v3 ingestion through pinned HTTP, a Kernel-verified local
   file, or a manifest-driven Snapshot Bundle for WeChat and authenticated
   pages; local absolute paths and provider metadata do not define identity;
-- vault-wide BM25/vector retrieval for deduplication and semantic planning;
+- vault-wide lexical or qmd RRF-fused hybrid retrieval for deduplication and
+  semantic planning;
 - Plan schema v3 with one Write Authorization Snapshot, multiple Evidence
   items, explicit retrieval requirements, governed Source Capture Asset
   promotion, and a 15-note default limit; existing v2 Plans remain readable;
-- deterministic Review Packets and structured assessments for merge, delete,
-  contradiction, `purge_capture`, autonomous repair, or review-all policy;
+- deterministic Review Packets and structured assessments for split, merge,
+  delete, contradiction, `purge_capture`, autonomous repair, or review-all policy;
   the skill orchestration assigns these plans to a separate reviewer agent;
-- deterministic plan apply with rollback-on-error, an audit archive, and a
-  durable `apply -> commit -> finalize` recovery protocol;
+- deterministic plan apply with rollback-on-error, an audit archive, atomic
+  expected-HEAD Git commits, and a durable `apply -> commit -> finalize`
+  recovery protocol;
+- read-only `transaction list`, `show`, and content-free `diff` views over
+  active journals and committed receipts;
 - qmd collection reconciliation, capability-gated update, exact-HEAD freshness,
   and incremental embedding with at most three retries after the first attempt;
 - disposable live capture-route canaries for HTML, PDF, provider-assisted
@@ -44,6 +48,34 @@ The implemented workflow provides:
   deterministic retrieval metrics and hash-bound blind-RAG assessor packets;
 - formal Vault Maintainer, Quality Assessor, and Semantic Reviewer contracts
   behind one user-facing skill.
+
+The governance kernel is the stable core. Capture-route canaries, Capture
+migration, graph/RAG quality workflows, Quality Records, and autonomous repair
+are experimental surfaces: they remain governed and tested, but do not yet carry
+a production-compatibility promise.
+
+## Support boundary
+
+- Python 3.11 through 3.13 on POSIX systems (currently Linux and macOS); Windows
+  is unsupported because the transaction lock and file-safety implementation
+  use POSIX APIs.
+- Git is required. qmd and Defuddle are external executables whose capabilities
+  are probed by `vault-pr doctor`; compatibility is capability-based rather than
+  a blanket version promise.
+- Hybrid index freshness binds the qmd version, retrieval mode, embedding-model
+  identity, and chunk strategy without exposing the local model path. The model
+  identity hashes resolved local bytes or an exactly identified single-file qmd
+  GGUF cache entry when present; otherwise it conservatively binds the exact
+  locator. Changes to a supported artifact invalidate freshness once qmd
+  materializes it.
+- The deterministic validator implements a documented Obsidian syntax subset,
+  not every parser behavior of the Obsidian application. See
+  [Supported Obsidian syntax](docs/supported-obsidian-syntax.md).
+- The Python wheel contains the Governance Kernel only. Register or symlink
+  [`skills/vault-pr`](skills/vault-pr) with the chosen agent harness separately;
+  its OpenAI adapter disables implicit invocation, but routing policy is not a
+  security boundary. Clean-state, review, transaction, and exact-commit gates
+  remain authoritative.
 
 ## Architecture at a glance
 
@@ -266,6 +298,11 @@ uv run vault-pr ingest ./reference.pdf --adapter local_file \
 # Commit only the returned transaction's paths and close its journal under lock.
 uv run vault-pr commit txn_ingest_... --message "Ingest source article" \
   --config vault-pr.local.toml
+uv run vault-pr transaction list --config vault-pr.local.toml
+uv run vault-pr transaction show txn_ingest_... \
+  --config vault-pr.local.toml
+uv run vault-pr transaction diff txn_ingest_... \
+  --config vault-pr.local.toml
 uv run vault-pr migrate captures-v3 \
   --config vault-pr.local.toml
 uv run vault-pr index --config vault-pr.local.toml
@@ -316,26 +353,37 @@ Use `vault-pr index --check` for a read-only collection drift report. A normal
 unmanaged collections untouched, and then refreshes lexical and vector indexes.
 Every journaled mutation uses the same executor and writes a Git-tracked
 transaction receipt. A new apply returns its domain status with
-`requires_commit: true`. Retrying the exact request returns `already_active`
-with `next_action: commit` or `recover`; after finalization it returns
-`already_committed`. Reusing a transaction ID with a different request digest
-is an integrity error. Run `vault-pr commit <transaction-id> --message <message>
+`requires_commit: true`. If an exact schema-v3 Capture and Source Note are
+already committed but their receipt is absent, ingest returns `adopted` and
+creates a receipt-only transaction without rewriting those artifacts. Retrying
+the exact request returns `already_active` with `next_action: commit` or
+`recover`; after finalization it returns `already_committed`. Reusing a
+transaction ID with a different request digest is an integrity error. Run
+`vault-pr commit <transaction-id> --message <message>
 --config vault-pr.local.toml`; it holds the vault lock, stages only journal paths,
-verifies staged hashes, commits, and finalizes. Finalization verifies the clean
-worktree, new commit, complete commit-path range, every committed file hash, and
-Git mode, plus the transaction receipt before removing the journal. Recovery
+constructs the commit through a temporary index, atomically advances the
+expected branch HEAD, and finalizes. Finalization verifies the clean worktree,
+new commit, complete commit-path range, every committed file hash, and Git mode,
+plus the transaction receipt before removing the journal. Recovery
 journals bind to a one-way `vault_id`; they do not persist or print the absolute
 Vault path. Retrieval and Plan
 validation re-verify Capture identity, exact declared files, hashes, MIME
 signatures, and the independently resolved unique Source Note before consuming
 it. Retrieval also requires freshness for the exact Vault HEAD, relevant index
-configuration, and qmd capability fingerprint. Indexing refuses to run before
+configuration, and qmd runtime identity. Indexing refuses to run before
 commit finalization. `vault-pr finalize` remains available when a commit was
 completed before a process interruption.
 If a process stops before finalization, run
 `vault-pr recover --config vault-pr.local.toml`. Recovery auto-finalizes an
 already committed exact result, or rolls back an uncommitted result only after
 journal, backup, file-state, and Git-state verification succeeds.
+
+Use `vault-pr transaction list|show|diff` for the implemented lifecycle view:
+`APPLIED` permits commit or recovery, `COMMITTED` permits finalize or recovery,
+`RECOVERY_REQUIRED` permits recovery, and `FINALIZED` has no write action. The
+views expose paths, hashes, modes, and blocking reasons, never note content. See
+[Transaction state machine](docs/transaction-state-machine.md) and
+[CLI protocol](docs/cli-protocol.md).
 
 Reviewer independence is an orchestration guarantee, not a local identity or
 cryptographic boundary. The CLI regenerates a deterministic Review Packet,

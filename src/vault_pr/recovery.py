@@ -105,39 +105,41 @@ def _git_worktree_blob_oid(vault: Path, relative: str) -> str | None:
     return oid
 
 
-def _git_head_file_oid(vault: Path, relative: str) -> str | None:
+def _git_revision_file_metadata(
+    vault: Path, revision: str, relative: str
+) -> tuple[str | None, str | None]:
     result = subprocess.run(
-        ["git", "-C", str(vault), "ls-tree", "-z", "HEAD", "--", relative],
+        ["git", "-C", str(vault), "ls-tree", "-z", revision, "--", relative],
         check=False,
         capture_output=True,
     )
     if result.returncode != 0:
-        raise RecoveryError(f"unable to inspect committed blob: {relative}")
+        raise RecoveryError(f"unable to inspect committed path: {relative}")
     if not result.stdout:
-        return None
+        return None, None
     records = [record for record in result.stdout.split(b"\0") if record]
     if len(records) != 1 or b"\t" not in records[0]:
-        raise RecoveryError(f"unexpected committed blob metadata: {relative}")
+        raise RecoveryError(f"unexpected committed path metadata: {relative}")
     fields = records[0].split(b"\t", 1)[0].split()
     if len(fields) != 3:
-        raise RecoveryError(f"unexpected committed blob metadata: {relative}")
-    return fields[2].decode("ascii")
+        raise RecoveryError(f"unexpected committed path metadata: {relative}")
+    return fields[2].decode("ascii"), fields[0].decode("ascii")
+
+
+def _git_revision_file_oid(vault: Path, revision: str, relative: str) -> str | None:
+    return _git_revision_file_metadata(vault, revision, relative)[0]
+
+
+def _git_revision_file_mode(vault: Path, revision: str, relative: str) -> str | None:
+    return _git_revision_file_metadata(vault, revision, relative)[1]
+
+
+def _git_head_file_oid(vault: Path, relative: str) -> str | None:
+    return _git_revision_file_oid(vault, "HEAD", relative)
 
 
 def _git_head_file_mode(vault: Path, relative: str) -> str | None:
-    result = subprocess.run(
-        ["git", "-C", str(vault), "ls-tree", "-z", "HEAD", "--", relative],
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        raise RecoveryError(f"unable to inspect committed mode: {relative}")
-    if not result.stdout:
-        return None
-    records = [record for record in result.stdout.split(b"\0") if record]
-    if len(records) != 1 or b"\t" not in records[0]:
-        raise RecoveryError(f"unexpected committed mode metadata: {relative}")
-    return records[0].split(b" ", 1)[0].decode("ascii")
+    return _git_revision_file_mode(vault, "HEAD", relative)
 
 
 def _git_is_clean(vault: Path) -> bool:
@@ -875,13 +877,17 @@ def rollback_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]
     return {"status": "recovered", "transaction_id": transaction_id}
 
 
-def _finalize_active_transaction_unlocked(
-    vault: Path, active_dir: Path
-) -> dict[str, Any]:
+def _verify_committed_transaction_unlocked(
+    vault: Path,
+    active_dir: Path,
+    *,
+    require_clean: bool,
+) -> tuple[dict[str, Any], str, set[str]]:
+    """Verify that HEAD and the worktree contain exactly one journal result."""
     journal = _read_journal(vault, active_dir)
     if journal.get("phase") != "applied":
         raise RecoveryError("transaction has not reached the applied phase")
-    if not _git_is_clean(vault):
+    if require_clean and not _git_is_clean(vault):
         raise RecoveryError("applied transaction must be committed before finalization")
     head = _head_commit(vault)
     base_commit = journal.get("base_commit")
@@ -934,9 +940,67 @@ def _finalize_active_transaction_unlocked(
             raise RecoveryError(
                 "Git commit does not contain the transaction audit record"
             )
+    return journal, head, expected_committed_paths
+
+
+def _finalize_active_transaction_unlocked(
+    vault: Path, active_dir: Path
+) -> dict[str, Any]:
+    journal, head, _expected_paths = _verify_committed_transaction_unlocked(
+        vault,
+        active_dir,
+        require_clean=True,
+    )
     transaction_id = journal["transaction_id"]
     shutil.rmtree(active_dir)
     return {"status": "finalized", "transaction_id": transaction_id, "commit": head}
+
+
+def _synchronize_committed_transaction_index(
+    vault: Path,
+    active_dir: Path,
+) -> dict[str, Any]:
+    """Finish index synchronization after a crash immediately following ref CAS."""
+    journal, head, expected_paths = _verify_committed_transaction_unlocked(
+        vault,
+        active_dir,
+        require_clean=False,
+    )
+    dirty_paths, staged_paths = _git_status_paths(vault)
+    if dirty_paths != expected_paths or staged_paths != expected_paths:
+        raise RecoveryError(
+            "committed transaction index is not in the recoverable pre-sync state"
+        )
+
+    base_commit = journal.get("base_commit")
+    for relative in sorted(expected_paths):
+        if base_commit is None:
+            base_oid = None
+            base_mode = None
+        else:
+            base_oid = _git_revision_file_oid(vault, base_commit, relative)
+            base_mode = _git_revision_file_mode(vault, base_commit, relative)
+        if (
+            _git_index_file_oid(vault, relative) != base_oid
+            or _git_index_file_mode(vault, relative) != base_mode
+        ):
+            raise RecoveryError(
+                f"committed transaction index does not match its base: {relative}"
+            )
+
+    synchronized = run_git(
+        vault,
+        "reset",
+        "--quiet",
+        head,
+        "--",
+        *sorted(expected_paths),
+    )
+    if synchronized.returncode != 0 or not _git_is_clean(vault):
+        raise RecoveryError(
+            "unable to synchronize the committed transaction index during recovery"
+        )
+    return _finalize_active_transaction_unlocked(vault, active_dir)
 
 
 def finalize_applied_transaction(
@@ -1225,7 +1289,12 @@ def recover_interrupted_transaction(vault: Path, git_dir: Path) -> dict[str, Any
                 "transaction_id": active_dir.name,
             }
         journal = _read_journal(vault, active_dir)
-        if journal.get("phase") == "applied" and _git_is_clean(vault):
+        if journal.get("phase") == "applied":
             if _head_commit(vault) != journal.get("base_commit"):
+                if not _git_is_clean(vault):
+                    return _synchronize_committed_transaction_index(
+                        vault,
+                        active_dir,
+                    )
                 return _finalize_active_transaction_unlocked(vault, active_dir)
         return rollback_active_transaction(vault, active_dir)

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.9.30"
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --locked --no-install-project
+      - run: PYTHONPATH=src uv run --no-sync python -m unittest discover -s tests
+      - run: PYTHONPATH=src uv run --no-sync python -m compileall -q src
+
+  skill:
+    name: Skill schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      - run: npx --yes skills-ref@0.1.5 validate skills/vault-pr
+
+  package:
+    name: Wheel install smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.9.30"
+          python-version: "3.11"
+      - run: >-
+          uv build --wheel
+          --build-constraint .github/build-constraints.txt
+          --require-hashes
+      - run: >-
+          uv export --locked --no-dev --no-emit-project
+          --format requirements.txt
+          --output-file .smoke-requirements.txt
+      - run: uv venv .smoke-venv --python 3.11
+      - run: >-
+          uv pip install --python .smoke-venv/bin/python
+          --require-hashes -r .smoke-requirements.txt
+      - run: >-
+          uv pip install --python .smoke-venv/bin/python
+          --no-deps dist/*.whl
+      - run: .smoke-venv/bin/vault-pr --help
