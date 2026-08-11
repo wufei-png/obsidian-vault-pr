@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from vault_pr.assessor_schema import AssessorSchemaError, validate_rag_assessment
+from vault_pr.cli import main
 from vault_pr.rag_eval import (
     RagEvaluationError,
+    _unwrap_quality_rag_cli_evaluation,
     accept_rag_baseline,
     evaluate_rag,
 )
@@ -640,7 +644,25 @@ class RagEvaluationTests(unittest.TestCase):
             assessment = self._passed_assessment(packet)
             evaluation_path = root / "evaluation.json"
             assessment_path = root / "assessment.json"
-            evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+            output = io.StringIO()
+            with (
+                patch("vault_pr.cli.load_config", return_value=config),
+                patch("vault_pr.cli.evaluate_rag", return_value=evaluation),
+                redirect_stdout(output),
+            ):
+                status = main(
+                    [
+                        "quality",
+                        "rag",
+                        "--answers",
+                        str(answers),
+                        "--config",
+                        str(root / "unused.toml"),
+                    ]
+                )
+            self.assertEqual(status, 0)
+            evaluation_content = output.getvalue()
+            evaluation_path.write_text(evaluation_content, encoding="utf-8")
             assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
 
             accepted = accept_rag_baseline(
@@ -675,6 +697,10 @@ class RagEvaluationTests(unittest.TestCase):
             baseline = json.loads(record.read_text(encoding="utf-8"))
             self.assertNotIn("evaluation", baseline)
             self.assertEqual(baseline["quality_assessor_packet"], packet)
+            self.assertEqual(
+                baseline["evaluation_sha256"],
+                hashlib.sha256(evaluation_content.encode("utf-8")).hexdigest(),
+            )
             git_dir = Path(
                 subprocess.run(
                     ["git", "-C", str(vault), "rev-parse", "--absolute-git-dir"],
@@ -707,6 +733,36 @@ class RagEvaluationTests(unittest.TestCase):
                     text=True,
                 ).stdout
             )
+
+    def test_rejects_malformed_quality_rag_cli_envelopes(self) -> None:
+        evaluation = {"schema_version": 2}
+        valid = {
+            "protocol_version": 1,
+            "command": "quality.rag",
+            "status": "ok",
+            "data": evaluation,
+        }
+        malformed = [
+            {**valid, "protocol_version": True},
+            {**valid, "protocol_version": 2},
+            {**valid, "command": "quality.graph"},
+            {**valid, "status": "assessment_ready"},
+            {**valid, "extra": "unexpected"},
+            {key: value for key, value in valid.items() if key != "status"},
+            {**valid, "data": []},
+        ]
+
+        self.assertIs(
+            _unwrap_quality_rag_cli_evaluation(valid),
+            evaluation,
+        )
+        for envelope in malformed:
+            with self.subTest(envelope=envelope):
+                with self.assertRaisesRegex(
+                    RagEvaluationError,
+                    "RAG evaluation CLI envelope is incomplete or inconsistent",
+                ):
+                    _unwrap_quality_rag_cli_evaluation(envelope)
 
     def test_rejects_tampered_assessor_packet_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

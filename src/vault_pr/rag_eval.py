@@ -581,6 +581,28 @@ def _read_bounded_json(
     return parsed, content
 
 
+def _unwrap_quality_rag_cli_evaluation(
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the evaluation projection from an exact CLI success envelope."""
+    envelope_fields = {"protocol_version", "command", "status", "data"}
+    if not envelope_fields.intersection(value):
+        return value
+    protocol_version = value.get("protocol_version")
+    if (
+        set(value) != envelope_fields
+        or type(protocol_version) is not int
+        or protocol_version != 1
+        or value.get("command") != "quality.rag"
+        or value.get("status") != "ok"
+        or not isinstance(value.get("data"), dict)
+    ):
+        raise RagEvaluationError(
+            "RAG evaluation CLI envelope is incomplete or inconsistent"
+        )
+    return value["data"]
+
+
 def _validate_rag_evaluation_projection(
     evaluation: dict[str, Any],
     packet: dict[str, Any],
@@ -845,9 +867,10 @@ def accept_rag_baseline(
 ) -> dict[str, Any]:
     """Validate and optionally record a passed RAG baseline as a Git transaction."""
     vault = load_vault_path(config)
-    evaluation, evaluation_bytes = _read_bounded_json(
+    raw_evaluation, evaluation_bytes = _read_bounded_json(
         evaluation_path, "RAG evaluation", max_bytes=8_000_000
     )
+    evaluation = _unwrap_quality_rag_cli_evaluation(raw_evaluation)
     assessment, assessment_bytes = _read_bounded_json(
         assessment_path, "Quality Assessor output", max_bytes=2_000_000
     )

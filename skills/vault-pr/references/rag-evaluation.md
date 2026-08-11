@@ -35,7 +35,12 @@ Markdown paths. They are included in the bounded note evidence and must be Git
 tracked.
 
 Run `vault-pr quality rag --answers <temporary-jsonl> --config <config>` and
-save its JSON output outside the Vault. The
+save its complete JSON success envelope outside the Vault. Pass that exact file
+to `quality rag-accept`; the Kernel strictly unwraps the `quality.rag` success
+envelope, while continuing to accept the legacy inner projection used by direct
+library callers. Do not hand-extract or rewrite the `data` object, and reuse the
+same original envelope file for any retry so its recorded byte hash remains
+stable. The
 Governance Kernel scores retrieval, verifies the current qmd index commit,
 relevant configuration, and capability fingerprint, binds bounded note excerpts and generated answers,
 and creates a hash-bound `quality_assessment_input` packet. Without `--answers`,
