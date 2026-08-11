@@ -1,6 +1,7 @@
 ---
 name: vault-pr
 description: Safely ingest web links, WeChat articles, PDFs, authenticated-page snapshots, and other sources into an existing Git-managed Obsidian vault; retrieve related notes, create auditable semantic change plans, require independent review for risky operations, update interlinked knowledge, and refresh local qmd RAG indexes. Use when an agent must add or integrate knowledge, query or reorganize notes, or autonomously maintain an existing vault without replacing its organization.
+disable-model-invocation: true
 ---
 
 # Vault PR

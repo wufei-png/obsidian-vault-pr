@@ -2,3 +2,6 @@ interface:
   display_name: "Vault PR"
   short_description: "Ingest, integrate, and index Obsidian vaults safely"
   default_prompt: "Use $vault-pr to select an available Capture Provider for this source reference, then ingest and semantically integrate it into my configured Obsidian vault."
+
+policy:
+  allow_implicit_invocation: false
