@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from vault_pr.cli import main
 from vault_pr.quality import audit_graph
 from vault_pr.mutation import MutationError
 from vault_pr.quality_record import (
@@ -61,6 +64,23 @@ class QualityRecordTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             vault, config, audit_path, finding_id = self._fixture(root)
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            output = io.StringIO()
+            with (
+                patch("vault_pr.cli.load_config", return_value=config),
+                patch("vault_pr.cli.audit_graph", return_value=audit),
+                redirect_stdout(output),
+            ):
+                status = main(
+                    [
+                        "quality",
+                        "graph",
+                        "--config",
+                        str(root / "unused.toml"),
+                    ]
+                )
+            self.assertEqual(status, 0)
+            audit_path.write_text(output.getvalue(), encoding="utf-8")
 
             planned = record_quality_findings(
                 config,
@@ -76,7 +96,6 @@ class QualityRecordTests(unittest.TestCase):
 
             self.assertEqual(planned["record_id"], applied["record_id"])
             record, path = load_quality_record(vault, applied["record_id"])
-            audit = json.loads(audit_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 record["assessment"]["input_sha256"], audit["audit_sha256"]
             )

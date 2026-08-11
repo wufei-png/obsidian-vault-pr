@@ -21,6 +21,7 @@ from .mutation import (
     inspect_journaled_mutation,
     mutation_response,
 )
+from .protocol import ProtocolEnvelopeError, unwrap_success_envelope
 from .rag_contract import (
     RAG_CASE_ID,
     RagContractError,
@@ -585,22 +586,12 @@ def _unwrap_quality_rag_cli_evaluation(
     value: dict[str, Any],
 ) -> dict[str, Any]:
     """Return the evaluation projection from an exact CLI success envelope."""
-    envelope_fields = {"protocol_version", "command", "status", "data"}
-    if not envelope_fields.intersection(value):
-        return value
-    protocol_version = value.get("protocol_version")
-    if (
-        set(value) != envelope_fields
-        or type(protocol_version) is not int
-        or protocol_version != 1
-        or value.get("command") != "quality.rag"
-        or value.get("status") != "ok"
-        or not isinstance(value.get("data"), dict)
-    ):
+    try:
+        return unwrap_success_envelope(value, command="quality.rag")
+    except ProtocolEnvelopeError as exc:
         raise RagEvaluationError(
             "RAG evaluation CLI envelope is incomplete or inconsistent"
-        )
-    return value["data"]
+        ) from exc
 
 
 def _validate_rag_evaluation_projection(

@@ -34,7 +34,10 @@ against a disposable test Source Reference. Never redirect a user-supplied
 retention URL to the disposable canary.
 
 For vault quality, run `vault-pr quality graph --config <config>` and inspect its
-deterministic findings directly. Read
+deterministic findings directly. If an eligible finding will support autonomous
+repair, save the complete JSON success envelope outside the Vault under
+`umask 077` and pass that exact file to `quality record-repair-evidence`; do not
+hand-extract or rewrite its `data` object. Read
 [the RAG evaluation contract](references/rag-evaluation.md) before running
 `vault-pr quality rag`. A run without `--answers` is a deterministic discovery
 diagnostic and is not sent to a Quality Assessor. Send only a hash-bound

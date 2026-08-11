@@ -26,6 +26,8 @@ from .quality import (
     audit_graph,
     validate_graph_audit_digest,
 )
+from .protocol import ProtocolEnvelopeError, unwrap_success_envelope
+
 QUALITY_RECORD_ID = re.compile(r"quality_[0-9a-f]{20}")
 QUALITY_RECORD_SCHEMA_VERSION = 2
 
@@ -61,6 +63,18 @@ def _git_dir(vault: Path) -> Path:
     if result.returncode != 0:
         raise QualityRecordError("unable to resolve vault Git directory")
     return Path(result.stdout.strip())
+
+
+def _unwrap_quality_graph_cli_audit(
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the graph audit from an exact CLI success envelope."""
+    try:
+        return unwrap_success_envelope(value, command="quality.graph")
+    except ProtocolEnvelopeError as exc:
+        raise QualityRecordError(
+            "graph audit CLI envelope is incomplete or inconsistent"
+        ) from exc
 
 
 def _record_core(
@@ -111,7 +125,9 @@ def record_quality_findings(
     if not finding_ids or len(finding_ids) != len(set(finding_ids)):
         raise QualityRecordError("finding_ids must be a non-empty unique list")
     vault = load_vault_path(config)
-    audit = _read_json(audit_path, "graph audit")
+    audit = _unwrap_quality_graph_cli_audit(
+        _read_json(audit_path, "graph audit")
+    )
     try:
         validate_graph_audit_digest(audit)
     except QualityAuditError as exc:
