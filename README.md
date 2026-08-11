@@ -76,6 +76,10 @@ a production-compatibility promise.
   its OpenAI adapter disables implicit invocation, but routing policy is not a
   security boundary. Clean-state, review, transaction, and exact-commit gates
   remain authoritative.
+- To refresh an existing copied installation safely, preview with
+  `scripts/sync-vault-pr-skill.sh /absolute/path/to/installed/vault-pr`, then
+  repeat with `--apply`. The command refuses non-`vault-pr` targets and verifies
+  the final tree exactly.
 
 ## Architecture at a glance
 

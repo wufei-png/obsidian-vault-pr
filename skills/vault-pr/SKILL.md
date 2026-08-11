@@ -43,6 +43,14 @@ with `vault-pr quality rag-accept ... --apply`, then commit the returned
 transaction. A diagnostic or merely assessment-ready run is not an Evaluation
 Baseline.
 
+Treat `plan check` output and answer-bearing `quality rag` output as private
+review material: they can contain complete proposed notes, bounded private note
+excerpts, and generated answers. Set `umask 077`, redirect the exact JSON to a
+temporary file outside both the Vault and this checkout, and expose only bounded
+non-content summary fields to routine terminal or conversation logs. Give the
+exact file only to the fresh reviewer that needs it. Never paste the full packet
+into chat merely to confirm that validation passed.
+
 ## Resolve the vault
 
 1. Resolve the CLI checkout before selecting configuration. Here, project root
