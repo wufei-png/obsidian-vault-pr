@@ -66,6 +66,22 @@ class PlanTests(unittest.TestCase):
         )
         freshness.start()
         self.addCleanup(freshness.stop)
+        retrieval = patch(
+            "vault_pr.plan.retrieve_related_notes",
+            side_effect=lambda _config, source_id: {
+                "source_id": source_id,
+                "query": "fixture query",
+                "collection": "fixture",
+                "retrieval_mode": "hybrid",
+                "fusion_strategy": "qmd_rrf",
+                "query_types": ["lex", "vec"],
+                "chunk_strategy": "regex",
+                "rerank": False,
+                "candidates": [],
+            },
+        )
+        self.retriever = retrieval.start()
+        self.addCleanup(retrieval.stop)
 
     def make_vault(
         self,
@@ -682,6 +698,48 @@ class PlanTests(unittest.TestCase):
 
             with self.assertRaisesRegex(PlanError, "capture integrity failed"):
                 validate_plan(make_config(vault), plan_path)
+
+    def test_review_packet_binds_retrieval_candidates_and_visible_diffs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            self.retriever.side_effect = None
+            self.retriever.return_value = {
+                "source_id": source_id,
+                "query": "fixture query",
+                "collection": "fixture",
+                "retrieval_mode": "hybrid",
+                "fusion_strategy": "qmd_rrf",
+                "query_types": ["lex", "vec"],
+                "chunk_strategy": "regex",
+                "rerank": False,
+                "candidates": [
+                    {
+                        "path": "knowledgebase/concept.md",
+                        "title": "Concept",
+                        "snippet": "Existing synthesis",
+                        "score": 0.5,
+                        "score_kind": "qmd_rrf",
+                    }
+                ],
+            }
+            plan_path = self.write_plan(root, source_id, [])
+
+            packet = validate_plan(make_config(vault), plan_path)[
+                "semantic_review_packet"
+            ]["payload"]
+
+            self.assertEqual(len(packet["retrieval_contexts"]), 1)
+            candidate = packet["retrieval_contexts"][0]["candidates"][0]
+            self.assertEqual(candidate["path"], "knowledgebase/concept.md")
+            self.assertIn(candidate["evidence_id"], packet["evidence_ids"])
+            changes = {item["path"]: item for item in packet["visible_changes"]}
+            concept_change = changes["knowledgebase/concept.md"]
+            self.assertIn("Existing synthesis", concept_change["unified_diff"])
+            self.assertIn("Integrated from", concept_change["unified_diff"])
+            self.assertIn(concept_change["evidence_id"], packet["evidence_ids"])
 
     def test_source_note_update_must_preserve_source_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1683,6 +1741,16 @@ class PlanTests(unittest.TestCase):
             checked = validate_plan(make_config(vault), plan_path)
             self.assertIn("purge_capture", checked["risks"])
             self.assertTrue(checked["approval_required"])
+            purge_evidence = checked["semantic_review_packet"]["payload"][
+                "purge_captures"
+            ]
+            self.assertEqual(len(purge_evidence), 1)
+            self.assertEqual(purge_evidence[0]["source_id"], source_id)
+            self.assertEqual(
+                purge_evidence[0]["source_note"],
+                "knowledgebase/sources/source.md",
+            )
+            self.assertNotIn("content", purge_evidence[0]["primary"])
             self.record_assessment(
                 make_config(vault), plan_path, "purge-reviewer", "approve"
             )

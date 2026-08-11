@@ -37,6 +37,12 @@ the packet it received.
 Every output packet repeats `packet_id` and `input_sha256`, sets its role-specific
 output `packet_type`, and adds `instance_id` plus `status`.
 
+Semantic review input also binds live retrieval contexts, exact visible-note
+diffs for update/delete/rename operations, and metadata plus bounded text
+evidence for every `purge_capture` target. Retrieval candidates remain packet
+inputs only; they are separate from prospective durable links and are never
+persisted as Transaction Evidence.
+
 `packet_id` is the first 20 hexadecimal characters of the SHA-256 digest of the
 canonical packet input, prefixed with `pkt_`. Evidence entries use Vault-relative
 paths, case IDs, source IDs, content hashes, or metric IDs; they never contain

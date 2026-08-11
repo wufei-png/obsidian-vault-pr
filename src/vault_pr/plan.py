@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -75,6 +76,7 @@ from .recovery import (
     RecoveryError,
     worktree_file_mode,
 )
+from .retrieve import RetrievalError, retrieve_related_notes
 
 
 class PlanError(RuntimeError):
@@ -105,6 +107,7 @@ QUALITY_RECORD_ID_PATTERN = re.compile(r"quality_[0-9a-f]{20}")
 TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
 HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
 MAX_EVIDENCE_EXCERPT_CHARACTERS = 12_000
+MAX_RETRIEVAL_SNIPPET_CHARACTERS = 2_000
 
 
 @dataclass(frozen=True)
@@ -398,6 +401,177 @@ def _bounded_excerpt(path: Path) -> str:
     except (OSError, UnicodeDecodeError) as exc:
         raise PlanError("evidence is not readable UTF-8 text") from exc
     return text[:MAX_EVIDENCE_EXCERPT_CHARACTERS]
+
+
+def _review_retrieval_context(
+    config: dict[str, Any], source_id: str
+) -> dict[str, Any]:
+    """Bind one live retrieval result into the private semantic review packet."""
+    try:
+        result = retrieve_related_notes(config, source_id)
+    except RetrievalError as exc:
+        raise PlanError(f"required retrieval failed: {exc}") from exc
+    if result.get("source_id") != source_id:
+        raise PlanError("required retrieval returned the wrong source id")
+    raw_candidates = result.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise PlanError("required retrieval returned invalid candidates")
+    candidates: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_candidates):
+        if not isinstance(raw, dict):
+            raise PlanError(f"required retrieval candidate {index} is invalid")
+        path = raw.get("path")
+        score = raw.get("score")
+        score_kind = raw.get("score_kind")
+        if (
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not isinstance(score_kind, str)
+            or not score_kind
+        ):
+            raise PlanError(f"required retrieval candidate {index} is invalid")
+        title = raw.get("title")
+        snippet = raw.get("snippet")
+        if title is not None and not isinstance(title, str):
+            raise PlanError(f"required retrieval candidate {index} title is invalid")
+        if snippet is not None and not isinstance(snippet, str):
+            raise PlanError(
+                f"required retrieval candidate {index} snippet is invalid"
+            )
+        candidates.append(
+            {
+                "evidence_id": f"retrieval_candidate:{source_id}:{path}",
+                "path": path,
+                "title": title,
+                "snippet": (snippet or "")[:MAX_RETRIEVAL_SNIPPET_CHARACTERS],
+                "score": float(score),
+                "score_kind": score_kind,
+            }
+        )
+    query = result.get("query")
+    if not isinstance(query, str) or not query:
+        raise PlanError("required retrieval returned an invalid query")
+    return {
+        "evidence_id": f"retrieval:{source_id}",
+        "source_id": source_id,
+        "query": query,
+        "collection": result.get("collection"),
+        "retrieval_mode": result.get("retrieval_mode"),
+        "fusion_strategy": result.get("fusion_strategy"),
+        "query_types": result.get("query_types"),
+        "chunk_strategy": result.get("chunk_strategy"),
+        "rerank": result.get("rerank"),
+        "candidates": candidates,
+    }
+
+
+def _review_visible_changes(
+    vault: Path,
+    normalized: list[dict[str, Any]],
+    content_snapshots: dict[Path, bytes],
+) -> list[dict[str, Any]]:
+    """Describe exact visible-note changes without copying Capture binaries."""
+    changes: list[dict[str, Any]] = []
+    for operation in normalized:
+        action = operation["action"]
+        if operation.get("capture_artifact") or action in {"create", "promote_asset"}:
+            continue
+        source_path = operation.get("from", operation["path"])
+        try:
+            before = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise PlanError("visible note preimage is not readable UTF-8 text") from exc
+        content_file = operation.get("content_file")
+        if action == "rename" and content_file is None:
+            after = before
+        elif content_file is None:
+            after = ""
+        else:
+            try:
+                after = content_snapshots[content_file].decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise PlanError("proposed Markdown content must be UTF-8") from exc
+        old_path = str(source_path.relative_to(vault))
+        new_path = str(operation["path"].relative_to(vault))
+        diff = "".join(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=f"a/{old_path}",
+                tofile=f"b/{new_path}" if after else "/dev/null",
+            )
+        )
+        changes.append(
+            {
+                "evidence_id": f"change:{old_path}",
+                "action": action,
+                "path": new_path,
+                **({"from": old_path} if action == "rename" else {}),
+                "preimage_sha256": _sha256_bytes(before.encode("utf-8")),
+                "proposed_sha256": (
+                    _sha256_bytes(after.encode("utf-8")) if after else None
+                ),
+                "unified_diff": diff,
+            }
+        )
+    return changes
+
+
+def _review_purge_evidence(
+    config: dict[str, Any], vault: Path, normalized: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Bind each purge target without exposing raw Capture content."""
+    results: list[dict[str, Any]] = []
+    source_ids = sorted(
+        {
+            operation["purge_source_id"]
+            for operation in normalized
+            if operation.get("purge_source_id")
+        }
+    )
+    for source_id in source_ids:
+        capture = source_archive_dir(config, vault) / source_id
+        try:
+            manifest = load_validated_capture(
+                capture,
+                source_id=source_id,
+                vault=vault,
+            )
+            source_note = resolve_source_note(config, vault, source_id)
+        except (CaptureError, IngestError) as exc:
+            raise PlanError(f"purge_capture source is invalid: {exc}") from exc
+        extracted_record = manifest["derived"]["extracted"]
+        extracted_path = capture / str(extracted_record["path"])
+        primary = manifest["primary"]
+        results.append(
+            {
+                "evidence_id": f"purge_capture:{source_id}",
+                "source_id": source_id,
+                "title": str(manifest.get("title", "")),
+                "manifest_sha256": _sha256_file(capture / "manifest.json"),
+                "primary": {
+                    "path": str(primary["path"]),
+                    "sha256": str(primary["sha256"]),
+                    "size": int(primary["size"]),
+                    "mime": str(primary["mime"]),
+                },
+                "extracted": {
+                    "path": str(extracted_record["path"]),
+                    "sha256": str(extracted_record["sha256"]),
+                    "size": int(extracted_record["size"]),
+                    "mime": str(extracted_record["mime"]),
+                    "excerpt": _bounded_excerpt(extracted_path),
+                },
+                "source_note": str(source_note.relative_to(vault)),
+                "source_note_sha256": _sha256_file(source_note),
+                "source_note_excerpt": _bounded_excerpt(source_note),
+            }
+        )
+    return results
 
 
 def _normalize_source_evidence(
@@ -1191,6 +1365,20 @@ def validate_plan(
         )
         for path in content_paths
     }
+    retrieval_contexts = (
+        [
+            _review_retrieval_context(config, item["source_id"])
+            for item in source_evidence
+        ]
+        if retrieval["required"]
+        else []
+    )
+    visible_changes = _review_visible_changes(
+        vault,
+        normalized,
+        content_snapshots,
+    )
+    purge_evidence = _review_purge_evidence(config, vault, normalized)
     governance_sha256 = _governance_digest_snapshot(
         plan_path,
         plan_bytes,
@@ -1220,6 +1408,14 @@ def validate_plan(
         "plan",
         "authorization",
         *[item["evidence_id"] for item in evidence],
+        *[item["evidence_id"] for item in retrieval_contexts],
+        *[
+            candidate["evidence_id"]
+            for item in retrieval_contexts
+            for candidate in item["candidates"]
+        ],
+        *[item["evidence_id"] for item in visible_changes],
+        *[item["evidence_id"] for item in purge_evidence],
         *[item["evidence_id"] for item in proposed_contents],
         *[item["evidence_id"] for item in proposed_assets],
     ]
@@ -1232,7 +1428,10 @@ def validate_plan(
         "authorization": authorization,
         "evidence": evidence,
         "retrieval": retrieval,
+        "retrieval_contexts": retrieval_contexts,
         "index_freshness": index_freshness,
+        "visible_changes": visible_changes,
+        "purge_captures": purge_evidence,
         "proposed_contents": proposed_contents,
         "obsidian_validation": review_obsidian_validation,
         "risks": risks,
