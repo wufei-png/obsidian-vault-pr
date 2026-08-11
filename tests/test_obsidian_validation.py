@@ -175,6 +175,150 @@ class ObsidianValidationTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "valid")
 
+    def test_accepts_non_embed_link_to_tracked_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config = self._vault(root)
+            note = vault / "knowledgebase" / "note.md"
+            note.write_text(_note("Note", "Body"), encoding="utf-8")
+            base = vault / "knowledgebase" / "index.base"
+            base.write_text(
+                "views:\n  - type: table\n    name: All\n",
+                encoding="utf-8",
+            )
+            self._commit(vault)
+
+            result = validate_proposed_obsidian_state(
+                config,
+                vault,
+                self._update(
+                    root,
+                    vault,
+                    "knowledgebase/note.md",
+                    _note("Note", "See [[knowledgebase/index.base]]."),
+                ),
+            )
+
+            self.assertEqual(result["status"], "valid")
+            self.assertEqual(result["prospective_reference_debt"], [])
+            self.assertEqual(
+                result["resolved_assets_by_path"]["knowledgebase/note.md"],
+                ["knowledgebase/index.base"],
+            )
+
+    def test_non_embed_dotted_name_still_resolves_markdown_note(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config = self._vault(root)
+            source = vault / "knowledgebase" / "source.md"
+            target = vault / "knowledgebase" / "release.v1.md"
+            source.write_text(_note("Source", "Body"), encoding="utf-8")
+            target.write_text(_note("Release", "Body"), encoding="utf-8")
+            self._commit(vault)
+
+            result = validate_proposed_obsidian_state(
+                config,
+                vault,
+                self._update(
+                    root,
+                    vault,
+                    "knowledgebase/source.md",
+                    _note("Source", "See [[release.v1]]."),
+                ),
+            )
+
+            self.assertEqual(result["prospective_reference_debt"], [])
+            self.assertEqual(
+                result["resolved_links_by_path"]["knowledgebase/source.md"],
+                ["knowledgebase/release.v1.md"],
+            )
+
+    def test_rejects_non_embed_link_to_invalid_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config = self._vault(root)
+            note = vault / "knowledgebase" / "note.md"
+            note.write_text(_note("Note", "Body"), encoding="utf-8")
+            (vault / "knowledgebase" / "index.base").write_text(
+                "views: invalid\n",
+                encoding="utf-8",
+            )
+            self._commit(vault)
+
+            with self.assertRaisesRegex(
+                ObsidianValidationError,
+                "invalid_base",
+            ):
+                validate_proposed_obsidian_state(
+                    config,
+                    vault,
+                    self._update(
+                        root,
+                        vault,
+                        "knowledgebase/note.md",
+                        _note("Note", "See [[knowledgebase/index.base]]."),
+                    ),
+                )
+
+    def test_rejects_non_embed_ambiguous_base_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config = self._vault(root)
+            note = vault / "knowledgebase" / "note.md"
+            note.write_text(_note("Note", "Body"), encoding="utf-8")
+            for folder in ("one", "two"):
+                base = vault / "knowledgebase" / folder / "index.base"
+                base.parent.mkdir()
+                base.write_text(
+                    "views:\n  - type: table\n    name: All\n",
+                    encoding="utf-8",
+                )
+            self._commit(vault)
+
+            with self.assertRaisesRegex(
+                ObsidianValidationError,
+                "ambiguous_attachment",
+            ):
+                validate_proposed_obsidian_state(
+                    config,
+                    vault,
+                    self._update(
+                        root,
+                        vault,
+                        "knowledgebase/note.md",
+                        _note("Note", "See [[index.base]]."),
+                    ),
+                )
+
+    def test_rejects_non_embed_link_to_internal_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, config = self._vault(root)
+            note = vault / "knowledgebase" / "note.md"
+            note.write_text(_note("Note", "Body"), encoding="utf-8")
+            internal = vault / ".vault-pr" / "index.base"
+            internal.parent.mkdir()
+            internal.write_text(
+                "views:\n  - type: table\n    name: All\n",
+                encoding="utf-8",
+            )
+            self._commit(vault)
+
+            with self.assertRaisesRegex(
+                ObsidianValidationError,
+                "asset_promotion_required",
+            ):
+                validate_proposed_obsidian_state(
+                    config,
+                    vault,
+                    self._update(
+                        root,
+                        vault,
+                        "knowledgebase/note.md",
+                        _note("Note", "See [[.vault-pr/index.base]]."),
+                    ),
+                )
+
     def test_rejects_direct_embed_of_internal_capture_asset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

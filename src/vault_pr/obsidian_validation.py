@@ -344,9 +344,15 @@ def _issues(
             value = match.group(2).split("|", 1)[0].strip()
             target, separator, anchor = value.partition("#")
             suffix = PurePosixPath(target).suffix.casefold()
-            if embed and suffix and suffix != ".md":
-                candidates = _file_candidates(source_path, target, files)
-                if _references_internal_path(source_path, target, candidates):
+            file_candidates = (
+                _file_candidates(source_path, target, files)
+                if suffix and suffix != ".md"
+                else []
+            )
+            if suffix and suffix != ".md" and (embed or file_candidates):
+                if _references_internal_path(
+                    source_path, target, file_candidates
+                ):
                     issues.append(
                         {
                             "kind": "asset_promotion_required",
@@ -354,27 +360,29 @@ def _issues(
                             "target": target,
                         }
                     )
-                elif len(candidates) != 1:
+                elif len(file_candidates) != 1:
                     issues.append(
                         {
                             "kind": "broken_attachment"
-                            if not candidates
+                            if not file_candidates
                             else "ambiguous_attachment",
                             "path": source_path,
                             "target": target,
                         }
                     )
                 else:
-                    resolved_assets_by_path[source_path].append(candidates[0])
+                    resolved_assets_by_path[source_path].append(
+                        file_candidates[0]
+                    )
                     if suffix == ".base":
                         try:
-                            _validate_base(vault, candidates[0])
+                            _validate_base(vault, file_candidates[0])
                         except ObsidianValidationError:
                             issues.append(
                                 {
                                     "kind": "invalid_base",
                                     "path": source_path,
-                                    "target": candidates[0],
+                                    "target": file_candidates[0],
                                 }
                             )
                 continue
