@@ -33,7 +33,7 @@ class IndexUpdateError(RuntimeError):
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Sleeper = Callable[[float], None]
 QmdCapabilityProbe = Callable[..., dict[str, object]]
-INDEX_STATUS_SCHEMA_VERSION = 1
+INDEX_STATUS_SCHEMA_VERSION = 2
 INDEX_STATUS_KIND = "qmd_index_status"
 INDEX_STATUS_MAX_BYTES = 1_000_000
 HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -385,13 +385,17 @@ def _validate_qmd_snapshot(snapshot: object) -> dict[str, object]:
         "version",
         "capabilities",
         "capability_sha256",
+        "retrieval_mode",
+        "embedding_model_sha256",
+        "chunk_strategy",
+        "runtime_identity_sha256",
     }:
         raise IndexUpdateError(
             "index status contains an invalid qmd capability snapshot"
         )
     capabilities = snapshot.get("capabilities")
     if (
-        snapshot.get("schema_version") != 1
+        snapshot.get("schema_version") != 2
         or snapshot.get("tool") != "qmd"
         or not isinstance(snapshot.get("version"), str)
         or not snapshot["version"]
@@ -405,14 +409,54 @@ def _validate_qmd_snapshot(snapshot: object) -> dict[str, object]:
         raise IndexUpdateError(
             "index status contains an invalid qmd capability snapshot"
         )
-    identity = {
+    capability_identity = {
         "schema_version": snapshot["schema_version"],
         "tool": snapshot["tool"],
         "capabilities": capabilities,
     }
-    expected = hashlib.sha256(_canonical_json(identity)).hexdigest()
-    if snapshot.get("capability_sha256") != expected:
+    expected_capability = hashlib.sha256(
+        _canonical_json(capability_identity)
+    ).hexdigest()
+    if snapshot.get("capability_sha256") != expected_capability:
         raise IndexUpdateError("qmd capability snapshot hash does not match")
+    mode = snapshot.get("retrieval_mode")
+    model_sha256 = snapshot.get("embedding_model_sha256")
+    chunk_strategy = snapshot.get("chunk_strategy")
+    required_capabilities = {
+        "index_selection",
+        "collection_inspection",
+        "context_inspection",
+        "incremental_update",
+        "lexical_search",
+    }
+    if mode == "lexical":
+        if model_sha256 is not None or chunk_strategy is not None:
+            raise IndexUpdateError("lexical qmd snapshot contains vector identity")
+    elif mode == "hybrid":
+        required_capabilities.update(
+            {"bounded_embedding_batch", "structured_hybrid_query"}
+        )
+        if (
+            not isinstance(model_sha256, str)
+            or not HEX64_PATTERN.fullmatch(model_sha256)
+            or chunk_strategy != "regex"
+        ):
+            raise IndexUpdateError("hybrid qmd snapshot lacks vector identity")
+    else:
+        raise IndexUpdateError("qmd snapshot contains an invalid retrieval mode")
+    if not required_capabilities.issubset(capabilities):
+        raise IndexUpdateError("qmd snapshot lacks required mode capabilities")
+    runtime_identity = {
+        **capability_identity,
+        "version": snapshot["version"],
+        "capability_sha256": snapshot["capability_sha256"],
+        "retrieval_mode": mode,
+        "embedding_model_sha256": model_sha256,
+        "chunk_strategy": chunk_strategy,
+    }
+    expected_runtime = hashlib.sha256(_canonical_json(runtime_identity)).hexdigest()
+    if snapshot.get("runtime_identity_sha256") != expected_runtime:
+        raise IndexUpdateError("qmd runtime identity hash does not match")
     return snapshot
 
 
@@ -484,6 +528,27 @@ def _metadata(
     }
 
 
+def _is_default_model_materialization(
+    before: dict[str, object], after: dict[str, object]
+) -> bool:
+    """Allow qmd to materialize its version-bound default model once."""
+    if (
+        before.get("retrieval_mode") != "hybrid"
+        or after.get("retrieval_mode") != "hybrid"
+        or before.get("version") != after.get("version")
+        or before.get("capability_sha256") != after.get("capability_sha256")
+        or before.get("chunk_strategy") != after.get("chunk_strategy")
+    ):
+        return False
+    version = before.get("version")
+    if not isinstance(version, str):
+        return False
+    default_model_sha256 = hashlib.sha256(
+        f"qmd-version-default:{version}".encode("utf-8")
+    ).hexdigest()
+    return before.get("embedding_model_sha256") == default_model_sha256
+
+
 def load_index_status(vault: Path) -> tuple[dict[str, Any], str]:
     """Load, bound, validate, and hash the persisted qmd index status."""
     path = index_status_path(vault)
@@ -523,7 +588,11 @@ def validate_qmd_index_freshness(
     expected_commit = head.stdout.strip()
     expected_config = relevant_index_config_sha256(config)
     try:
-        current_qmd = capability_probe(qmd, index_name=index_name)
+        current_qmd = capability_probe(
+            qmd,
+            index_name=index_name,
+            retrieval_mode=retrieval_mode(config),
+        )
         _validate_qmd_snapshot(current_qmd)
     except (ToolProbeError, IndexUpdateError) as exc:
         raise IndexUpdateError(f"qmd capability validation failed: {exc}") from exc
@@ -548,10 +617,10 @@ def validate_qmd_index_freshness(
         "index_completed": status.get("status") == "indexed",
         "commit_matches": status.get("git_commit") == expected_commit,
         "config_matches": status.get("relevant_config_sha256") == expected_config,
-        "qmd_capabilities_match": (
+        "qmd_runtime_matches": (
             isinstance(status.get("qmd"), dict)
-            and status["qmd"].get("capability_sha256")
-            == current_qmd.get("capability_sha256")
+            and status["qmd"].get("runtime_identity_sha256")
+            == current_qmd.get("runtime_identity_sha256")
         ),
     }
     reasons.extend(name for name, passed in checks.items() if not passed)
@@ -585,7 +654,11 @@ def update_qmd_index(
     if not qmd:
         raise IndexUpdateError("required tool missing: qmd")
     try:
-        qmd_snapshot = capability_probe(qmd, index_name=index_name)
+        qmd_snapshot = capability_probe(
+            qmd,
+            index_name=index_name,
+            retrieval_mode=retrieval_mode(config),
+        )
         _validate_qmd_snapshot(qmd_snapshot)
     except (ToolProbeError, IndexUpdateError) as exc:
         raise IndexUpdateError(f"qmd capability validation failed: {exc}") from exc
@@ -633,8 +706,32 @@ def update_qmd_index(
                     "embed",
                     "--max-docs-per-batch",
                     str(batch_size),
+                    "--chunk-strategy",
+                    "regex",
                 )
             if result.returncode == 0:
+                try:
+                    verified_qmd_snapshot = capability_probe(
+                        qmd,
+                        index_name=index_name,
+                        retrieval_mode=retrieval_mode(config),
+                    )
+                    _validate_qmd_snapshot(verified_qmd_snapshot)
+                except (ToolProbeError, IndexUpdateError) as exc:
+                    raise IndexUpdateError(
+                        f"post-index qmd identity validation failed: {exc}"
+                    ) from exc
+                if (
+                    verified_qmd_snapshot["runtime_identity_sha256"]
+                    != qmd_snapshot["runtime_identity_sha256"]
+                    and not _is_default_model_materialization(
+                        qmd_snapshot,
+                        verified_qmd_snapshot,
+                    )
+                ):
+                    raise IndexUpdateError(
+                        "qmd runtime identity changed during index refresh"
+                    )
                 status = {
                     "schema_version": INDEX_STATUS_SCHEMA_VERSION,
                     "kind": INDEX_STATUS_KIND,
@@ -644,7 +741,7 @@ def update_qmd_index(
                         timespec="seconds"
                     ),
                     "reconciliation": reconciliation,
-                    **_metadata(config, vault, qmd_snapshot),
+                    **_metadata(config, vault, verified_qmd_snapshot),
                 }
                 _write_status(vault, status)
                 return status

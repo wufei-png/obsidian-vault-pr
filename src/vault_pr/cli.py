@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .canary import CanaryError, run_capture_route_canary
-from .config import ConfigError, load_config, load_vault_path
+from .config import ConfigError, load_config, load_vault_path, retrieval_mode
 from .git import GitSafetyError, require_clean_git_root, run_git
 from .index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
 from .errors import IngestError
@@ -125,6 +125,7 @@ def doctor(config_path: Path) -> int:
                 probe_qmd_capabilities(
                     path,
                     index_name=str(config.get("index", {}).get("name", "notebook")),
+                    retrieval_mode=retrieval_mode(config),
                 )
                 if tool == "qmd"
                 else probe_defuddle_capabilities(path)

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
+
+import yaml
 
 from .process import LimitedProcessResult, LimitedProcessTimeout, run_limited_process
 
@@ -15,6 +19,7 @@ class ToolProbeError(RuntimeError):
 
 
 ProbeRunner = Callable[[Sequence[str]], LimitedProcessResult]
+EmbeddingModelReader = Callable[[str, str], str]
 TOOL_CAPABILITY_SCHEMA_VERSION = 1
 PROBE_TIMEOUT_SECONDS = 5.0
 PROBE_MAX_MEMORY_BYTES = 512 * 1024 * 1024
@@ -127,12 +132,16 @@ def probe_qmd_capabilities(
     executable: str,
     *,
     index_name: str,
+    retrieval_mode: str = "hybrid",
     runner: ProbeRunner = _bounded_probe,
+    embedding_model_reader: EmbeddingModelReader | None = None,
 ) -> dict[str, object]:
     """Probe the exact non-mutating qmd surface required by the index kernel."""
     if not index_name.strip():
         raise ToolProbeError("qmd index name must be non-empty")
-    probes = (
+    if retrieval_mode not in {"lexical", "hybrid"}:
+        raise ToolProbeError("qmd retrieval mode must be lexical or hybrid")
+    probes = [
         CapabilityProbe("index_selection", ("--help",), ("--index",)),
         CapabilityProbe(
             "collection_inspection",
@@ -149,17 +158,112 @@ def probe_qmd_capabilities(
             ("--index", index_name, "update", "--help"),
         ),
         CapabilityProbe(
-            "bounded_embedding_batch",
-            ("--index", index_name, "embed", "--help"),
-            ("--max-docs-per-batch",),
+            "lexical_search",
+            ("--index", index_name, "search", "--help"),
+            ("--format",),
         ),
-    )
-    return probe_tool_capabilities(
+    ]
+    if retrieval_mode == "hybrid":
+        probes.extend(
+            [
+                CapabilityProbe(
+                    "bounded_embedding_batch",
+                    ("--index", index_name, "embed", "--help"),
+                    ("--max-docs-per-batch", "--chunk-strategy"),
+                ),
+                CapabilityProbe(
+                    "structured_hybrid_query",
+                    ("--index", index_name, "query", "--help"),
+                    ("lex:", "vec:", "--no-rerank", "--chunk-strategy"),
+                ),
+            ]
+        )
+    snapshot = probe_tool_capabilities(
         tool="qmd",
         executable=executable,
         probes=probes,
         runner=runner,
     )
+    model_sha256: str | None = None
+    chunk_strategy: str | None = None
+    if retrieval_mode == "hybrid":
+        reader = embedding_model_reader or _read_qmd_embedding_model
+        model = reader(index_name, str(snapshot["version"]))
+        if not model.strip():
+            raise ToolProbeError("qmd embedding model identity is empty")
+        model_sha256 = hashlib.sha256(model.encode("utf-8")).hexdigest()
+        chunk_strategy = "regex"
+
+    capabilities = snapshot["capabilities"]
+    capability_identity = {
+        "schema_version": 2,
+        "tool": "qmd",
+        "capabilities": capabilities,
+    }
+    capability_sha256 = hashlib.sha256(
+        _canonical_json(capability_identity)
+    ).hexdigest()
+    runtime_identity = {
+        **capability_identity,
+        "version": snapshot["version"],
+        "capability_sha256": capability_sha256,
+        "retrieval_mode": retrieval_mode,
+        "embedding_model_sha256": model_sha256,
+        "chunk_strategy": chunk_strategy,
+    }
+    return {
+        **runtime_identity,
+        "runtime_identity_sha256": hashlib.sha256(
+            _canonical_json(runtime_identity)
+        ).hexdigest(),
+    }
+
+
+def _qmd_config_path(index_name: str) -> Path:
+    if "/" in index_name:
+        absolute = os.path.abspath(index_name)
+        config_name = absolute.replace("/", "_").lstrip("_")
+    else:
+        config_name = index_name
+    configured = os.environ.get("QMD_CONFIG_DIR")
+    if configured:
+        config_dir = Path(configured).expanduser()
+    elif os.environ.get("XDG_CONFIG_HOME"):
+        config_dir = Path(os.environ["XDG_CONFIG_HOME"]).expanduser() / "qmd"
+    else:
+        config_dir = Path.home() / ".config" / "qmd"
+    return config_dir / f"{config_name}.yml"
+
+
+def _read_qmd_embedding_model(index_name: str, qmd_version: str) -> str:
+    """Resolve qmd's active embedding model without persisting its local path."""
+    config_path = _qmd_config_path(index_name)
+    try:
+        if config_path.is_symlink() or (
+            config_path.exists()
+            and (not config_path.is_file() or config_path.stat().st_size > 1_000_000)
+        ):
+            raise ToolProbeError("qmd index config is unsafe or too large")
+        if config_path.is_file():
+            parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if parsed is not None and not isinstance(parsed, dict):
+                raise ToolProbeError("qmd index config must be a YAML mapping")
+            models = (parsed or {}).get("models", {})
+            if models is not None and not isinstance(models, dict):
+                raise ToolProbeError("qmd index models must be a YAML mapping")
+            configured = (models or {}).get("embed")
+            if configured is not None:
+                if not isinstance(configured, str) or not configured.strip():
+                    raise ToolProbeError("qmd index models.embed must be non-empty")
+                return configured.strip()
+    except ToolProbeError:
+        raise
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ToolProbeError("qmd index config cannot prove model identity") from exc
+    environment_model = os.environ.get("QMD_EMBED_MODEL", "").strip()
+    if environment_model:
+        return environment_model
+    return f"qmd-version-default:{qmd_version}"
 
 
 def probe_defuddle_capabilities(

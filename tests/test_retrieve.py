@@ -103,6 +103,7 @@ class RetrieveTests(unittest.TestCase):
             self.assertEqual(result["retrieval_mode"], "hybrid")
             self.assertEqual(result["fusion_strategy"], "qmd_rrf")
             self.assertEqual(result["query_types"], ["lex", "vec"])
+            self.assertEqual(result["chunk_strategy"], "regex")
             self.assertFalse(result["rerank"])
 
     def test_lexical_mode_uses_only_bm25_search(self) -> None:
@@ -131,6 +132,7 @@ class RetrieveTests(unittest.TestCase):
             self.assertEqual(result["retrieval_mode"], "lexical")
             self.assertEqual(result["fusion_strategy"], "none")
             self.assertEqual(result["query_types"], ["lex"])
+            self.assertIsNone(result["chunk_strategy"])
             self.assertEqual(result["candidates"][0]["score_kind"], "bm25")
 
     def test_hybrid_query_sanitizes_typed_grammar_and_expands_candidate_pool(
@@ -153,6 +155,10 @@ class RetrieveTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--candidate-limit") + 1],
             "50",
+        )
+        self.assertEqual(
+            command[command.index("--chunk-strategy") + 1],
+            "regex",
         )
 
     def test_matches_qmd_virtual_path_normalization(self) -> None:

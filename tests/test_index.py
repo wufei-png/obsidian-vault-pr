@@ -36,38 +36,75 @@ def make_config(vault: Path, *, max_retries: int = 3) -> dict[str, object]:
     }
 
 
-def qmd_snapshot(version: str = "qmd test") -> dict[str, object]:
+def qmd_snapshot(
+    version: str = "qmd test",
+    *,
+    retrieval_mode: str = "hybrid",
+    model: str = "model-fixture",
+    extra_capabilities: dict[str, bool] | None = None,
+) -> dict[str, object]:
     capabilities = {
         "index_selection": True,
         "collection_inspection": True,
         "context_inspection": True,
         "incremental_update": True,
-        "bounded_embedding_batch": True,
+        "lexical_search": True,
     }
-    identity = {
-        "schema_version": 1,
+    if retrieval_mode == "hybrid":
+        capabilities.update(
+            {
+                "bounded_embedding_batch": True,
+                "structured_hybrid_query": True,
+            }
+        )
+    capabilities.update(extra_capabilities or {})
+    capability_identity = {
+        "schema_version": 2,
         "tool": "qmd",
         "capabilities": capabilities,
     }
-    digest = hashlib.sha256(
+    capability_sha256 = hashlib.sha256(
         json.dumps(
-            identity,
+            capability_identity,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    return {
-        **identity,
+    runtime_identity = {
+        **capability_identity,
         "version": version,
-        "capability_sha256": digest,
+        "capability_sha256": capability_sha256,
+        "retrieval_mode": retrieval_mode,
+        "embedding_model_sha256": (
+            hashlib.sha256(model.encode("utf-8")).hexdigest()
+            if retrieval_mode == "hybrid"
+            else None
+        ),
+        "chunk_strategy": "regex" if retrieval_mode == "hybrid" else None,
+    }
+    return {
+        **runtime_identity,
+        "runtime_identity_sha256": hashlib.sha256(
+            json.dumps(
+                runtime_identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
     }
 
 
-def capability_probe(_executable: str, *, index_name: str) -> dict[str, object]:
+def capability_probe(
+    _executable: str,
+    *,
+    index_name: str,
+    retrieval_mode: str,
+) -> dict[str, object]:
     if index_name != "test-notebook":
         raise AssertionError(f"unexpected qmd index name: {index_name}")
-    return qmd_snapshot()
+    return qmd_snapshot(retrieval_mode=retrieval_mode)
 
 
 class QmdRunner:
@@ -416,6 +453,65 @@ class IndexTests(unittest.TestCase):
             self.assertEqual(status["attempts"], 3)
             self.assertEqual(runner.update_calls, 3)
             self.assertTrue(any("embed" in call for call in runner.calls))
+            embed_call = next(call for call in runner.calls if call[3] == "embed")
+            self.assertEqual(
+                embed_call[embed_call.index("--chunk-strategy") + 1],
+                "regex",
+            )
+
+    def test_refuses_fresh_status_when_qmd_identity_changes_during_refresh(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            runner = QmdRunner(vault, collection_path=vault)
+            snapshots = iter(
+                [
+                    qmd_snapshot(model="first-model"),
+                    qmd_snapshot(model="second-model"),
+                ]
+            )
+
+            with self.assertRaisesRegex(
+                IndexUpdateError,
+                "runtime identity changed",
+            ):
+                update_qmd_index(
+                    make_config(vault),
+                    runner=runner,
+                    sleeper=lambda _: None,
+                    executable="qmd",
+                    capability_probe=lambda _executable, **_kwargs: next(snapshots),
+                )
+
+            self.assertFalse(
+                (vault / ".git" / "vault-pr-index-status.json").exists()
+            )
+
+    def test_accepts_first_run_default_model_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            runner = QmdRunner(vault, collection_path=vault)
+            snapshots = iter(
+                [
+                    qmd_snapshot(model="qmd-version-default:qmd test"),
+                    qmd_snapshot(model="materialized-default-model"),
+                ]
+            )
+
+            status = update_qmd_index(
+                make_config(vault),
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=lambda _executable, **_kwargs: next(snapshots),
+            )
+
+            self.assertEqual(status["status"], "indexed")
+            self.assertEqual(
+                status["qmd"]["embedding_model_sha256"],
+                hashlib.sha256(b"materialized-default-model").hexdigest(),
+            )
 
     def test_lexical_mode_updates_without_embedding(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -582,26 +678,15 @@ class IndexTests(unittest.TestCase):
             )
 
             def changed_probe(
-                _executable: str, *, index_name: str
+                _executable: str,
+                *,
+                index_name: str,
+                retrieval_mode: str,
             ) -> dict[str, object]:
-                snapshot = qmd_snapshot("qmd newer")
-                capabilities = dict(snapshot["capabilities"])
-                capabilities["new_read_only_feature"] = True
-                identity = {
-                    "schema_version": 1,
-                    "tool": "qmd",
-                    "capabilities": capabilities,
-                }
-                snapshot["capabilities"] = capabilities
-                snapshot["capability_sha256"] = hashlib.sha256(
-                    json.dumps(
-                        identity,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
-                return snapshot
+                return qmd_snapshot(
+                    retrieval_mode=retrieval_mode,
+                    extra_capabilities={"new_read_only_feature": True},
+                )
 
             stale = validate_qmd_index_freshness(
                 config,
@@ -610,7 +695,7 @@ class IndexTests(unittest.TestCase):
                 capability_probe=changed_probe,
             )
             self.assertFalse(stale["eligible"])
-            self.assertIn("qmd_capabilities_match", stale["reasons"])
+            self.assertIn("qmd_runtime_matches", stale["reasons"])
 
     def test_freshness_requires_exact_relevant_config_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -639,7 +724,7 @@ class IndexTests(unittest.TestCase):
             self.assertIn("config_matches", stale["reasons"])
             self.assertNotIn("collection_aligned", stale["reasons"])
 
-    def test_freshness_ignores_qmd_version_when_capabilities_match(self) -> None:
+    def test_freshness_rejects_qmd_version_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = self.make_vault(Path(temp_dir))
             config = make_config(vault)
@@ -652,15 +737,43 @@ class IndexTests(unittest.TestCase):
                 capability_probe=capability_probe,
             )
 
-            fresh = validate_qmd_index_freshness(
+            stale = validate_qmd_index_freshness(
                 config,
                 runner=runner,
                 executable="qmd",
-                capability_probe=lambda _executable, *, index_name: qmd_snapshot(
-                    "qmd compatible upgrade"
+                capability_probe=lambda _executable, *, index_name, retrieval_mode: qmd_snapshot(
+                    "qmd compatible upgrade",
+                    retrieval_mode=retrieval_mode,
                 ),
             )
-            self.assertTrue(fresh["eligible"])
+            self.assertFalse(stale["eligible"])
+            self.assertIn("qmd_runtime_matches", stale["reasons"])
+
+    def test_freshness_rejects_embedding_model_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = self.make_vault(Path(temp_dir))
+            config = make_config(vault)
+            runner = QmdRunner(vault, collection_path=vault)
+            update_qmd_index(
+                config,
+                runner=runner,
+                sleeper=lambda _: None,
+                executable="qmd",
+                capability_probe=capability_probe,
+            )
+
+            stale = validate_qmd_index_freshness(
+                config,
+                runner=runner,
+                executable="qmd",
+                capability_probe=lambda _executable, *, index_name, retrieval_mode: qmd_snapshot(
+                    retrieval_mode=retrieval_mode,
+                    model="different-model",
+                ),
+            )
+
+            self.assertFalse(stale["eligible"])
+            self.assertIn("qmd_runtime_matches", stale["reasons"])
 
     def test_index_status_schema_rejects_unknown_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

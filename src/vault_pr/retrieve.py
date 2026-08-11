@@ -86,6 +86,7 @@ def qmd_retrieval_strategy(config: dict[str, Any]) -> dict[str, Any]:
             "fusion_strategy": "none",
             "score_kind": "bm25",
             "query_types": ["lex"],
+            "chunk_strategy": None,
             "rerank": False,
         }
     return {
@@ -93,6 +94,7 @@ def qmd_retrieval_strategy(config: dict[str, Any]) -> dict[str, Any]:
         "fusion_strategy": "qmd_rrf",
         "score_kind": "qmd_rrf",
         "query_types": ["lex", "vec"],
+        "chunk_strategy": "regex",
         "rerank": False,
     }
 
@@ -124,7 +126,13 @@ def build_qmd_retrieval_command(
     command.extend(["-c", collection, "-n", str(limit)])
     if mode == "hybrid":
         command.extend(
-            ["--candidate-limit", str(max(40, limit)), "--no-rerank"]
+            [
+                "--candidate-limit",
+                str(max(40, limit)),
+                "--no-rerank",
+                "--chunk-strategy",
+                "regex",
+            ]
         )
     command.extend(["--format", "json"])
     return command
@@ -319,6 +327,7 @@ def retrieve_related_notes(
         "retrieval_mode": strategy["retrieval_mode"],
         "fusion_strategy": strategy["fusion_strategy"],
         "query_types": strategy["query_types"],
+        "chunk_strategy": strategy["chunk_strategy"],
         "rerank": strategy["rerank"],
         "index_freshness": index_freshness,
         "candidates": candidates,
