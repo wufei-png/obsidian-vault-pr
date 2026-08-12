@@ -61,9 +61,11 @@ into chat merely to confirm that validation passed.
    executing, not the target Vault or the caller's current directory. When
    multiple `vault-pr.local.toml` files exist, pass the chosen checkout-local
    path explicitly; never combine a CLI from one checkout with an unverified
-   config from another directory. Execute the checkout's environment, such as
-   `uv run vault-pr` or its `.venv/bin/vault-pr`, instead of an unrelated global
-   executable.
+   config from another directory. Prefer the checkout's existing
+   `.venv/bin/vault-pr`. If `uv` must launch it, use `uv run --frozen vault-pr`
+   and verify that `uv.lock` stayed unchanged; host registry or mirror settings
+   must not rewrite the source checkout merely because a Vault command ran.
+   Never use an unrelated global executable.
 2. Run `vault-pr doctor --config <config>` before planning a write.
 3. Refuse an automatic write when the target vault is dirty and cannot be tied
    to an active transaction.
