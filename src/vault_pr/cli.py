@@ -12,7 +12,7 @@ from .canary import CanaryError, run_capture_route_canary
 from .config import ConfigError, load_config, load_vault_path, retrieval_mode
 from .git import GitSafetyError, require_clean_git_root, run_git
 from .index import IndexUpdateError, reconcile_qmd_collection, update_qmd_index
-from .errors import IngestError
+from .errors import DomainError, IngestError
 from .ingest import ingest_source
 from .migrate import MigrationError, migrate_captures_v3
 from .plan import PlanError, apply_plan, init_plan, record_review, validate_plan
@@ -432,13 +432,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _exception_code(exc: Exception) -> str:
-    message = str(exc)
-    if message.startswith("maintenance_request_required"):
-        return "maintenance_request_required"
-    if isinstance(exc, PlanError) and "reviewer approval record is required" in message:
-        return "review_required"
-    if isinstance(exc, PlanError) and "revision limit" in message:
-        return "review_revision_exhausted"
+    if isinstance(exc, DomainError):
+        return exc.code
     if isinstance(exc, ConfigError):
         return "invalid_config"
     if isinstance(exc, GitSafetyError):

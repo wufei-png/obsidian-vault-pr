@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from vault_pr.cli import build_parser, doctor, main
+from vault_pr.cli import _exception_code, build_parser, doctor, main
 from vault_pr.config import (
     ConfigError,
     index_spec,
@@ -19,9 +19,23 @@ from vault_pr.config import (
     retrieval_mode,
     source_notes_dir,
 )
+from vault_pr.plan import PlanError
 
 
 class ConfigTests(unittest.TestCase):
+    def test_plan_protocol_codes_are_structured_not_inferred_from_messages(self) -> None:
+        for code in (
+            "maintenance_request_required",
+            "review_required",
+            "review_revision_exhausted",
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(_exception_code(PlanError("detail", code=code)), code)
+        self.assertEqual(
+            _exception_code(PlanError("reviewer approval record is required")),
+            "invalid_plan",
+        )
+
     def test_load_vault_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

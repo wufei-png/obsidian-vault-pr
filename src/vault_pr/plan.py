@@ -6,9 +6,7 @@ import difflib
 import hashlib
 import json
 import os
-import re
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -40,7 +38,7 @@ from .config import (
     source_archive_dir,
     vault_relative_path,
 )
-from .errors import IngestError
+from .errors import IngestError, PlanError
 from .git import require_clean_git_root, run_git, vault_write_lock
 from .index import IndexUpdateError, validate_qmd_index_freshness
 from .obsidian_validation import (
@@ -72,56 +70,25 @@ from .recovery import (
     worktree_file_mode,
 )
 from .retrieve import RetrievalError, retrieve_related_notes
-
-
-class PlanError(RuntimeError):
-    """Raised when a semantic change plan is invalid or unsafe."""
-
-
-PLAN_SCHEMA_VERSION = 4
-ALLOWED_ACTIONS = {
-    "create",
-    "update",
-    "delete",
-    "rename",
-    "purge_capture",
-    "promote_asset",
-}
-ALLOWED_INTENTS = {"integrate", "maintenance", "merge", "split", "rename"}
-ALLOWED_AUTHORIZATION_KINDS = {"maintenance_request"}
-ALLOWED_EVIDENCE_KINDS = {"source_capture"}
-SOURCE_ID_PATTERN = re.compile(r"src_[0-9a-f]{20}")
-TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
-HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
-MAX_EVIDENCE_EXCERPT_CHARACTERS = 12_000
-EVIDENCE_CONTEXT_LINES = 2
-_FOCUS_RANGES_ABSENT = object()
-MAX_RETRIEVAL_SNIPPET_CHARACTERS = 2_000
-
-
-@dataclass(frozen=True)
-class PlanBundle:
-    """Immutable bytes that identify one apply request."""
-
-    plan_path: Path
-    transaction_id: str
-    plan_bytes: bytes
-    content_snapshots: tuple[tuple[Path, bytes], ...]
-    assessment_bytes: bytes | None
-    review_history_bytes: bytes | None
-    request_sha256: str
-
-
-def _read_json(path: Path, label: str) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise PlanError(f"{label} not found") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PlanError(f"invalid {label}") from exc
-    if not isinstance(value, dict):
-        raise PlanError(f"{label} must be a JSON object")
-    return value
+from .plan_models import (
+    ALLOWED_ACTIONS,
+    ALLOWED_INTENTS,
+    FOCUS_RANGES_ABSENT,
+    MAX_EVIDENCE_EXCERPT_CHARACTERS,
+    MAX_RETRIEVAL_SNIPPET_CHARACTERS,
+    PLAN_SCHEMA_VERSION,
+    SOURCE_ID_PATTERN,
+    TRANSACTION_ID_PATTERN,
+    PlanBundle,
+    normalize_maintenance_authorization,
+    normalized_summary,
+    source_review_evidence,
+)
+from .plan_bundle import (
+    content_file as _content_file,
+    freeze_plan_bundle as _freeze_plan_bundle,
+    read_json as _read_json,
+)
 
 
 def _git_dir(vault: Path) -> Path:
@@ -141,22 +108,6 @@ def _sha256_file(path: Path) -> str:
 
 def _plan_hash(plan_path: Path) -> str:
     return _sha256_file(plan_path)
-
-
-def _proposed_content_paths(
-    plan_path: Path, plan: dict[str, Any] | None = None
-) -> list[Path]:
-    plan = plan if plan is not None else _read_json(plan_path, "plan")
-    operations = plan.get("operations")
-    if not isinstance(operations, list):
-        raise PlanError("plan operations must be an array")
-    content_paths: set[Path] = set()
-    for index, operation in enumerate(operations):
-        if not isinstance(operation, dict):
-            raise PlanError(f"operation {index} must be an object")
-        if operation.get("content_file") is not None:
-            content_paths.add(_content_file(plan_path, operation))
-    return sorted(content_paths)
 
 
 def _governance_digest_snapshot(
@@ -292,67 +243,6 @@ def _frontmatter_ok(content: bytes) -> bool:
     except (StopIteration, yaml.YAMLError):
         return False
     return isinstance(frontmatter, dict)
-
-
-def _content_file(
-    plan_path: Path,
-    operation: dict[str, Any],
-    content_snapshots: dict[Path, bytes] | None = None,
-) -> Path:
-    raw_content_file = operation.get("content_file")
-    if not isinstance(raw_content_file, str) or not raw_content_file.strip():
-        raise PlanError("create/update operation requires content_file")
-    content_path = (plan_path.parent / raw_content_file).resolve()
-    if not content_path.is_relative_to(plan_path.parent.resolve()):
-        raise PlanError("content_file escapes the plan directory")
-    if content_snapshots is not None:
-        if content_path not in content_snapshots:
-            raise PlanError(f"content_file is missing from plan bundle: {raw_content_file}")
-    elif not content_path.is_file():
-        raise PlanError(f"content_file does not exist: {raw_content_file}")
-    return content_path
-
-
-def _normalized_summary(value: object, field: str) -> str:
-    if not isinstance(value, str):
-        raise PlanError(f"{field} must be a string")
-    normalized = " ".join(value.split()).strip()
-    if not normalized:
-        raise PlanError(f"{field} must not be empty")
-    return normalized
-
-
-def _normalize_authorization(
-    _config: dict[str, Any],
-    raw: object,
-) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise PlanError("plan authorization must be an object")
-    kind = raw.get("kind")
-    if not isinstance(kind, str) or kind not in ALLOWED_AUTHORIZATION_KINDS:
-        raise PlanError("plan authorization kind is unsupported")
-    summary = _normalized_summary(raw.get("summary"), "authorization.summary")
-    allowed = {"kind", "summary", "request_ref", "request_sha256"}
-    if set(raw) - allowed:
-        raise PlanError("maintenance request authorization has unknown fields")
-    request_ref = raw.get("request_ref")
-    request_sha256 = raw.get("request_sha256")
-    if (request_ref is None) != (request_sha256 is None):
-        raise PlanError(
-            "authorization request_ref and request_sha256 must be provided together"
-        )
-    normalized: dict[str, Any] = {"kind": kind, "summary": summary}
-    if request_ref is not None:
-        if not isinstance(request_ref, str) or not request_ref.strip():
-            raise PlanError("authorization request_ref must be non-empty")
-        if (
-            not isinstance(request_sha256, str)
-            or not HEX64_PATTERN.fullmatch(request_sha256)
-        ):
-            raise PlanError("authorization request_sha256 must be a SHA-256 digest")
-        normalized["request_ref"] = request_ref.strip()
-        normalized["request_sha256"] = request_sha256
-    return normalized
 
 
 def _bounded_excerpt(path: Path) -> str:
@@ -597,9 +487,9 @@ def _normalize_source_evidence(
         derived.get("extracted"), dict
     ):
         raise PlanError("source capture manifest is missing derived.extracted")
-    review_evidence = _source_review_evidence(
+    review_evidence = source_review_evidence(
         extracted_text,
-        raw.get("focus_ranges", _FOCUS_RANGES_ABSENT),
+        raw.get("focus_ranges", FOCUS_RANGES_ABSENT),
     )
     try:
         source_note = resolve_source_note(config, vault, source_id)
@@ -619,68 +509,6 @@ def _normalize_source_evidence(
     }
 
 
-def _source_review_evidence(
-    extracted_text: str,
-    raw_focus_ranges: object,
-) -> dict[str, Any]:
-    """Build bounded, reproducible review excerpts from one Capture."""
-    if raw_focus_ranges is _FOCUS_RANGES_ABSENT:
-        if len(extracted_text) > MAX_EVIDENCE_EXCERPT_CHARACTERS:
-            raise PlanError(
-                "long source_capture evidence requires non-empty focus_ranges"
-            )
-        return {"excerpt": extracted_text}
-
-    if not isinstance(raw_focus_ranges, list) or not raw_focus_ranges:
-        raise PlanError("source_capture focus_ranges must be a non-empty array")
-    lines = extracted_text.splitlines(keepends=True)
-    normalized_ranges: list[dict[str, int]] = []
-    focus_excerpts: list[dict[str, Any]] = []
-    total_characters = 0
-    for index, raw_range in enumerate(raw_focus_ranges):
-        if not isinstance(raw_range, dict) or set(raw_range) != {
-            "start_line",
-            "end_line",
-        }:
-            raise PlanError(f"source_capture focus range {index} is invalid")
-        start_line = raw_range.get("start_line")
-        end_line = raw_range.get("end_line")
-        if (
-            isinstance(start_line, bool)
-            or not isinstance(start_line, int)
-            or isinstance(end_line, bool)
-            or not isinstance(end_line, int)
-            or start_line < 1
-            or end_line < start_line
-            or end_line > len(lines)
-        ):
-            raise PlanError(f"source_capture focus range {index} is out of bounds")
-        context_start_line = max(1, start_line - EVIDENCE_CONTEXT_LINES)
-        context_end_line = min(len(lines), end_line + EVIDENCE_CONTEXT_LINES)
-        excerpt = "".join(lines[context_start_line - 1 : context_end_line])
-        total_characters += len(excerpt)
-        if total_characters > MAX_EVIDENCE_EXCERPT_CHARACTERS:
-            raise PlanError(
-                "source_capture focused excerpts exceed the per-source review budget"
-            )
-        normalized_ranges.append(
-            {"start_line": start_line, "end_line": end_line}
-        )
-        focus_excerpts.append(
-            {
-                "start_line": start_line,
-                "end_line": end_line,
-                "context_start_line": context_start_line,
-                "context_end_line": context_end_line,
-                "excerpt": excerpt,
-            }
-        )
-    return {
-        "focus_ranges": normalized_ranges,
-        "focus_excerpts": focus_excerpts,
-    }
-
-
 def _normalize_evidence(
     config: dict[str, Any],
     vault: Path,
@@ -695,7 +523,7 @@ def _normalize_evidence(
         if not isinstance(raw, dict):
             raise PlanError(f"evidence {index} has an unsupported kind")
         kind = raw.get("kind")
-        if not isinstance(kind, str) or kind not in ALLOWED_EVIDENCE_KINDS:
+        if kind != "source_capture":
             raise PlanError(f"evidence {index} has an unsupported kind")
         item = _normalize_source_evidence(
             config,
@@ -808,8 +636,8 @@ def validate_plan(
         transaction_id
     ):
         raise PlanError("invalid transaction_id")
-    summary = _normalized_summary(plan.get("summary"), "plan summary")
-    authorization = _normalize_authorization(config, plan.get("authorization"))
+    summary = normalized_summary(plan.get("summary"), "plan summary")
+    authorization = normalize_maintenance_authorization(plan.get("authorization"))
     source_manifests: dict[str, dict[str, Any]] = {}
     evidence = _normalize_evidence(
         config,
@@ -840,7 +668,7 @@ def validate_plan(
             raise PlanError(
                 "retrieval_not_required declaration has unknown fields"
             )
-        reason = _normalized_summary(
+        reason = normalized_summary(
             retrieval.get("reason"), "retrieval_not_required reason"
         )
         retrieval = {"required": False, "reason": reason}
@@ -911,7 +739,8 @@ def validate_plan(
             if authorization["kind"] != "maintenance_request":
                 raise PlanError(
                     "maintenance_request_required: purge_capture requires an "
-                    "explicit maintenance request"
+                    "explicit maintenance request",
+                    code="maintenance_request_required",
                 )
             source_id = raw_operation.get("source_id")
             if (
@@ -1502,7 +1331,8 @@ def record_review(
         rejected_digests, rejection_count = _validate_review_history(history)
         if rejection_count > policy.max_revision_rounds:
             raise PlanError(
-                "review revision limit exhausted; preserve the unapplied plan for inspection"
+                "review revision limit exhausted; preserve the unapplied plan for inspection",
+                code="review_revision_exhausted",
             )
         rejected_governance = {
             entry["governance_sha256"]
@@ -1594,99 +1424,6 @@ def _install_staged(
         staging_path.unlink(missing_ok=True)
 
 
-def _optional_regular_bytes(path: Path, label: str) -> bytes | None:
-    if path.is_symlink():
-        raise PlanError(f"{label} must be a regular file")
-    if not path.exists():
-        return None
-    if not path.is_file():
-        raise PlanError(f"{label} must be a regular file")
-    try:
-        return path.read_bytes()
-    except OSError as exc:
-        raise PlanError(f"unable to read {label}") from exc
-
-
-def _freeze_plan_bundle(
-    config: dict[str, Any],
-    plan_path: Path,
-) -> PlanBundle:
-    """Read all plan-controlled bytes once for validation and application."""
-    plan_path = plan_path.expanduser().resolve()
-    try:
-        plan_bytes = plan_path.read_bytes()
-        plan = json.loads(plan_bytes)
-    except FileNotFoundError as exc:
-        raise PlanError("plan not found") from exc
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PlanError("invalid plan") from exc
-    if not isinstance(plan, dict):
-        raise PlanError("plan must be a JSON object")
-    if plan.get("schema_version") != PLAN_SCHEMA_VERSION:
-        raise PlanError("unsupported plan schema_version")
-    transaction_id = plan.get("transaction_id")
-    if not isinstance(transaction_id, str) or not TRANSACTION_ID_PATTERN.fullmatch(
-        transaction_id
-    ):
-        raise PlanError("invalid transaction_id")
-    digest = hashlib.sha256()
-    digest.update(b"plan\0")
-    digest.update(plan_bytes)
-    content_snapshots: list[tuple[Path, bytes]] = []
-    for content_path in _proposed_content_paths(plan_path, plan):
-        try:
-            content = content_path.read_bytes()
-        except OSError as exc:
-            raise PlanError("unable to read proposed content") from exc
-        content_snapshots.append((content_path, content))
-        digest.update(b"content\0")
-        digest.update(
-            content_path.relative_to(plan_path.parent).as_posix().encode("utf-8")
-        )
-        digest.update(b"\0")
-        digest.update(content)
-    optional: dict[str, bytes | None] = {}
-    for name, label in (
-        ("assessment.json", "semantic review assessment"),
-        ("review-history.json", "review history"),
-    ):
-        content = _optional_regular_bytes(plan_path.parent / name, label)
-        optional[name] = content
-        digest.update(name.encode("ascii"))
-        digest.update(b"\0")
-        if content is not None:
-            digest.update(content)
-    config_keys = [
-        "semantic",
-        "sources",
-        "notes",
-        "review",
-        "quality",
-        "index",
-        "assets",
-    ]
-    relevant_config = {key: config.get(key, {}) for key in config_keys}
-    digest.update(b"config\0")
-    digest.update(canonical_json(relevant_config))
-    return PlanBundle(
-        plan_path=plan_path,
-        transaction_id=transaction_id,
-        plan_bytes=plan_bytes,
-        content_snapshots=tuple(content_snapshots),
-        assessment_bytes=optional["assessment.json"],
-        review_history_bytes=optional["review-history.json"],
-        request_sha256=digest.hexdigest(),
-    )
-
-
-def _plan_request_identity(
-    config: dict[str, Any],
-    plan_path: Path,
-) -> tuple[str, str]:
-    bundle = _freeze_plan_bundle(config, plan_path)
-    return bundle.transaction_id, bundle.request_sha256
-
-
 def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
     """Apply a validated plan atomically and archive its audit record."""
     vault = load_vault_path(config)
@@ -1749,7 +1486,8 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         _, rejection_count = _validate_review_history(frozen_history)
         if rejection_count > review_policy(config).max_revision_rounds:
             raise PlanError(
-                "review revision limit exceeded under the configured vault policy"
+                "review revision limit exceeded under the configured vault policy",
+                code="review_revision_exhausted",
             )
         approval_valid = _assessment_status_snapshot(
             bundle.assessment_bytes,
@@ -1760,7 +1498,8 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         if validation["approval_required"] and not approval_valid:
             raise PlanError(
                 "a hash-bound reviewer approval record is required for: "
-                + ", ".join(validation["risks"])
+                + ", ".join(validation["risks"]),
+                code="review_required",
             )
 
         operations = validation["operations"]
