@@ -1,12 +1,12 @@
-# Semantic change plan v3
+# Semantic change plan v4
 
 Keep the Plan and proposed files in the private staging directory returned by
-`vault-pr plan init`. Runtime creates schema v3 Plans and continues to accept
-schema v2 Plans that do not use Asset Promotion.
+`vault-pr plan init`. Runtime creates and executes only schema v4 Plans. Complete
+or recover active older Plans with the matching older runtime before upgrading.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "transaction_id": "txn_20260715T000000Z_example",
   "summary": "Integrate the source into the existing RAG concept page",
   "authorization": {
@@ -16,7 +16,10 @@ schema v2 Plans that do not use Asset Promotion.
   "evidence": [
     {
       "kind": "source_capture",
-      "source_id": "src_0123456789abcdef0123"
+      "source_id": "src_0123456789abcdef0123",
+      "focus_ranges": [
+        {"start_line": 120, "end_line": 148}
+      ]
     }
   ],
   "intent": "integrate",
@@ -47,17 +50,20 @@ schema v2 Plans that do not use Asset Promotion.
 }
 ```
 
-Every Plan contains exactly one Write Authorization Snapshot and zero or more
-Evidence items. Authorization records why a write may be proposed; Evidence
-supports what should change. A Maintenance Request may have no Evidence.
-Integration requires Source Capture Evidence. Autonomous repair requires
-eligible Quality Record Evidence and the Kernel-generated current policy
-snapshot. Retrieval results are bounded Review Packet inputs, not persistent
-Transaction Evidence. The current deterministic capabilities may update only
-selected finding-owner notes and may create at most one note per selected
-finding when the resulting owner note actually references that new note. No
-current capability authorizes rename; the global action vocabulary reserves it
-for a future capability with an explicit path scope.
+Every Plan contains exactly one Maintenance Request snapshot and zero or more
+Source Capture Evidence items. Authorization records why a write may be
+proposed; Evidence supports what should change. A Maintenance Request may have
+no Evidence. Integration requires Source Capture Evidence. Quality Findings are
+read-only diagnostics and do not authorize repairs. Retrieval results are
+bounded Review Packet inputs, not persistent Transaction Evidence.
+
+`focus_ranges` is optional. When omitted, the Kernel includes the complete
+validated `derived.extracted` text if it fits the per-source Review Packet
+budget; otherwise Plan validation fails. When present, it must be a non-empty
+array of existing 1-based inclusive line ranges. The Kernel adds bounded context
+and deterministically extracts the excerpts. The Maintainer selects relevant
+ranges; the Reviewer may inspect the complete Capture and judges semantic
+sufficiency. The Kernel does not infer semantic completeness.
 
 Source Capture manifests do not own a Source Note path. The Kernel resolves the
 unique current Source Note by exact `source_id`; every integrated Capture's
@@ -68,13 +74,13 @@ complete integration.
 
 Retrieval-dependent Plans declare `{"required": true}` and require an index
 fresh for the exact Vault HEAD, relevant index configuration, and qmd
-capabilities. Only a Maintenance Request may use
+runtime identity. A Maintenance Request may use
 `{"required": false, "reason": "..."}`.
 
 Normal Markdown operations are `create`, `update`, `delete`, and `rename`.
 Each action has a closed field set; unknown metadata is rejected rather than
 silently ignored.
-`promote_asset` is a schema-v3 operation containing exactly `source_id`,
+`promote_asset` is a schema-v4 operation containing exactly `source_id`,
 `source_path`, and `path`. The source must be a manifest-declared `asset` from
 Source Capture Evidence in the same Plan; `supplement` entries are not
 promotable. The v1 promotion MIME set is PNG, JPEG, GIF, WebP, and PDF. The
@@ -93,13 +99,13 @@ of the verified Capture and unique Source Note, and is blocked by remaining
 source-ID, wikilink, or `supersedes` references. Capture binaries are not copied
 into the Transaction Archive.
 
-Merge, split, delete, contradiction, purge, and autonomous-repair transactions
-always require independent review even when the Vault uses risk-based review
-for ordinary maintenance.
+Merge, split, delete, contradiction, purge, and transactions touching more than
+15 notes always require independent review even when the Vault uses risk-based
+review for ordinary maintenance.
 
 The Kernel validates frontmatter, newly introduced wikilink and anchor defects,
-tracked attachments, referenced Bases, provenance boundaries, exact hashes,
-note limits, and autonomous-repair postconditions. Asset Promotion may only
+tracked attachments, referenced Bases, provenance boundaries, exact hashes, and
+configured note limits. Asset Promotion may only
 create or exactly reuse a Vault Asset; updates, renames, and deletes remain
 outside this contract. Anchor existence is checked only when the target note is
 modified by the transaction; links to unmodified notes still require an

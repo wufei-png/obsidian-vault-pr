@@ -25,7 +25,6 @@ from .protocol import (
     success_envelope,
 )
 from .quality import QualityAuditError, audit_graph
-from .quality_record import QualityRecordError, record_quality_findings
 from .rag_eval import RagEvaluationError, accept_rag_baseline, evaluate_rag
 from .recovery import (
     RecoveryError,
@@ -351,17 +350,6 @@ def build_parser() -> argparse.ArgumentParser:
     quality_rag_accept.add_argument(
         "--config", type=Path, default=Path("vault-pr.local.toml")
     )
-    quality_record = quality_subparsers.add_parser(
-        "record-repair-evidence",
-        help="record selected deterministic findings for autonomous repair",
-    )
-    quality_record.add_argument("--audit", type=Path, required=True)
-    quality_record.add_argument("--finding", action="append", required=True)
-    quality_record.add_argument("--apply", action="store_true")
-    quality_record.add_argument(
-        "--config", type=Path, default=Path("vault-pr.local.toml")
-    )
-
     retrieve_parser = subparsers.add_parser(
         "retrieve", help="retrieve related notes for a captured source"
     )
@@ -377,11 +365,6 @@ def build_parser() -> argparse.ArgumentParser:
     plan_subparsers = plan_parser.add_subparsers(dest="plan_command", required=True)
     plan_init = plan_subparsers.add_parser("init", help="create a plan template")
     plan_init.add_argument("--summary", required=True)
-    plan_init.add_argument(
-        "--authorization-kind",
-        choices=("maintenance_request", "autonomous_repair_policy"),
-        default="maintenance_request",
-    )
     plan_init.add_argument("--authorization-summary", required=True)
     plan_init.add_argument("--source-id", action="append", default=[])
     plan_init.add_argument("--request-ref")
@@ -472,13 +455,6 @@ def _exception_code(exc: Exception) -> str:
         return "retrieval_error"
     if isinstance(exc, QualityAuditError):
         return "quality_error"
-    if isinstance(exc, QualityRecordError):
-        if str(exc) in {
-            "quality_record_refresh_required",
-            "quality_finding_already_satisfied",
-        }:
-            return str(exc)
-        return "quality_record_error"
     if isinstance(exc, RagEvaluationError):
         return "rag_evaluation_error"
     if isinstance(exc, MigrationError):
@@ -492,22 +468,12 @@ def _exception_code(exc: Exception) -> str:
 
 def _emit_failure(command: str, exc: Exception) -> int:
     code = _exception_code(exc)
-    if code == "quality_finding_already_satisfied":
-        emit(
-            success_envelope(
-                command,
-                "already_satisfied",
-                {"finding_status": code},
-            )
-        )
-        return EXIT_OK
     message = "unexpected execution failure" if code == "execution_error" else str(exc)
     emit(error_envelope(command, code, message), stream=sys.stderr)
     if code in {
         "maintenance_request_required",
         "review_required",
         "review_revision_exhausted",
-        "quality_record_refresh_required",
     }:
         return EXIT_NOT_ACHIEVED
     return EXIT_ERROR
@@ -627,13 +593,6 @@ def _dispatch(args: argparse.Namespace) -> int:
                     assessment_path=args.assessment,
                     apply=args.apply,
                 )
-            elif args.quality_command == "record-repair-evidence":
-                result = record_quality_findings(
-                    config,
-                    audit_path=args.audit,
-                    finding_ids=args.finding,
-                    apply=args.apply,
-                )
             else:
                 raise AssertionError(
                     f"unhandled quality command: {args.quality_command}"
@@ -641,7 +600,6 @@ def _dispatch(args: argparse.Namespace) -> int:
         except (
             ConfigError,
             QualityAuditError,
-            QualityRecordError,
             RagEvaluationError,
         ) as exc:
             return _emit_failure(command, exc)
@@ -663,7 +621,6 @@ def _dispatch(args: argparse.Namespace) -> int:
                 result = init_plan(
                     config,
                     args.summary,
-                    args.authorization_kind,
                     args.authorization_summary,
                     source_ids=args.source_id,
                     request_ref=args.request_ref,

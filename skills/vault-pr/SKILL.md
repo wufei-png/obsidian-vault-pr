@@ -1,6 +1,6 @@
 ---
 name: vault-pr
-description: Safely ingest web links, WeChat articles, PDFs, authenticated-page snapshots, and other sources into an existing Git-managed Obsidian vault; retrieve related notes, create auditable semantic change plans, require independent review for risky operations, update interlinked knowledge, and refresh local qmd RAG indexes. Use when an agent must add or integrate knowledge, query or reorganize notes, or autonomously maintain an existing vault without replacing its organization.
+description: Safely ingest web links, WeChat articles, PDFs, authenticated-page snapshots, and other sources into an existing Git-managed Obsidian vault; retrieve related notes, create auditable semantic change plans, require independent review for risky operations, update interlinked knowledge, and refresh local qmd RAG indexes. Use when an agent must add or integrate knowledge, query or reorganize notes, or maintain an existing vault without replacing its organization.
 ---
 
 # Vault PR
@@ -34,10 +34,8 @@ against a disposable test Source Reference. Never redirect a user-supplied
 retention URL to the disposable canary.
 
 For vault quality, run `vault-pr quality graph --config <config>` and inspect its
-deterministic findings directly. If an eligible finding will support autonomous
-repair, save the complete JSON success envelope outside the Vault under
-`umask 077` and pass that exact file to `quality record-repair-evidence`; do not
-hand-extract or rewrite its `data` object. Read
+deterministic findings directly. Findings are read-only diagnostics: repairing
+one requires a current Maintenance Request and a normal semantic Plan. Read
 [the RAG evaluation contract](references/rag-evaluation.md) before running
 `vault-pr quality rag`. A run without `--answers` is a deterministic discovery
 diagnostic and is not sent to a Quality Assessor. Send only a hash-bound
@@ -122,7 +120,10 @@ into chat merely to confirm that validation passed.
 6. Run `vault-pr plan init --source-id <source-id> --summary <summary>
    --authorization-summary <write-authority> --config <config>`.
    Read [the plan schema](references/plan-schema.md), create proposed note files,
-   and fill the plan. Prefer updating a related concept page over creating a
+   and fill the plan. For a short Source Capture, `focus_ranges` may be omitted;
+   the Kernel includes its complete extracted text. For a source that exceeds
+   the per-source packet budget, provide one or more 1-based inclusive line
+   ranges or the Kernel rejects the Plan. Prefer updating a related concept page over creating a
    duplicate page. Infer which declared Capture assets the proposed Markdown
    embeds, then express each one as an explicit `promote_asset` operation; the
    Kernel validates and executes these operations but never infers hidden writes
@@ -141,8 +142,9 @@ into chat merely to confirm that validation passed.
    metadata in the source note and transaction manifest.
 12. Preserve conflicting claims and their sources. Update the current synthesis
    and confidence instead of silently replacing history.
-13. Touch no more than 15 notes per transaction. Split larger work into multiple
-    bounded transactions, committing each one before starting the next.
+13. Prefer touching no more than 15 notes per transaction. A positive local
+    `semantic.max_touched_notes` may allow a larger bounded transaction, but any
+    transaction over 15 notes requires independent review.
 14. Validate Markdown, frontmatter, wikilinks, attachments, Bases, and policy.
     Promote only manifest entries with role `asset`; never promote a
     `supplement` merely because it is present in the Capture.
@@ -161,12 +163,10 @@ into chat merely to confirm that validation passed.
 
 - Allow create, rewrite, and rename after deterministic validation.
 - Require an independent reviewer agent for split, merge, delete,
-  contradictions, `purge_capture`, autonomous repair, and every transaction when
-  `review_all_semantic_transactions` is enabled.
-- Quality Findings remain transient unless the agent will use an eligible
-  deterministic finding to propose autonomous repair. Only then create a
-  Quality Record with `quality record-repair-evidence`; severity never grants
-  authority.
+  contradictions, `purge_capture`, transactions over 15 notes, and every
+  transaction when `review_all_semantic_transactions` is enabled.
+- Quality Findings are read-only diagnostics. Severity never grants write
+  authority; a current Maintenance Request is required to repair a finding.
 - Stop after the configured bounded revision rounds; never fall back to user
   maintenance or self-approval.
 - Let the reviewer approve or reject the transaction; do not ask the user to

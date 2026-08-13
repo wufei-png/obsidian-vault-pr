@@ -30,6 +30,7 @@ from .asset_promotion import (
 from .capture import (
     CaptureError,
     load_validated_capture,
+    load_validated_capture_artifact_text,
 )
 from .config import (
     load_vault_path,
@@ -56,13 +57,7 @@ from .review import (
     validate_digest,
 )
 from .source_note import resolve_source_note, source_note_bytes_have_id
-from .quality_record import (
-    QualityRecordError,
-    load_quality_record,
-    revalidate_quality_record,
-)
 from .quality import (
-    AUTONOMOUS_CAPABILITY_ACTIONS,
     note_role_for_type,
     note_role_sets,
 )
@@ -83,8 +78,7 @@ class PlanError(RuntimeError):
     """Raised when a semantic change plan is invalid or unsafe."""
 
 
-PLAN_SCHEMA_VERSION = 3
-ALLOWED_PLAN_SCHEMA_VERSIONS = {2, PLAN_SCHEMA_VERSION}
+PLAN_SCHEMA_VERSION = 4
 ALLOWED_ACTIONS = {
     "create",
     "update",
@@ -94,19 +88,14 @@ ALLOWED_ACTIONS = {
     "promote_asset",
 }
 ALLOWED_INTENTS = {"integrate", "maintenance", "merge", "split", "rename"}
-ALLOWED_AUTHORIZATION_KINDS = {
-    "maintenance_request",
-    "autonomous_repair_policy",
-}
-ALLOWED_EVIDENCE_KINDS = {
-    "source_capture",
-    "quality_record",
-}
+ALLOWED_AUTHORIZATION_KINDS = {"maintenance_request"}
+ALLOWED_EVIDENCE_KINDS = {"source_capture"}
 SOURCE_ID_PATTERN = re.compile(r"src_[0-9a-f]{20}")
-QUALITY_RECORD_ID_PATTERN = re.compile(r"quality_[0-9a-f]{20}")
 TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
 HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
 MAX_EVIDENCE_EXCERPT_CHARACTERS = 12_000
+EVIDENCE_CONTEXT_LINES = 2
+_FOCUS_RANGES_ABSENT = object()
 MAX_RETRIEVAL_SNIPPET_CHARACTERS = 2_000
 
 
@@ -219,7 +208,6 @@ def _validated_source_manifest(
 def init_plan(
     config: dict[str, Any],
     summary: str,
-    authorization_kind: str,
     authorization_summary: str,
     *,
     source_ids: list[str] | None = None,
@@ -235,10 +223,8 @@ def init_plan(
     authorization_summary = " ".join(authorization_summary.split()).strip()
     if not authorization_summary:
         raise PlanError("authorization summary must not be empty")
-    if authorization_kind not in ALLOWED_AUTHORIZATION_KINDS:
-        raise PlanError("unsupported authorization kind")
     authorization: dict[str, Any] = {
-        "kind": authorization_kind,
+        "kind": "maintenance_request",
         "summary": authorization_summary,
     }
     if (request_ref is None) != (request_sha256 is None):
@@ -337,7 +323,7 @@ def _normalized_summary(value: object, field: str) -> str:
 
 
 def _normalize_authorization(
-    config: dict[str, Any],
+    _config: dict[str, Any],
     raw: object,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
@@ -346,53 +332,27 @@ def _normalize_authorization(
     if not isinstance(kind, str) or kind not in ALLOWED_AUTHORIZATION_KINDS:
         raise PlanError("plan authorization kind is unsupported")
     summary = _normalized_summary(raw.get("summary"), "authorization.summary")
-    if kind == "maintenance_request":
-        allowed = {"kind", "summary", "request_ref", "request_sha256"}
-        if set(raw) - allowed:
-            raise PlanError("maintenance request authorization has unknown fields")
-        request_ref = raw.get("request_ref")
-        request_sha256 = raw.get("request_sha256")
-        if (request_ref is None) != (request_sha256 is None):
-            raise PlanError(
-                "authorization request_ref and request_sha256 must be provided together"
-            )
-        normalized: dict[str, Any] = {"kind": kind, "summary": summary}
-        if request_ref is not None:
-            if not isinstance(request_ref, str) or not request_ref.strip():
-                raise PlanError("authorization request_ref must be non-empty")
-            if (
-                not isinstance(request_sha256, str)
-                or not HEX64_PATTERN.fullmatch(request_sha256)
-            ):
-                raise PlanError("authorization request_sha256 must be a SHA-256 digest")
-            normalized["request_ref"] = request_ref.strip()
-            normalized["request_sha256"] = request_sha256
-        return normalized
-
-    if set(raw) != {"kind", "summary"}:
+    allowed = {"kind", "summary", "request_ref", "request_sha256"}
+    if set(raw) - allowed:
+        raise PlanError("maintenance request authorization has unknown fields")
+    request_ref = raw.get("request_ref")
+    request_sha256 = raw.get("request_sha256")
+    if (request_ref is None) != (request_sha256 is None):
         raise PlanError(
-            "autonomous repair authorization policy fields are Kernel-generated"
+            "authorization request_ref and request_sha256 must be provided together"
         )
-    autonomous = config.get("autonomous_repair", {})
-    if not isinstance(autonomous, dict) or autonomous.get("enabled", False) is not True:
-        raise PlanError(
-            "maintenance_request_required: autonomous repair policy is not enabled"
-        )
-    policy = {
-        "enabled": True,
-        "capabilities_version": 1,
-        "allowed_actions": ["create", "update", "rename"],
-        "maximum_touched_notes": 3,
-        "independent_review_required": True,
-    }
-    return {
-        "kind": kind,
-        "summary": summary,
-        "policy": policy,
-        "policy_sha256": _sha256_bytes(
-            canonical_json({"autonomous_repair": autonomous, "policy": policy})
-        ),
-    }
+    normalized: dict[str, Any] = {"kind": kind, "summary": summary}
+    if request_ref is not None:
+        if not isinstance(request_ref, str) or not request_ref.strip():
+            raise PlanError("authorization request_ref must be non-empty")
+        if (
+            not isinstance(request_sha256, str)
+            or not HEX64_PATTERN.fullmatch(request_sha256)
+        ):
+            raise PlanError("authorization request_sha256 must be a SHA-256 digest")
+        normalized["request_ref"] = request_ref.strip()
+        normalized["request_sha256"] = request_sha256
+    return normalized
 
 
 def _bounded_excerpt(path: Path) -> str:
@@ -612,28 +572,34 @@ def _normalize_source_evidence(
     raw: dict[str, Any],
     source_manifests: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    if set(raw) != {"kind", "source_id"}:
+    if set(raw) not in (
+        {"kind", "source_id"},
+        {"kind", "source_id", "focus_ranges"},
+    ):
         raise PlanError("source_capture evidence has unknown or missing fields")
     source_id = raw.get("source_id")
     if not isinstance(source_id, str) or not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise PlanError("source_capture evidence has an invalid source_id")
-    manifest = _validated_source_manifest(config, vault, source_id)
-    source_manifests[source_id] = manifest
     capture = source_archive_dir(config, vault) / source_id
+    try:
+        manifest, extracted_text = load_validated_capture_artifact_text(
+            capture,
+            source_id=source_id,
+            vault=vault,
+            artifact="extracted",
+        )
+    except CaptureError as exc:
+        raise PlanError(f"source capture integrity failed: {exc}") from exc
+    source_manifests[source_id] = manifest
     manifest_path = capture / "manifest.json"
     derived = manifest.get("derived")
     if not isinstance(derived, dict) or not isinstance(
         derived.get("extracted"), dict
     ):
         raise PlanError("source capture manifest is missing derived.extracted")
-    extracted = vault_relative_path(
-        vault,
-        str(
-            (
-                capture / str(derived["extracted"].get("path"))
-            ).relative_to(vault)
-        ),
-        "source capture extracted artifact",
+    review_evidence = _source_review_evidence(
+        extracted_text,
+        raw.get("focus_ranges", _FOCUS_RANGES_ABSENT),
     )
     try:
         source_note = resolve_source_note(config, vault, source_id)
@@ -649,40 +615,69 @@ def _normalize_source_evidence(
         "source_note": str(source_note.relative_to(vault)),
         "source_note_sha256": _sha256_file(source_note),
         "title": str(manifest.get("title", "")),
-        "excerpt": _bounded_excerpt(extracted),
+        **review_evidence,
     }
 
 
-def _normalize_quality_evidence(
-    config: dict[str, Any],
-    vault: Path,
-    raw: dict[str, Any],
+def _source_review_evidence(
+    extracted_text: str,
+    raw_focus_ranges: object,
 ) -> dict[str, Any]:
-    if set(raw) != {"kind", "record_id", "finding_ids"}:
-        raise PlanError("quality_record evidence has unknown or missing fields")
-    record_id = raw.get("record_id")
-    finding_ids = raw.get("finding_ids")
-    if (
-        not isinstance(record_id, str)
-        or not QUALITY_RECORD_ID_PATTERN.fullmatch(record_id)
-        or not isinstance(finding_ids, list)
-        or not finding_ids
-        or not all(isinstance(value, str) and value for value in finding_ids)
-        or len(finding_ids) != len(set(finding_ids))
-    ):
-        raise PlanError("quality_record evidence identity is invalid")
-    try:
-        record, path = load_quality_record(vault, record_id)
-        selected = revalidate_quality_record(config, record, finding_ids)
-    except QualityRecordError as exc:
-        raise PlanError(str(exc)) from exc
+    """Build bounded, reproducible review excerpts from one Capture."""
+    if raw_focus_ranges is _FOCUS_RANGES_ABSENT:
+        if len(extracted_text) > MAX_EVIDENCE_EXCERPT_CHARACTERS:
+            raise PlanError(
+                "long source_capture evidence requires non-empty focus_ranges"
+            )
+        return {"excerpt": extracted_text}
+
+    if not isinstance(raw_focus_ranges, list) or not raw_focus_ranges:
+        raise PlanError("source_capture focus_ranges must be a non-empty array")
+    lines = extracted_text.splitlines(keepends=True)
+    normalized_ranges: list[dict[str, int]] = []
+    focus_excerpts: list[dict[str, Any]] = []
+    total_characters = 0
+    for index, raw_range in enumerate(raw_focus_ranges):
+        if not isinstance(raw_range, dict) or set(raw_range) != {
+            "start_line",
+            "end_line",
+        }:
+            raise PlanError(f"source_capture focus range {index} is invalid")
+        start_line = raw_range.get("start_line")
+        end_line = raw_range.get("end_line")
+        if (
+            isinstance(start_line, bool)
+            or not isinstance(start_line, int)
+            or isinstance(end_line, bool)
+            or not isinstance(end_line, int)
+            or start_line < 1
+            or end_line < start_line
+            or end_line > len(lines)
+        ):
+            raise PlanError(f"source_capture focus range {index} is out of bounds")
+        context_start_line = max(1, start_line - EVIDENCE_CONTEXT_LINES)
+        context_end_line = min(len(lines), end_line + EVIDENCE_CONTEXT_LINES)
+        excerpt = "".join(lines[context_start_line - 1 : context_end_line])
+        total_characters += len(excerpt)
+        if total_characters > MAX_EVIDENCE_EXCERPT_CHARACTERS:
+            raise PlanError(
+                "source_capture focused excerpts exceed the per-source review budget"
+            )
+        normalized_ranges.append(
+            {"start_line": start_line, "end_line": end_line}
+        )
+        focus_excerpts.append(
+            {
+                "start_line": start_line,
+                "end_line": end_line,
+                "context_start_line": context_start_line,
+                "context_end_line": context_end_line,
+                "excerpt": excerpt,
+            }
+        )
     return {
-        "kind": "quality_record",
-        "evidence_id": f"quality_record:{record_id}",
-        "record_id": record_id,
-        "finding_ids": sorted(finding_ids),
-        "record_sha256": _sha256_file(path),
-        "findings": selected,
+        "focus_ranges": normalized_ranges,
+        "focus_excerpts": focus_excerpts,
     }
 
 
@@ -702,15 +697,12 @@ def _normalize_evidence(
         kind = raw.get("kind")
         if not isinstance(kind, str) or kind not in ALLOWED_EVIDENCE_KINDS:
             raise PlanError(f"evidence {index} has an unsupported kind")
-        if kind == "source_capture":
-            item = _normalize_source_evidence(
-                config,
-                vault,
-                raw,
-                source_manifests,
-            )
-        else:
-            item = _normalize_quality_evidence(config, vault, raw)
+        item = _normalize_source_evidence(
+            config,
+            vault,
+            raw,
+            source_manifests,
+        )
         if item["evidence_id"] in identities:
             raise PlanError(f"evidence {index} duplicates an evidence identity")
         identities.add(item["evidence_id"])
@@ -796,7 +788,7 @@ def validate_plan(
             raise PlanError("plan must be a JSON object")
         bundle_contents = dict(bundle.content_snapshots)
     plan_schema_version = plan.get("schema_version")
-    if plan_schema_version not in ALLOWED_PLAN_SCHEMA_VERSIONS:
+    if plan_schema_version != PLAN_SCHEMA_VERSION:
         raise PlanError("unsupported plan schema_version")
     allowed_plan_fields = {
         "schema_version",
@@ -863,16 +855,8 @@ def validate_plan(
     source_evidence = [
         item for item in evidence if item["kind"] == "source_capture"
     ]
-    quality_evidence = [
-        item for item in evidence if item["kind"] == "quality_record"
-    ]
     if intent == "integrate" and not source_evidence:
         raise PlanError("integration plan requires source_capture evidence")
-    if (
-        authorization["kind"] == "autonomous_repair_policy"
-        and not quality_evidence
-    ):
-        raise PlanError("autonomous repair requires quality_record evidence")
     operations = plan.get("operations")
     if not isinstance(operations, list) or not operations:
         raise PlanError("plan operations must be a non-empty array")
@@ -891,8 +875,6 @@ def validate_plan(
         if not isinstance(action, str) or action not in ALLOWED_ACTIONS:
             raise PlanError(f"operation {index} has unsupported action: {action}")
         if action == "promote_asset":
-            if plan_schema_version < 3:
-                raise PlanError("promote_asset requires plan schema_version 3")
             if asset_dir is None:
                 try:
                     asset_dir, managed_assets = load_managed_asset_index(
@@ -1105,19 +1087,6 @@ def validate_plan(
                 )
 
     maximum = max_touched_notes(config)
-    if authorization["kind"] == "autonomous_repair_policy":
-        maximum = min(maximum, 3)
-        if intent in {"merge", "split"} or contradiction:
-            raise PlanError(
-                "maintenance_request_required: autonomous repair cannot perform "
-                f"{'contradiction' if contradiction else intent}"
-            )
-        disallowed = sorted(actions - {"create", "update", "rename"})
-        if disallowed:
-            raise PlanError(
-                "maintenance_request_required: autonomous repair cannot perform "
-                + ", ".join(disallowed)
-            )
     if len(touched) > maximum:
         raise PlanError(f"plan touches {len(touched)} notes; maximum is {maximum}")
 
@@ -1251,113 +1220,6 @@ def validate_plan(
                     f"{source['source_id']} must be referenced by a modified "
                     "synthesis note"
                 )
-    if authorization["kind"] == "autonomous_repair_policy":
-        selected_findings = [
-            finding
-            for item in quality_evidence
-            for finding in item.get("findings", [])
-        ]
-        prospective_debt = {
-            (item["kind"], item["path"], item["target"])
-            for item in obsidian_validation["prospective_reference_debt"]
-        }
-        roles = obsidian_validation["prospective_note_roles"]
-        resolved = obsidian_validation["resolved_links_by_path"]
-        owner_paths = {str(finding.get("path")) for finding in selected_findings}
-        source_synthesis_owners = {
-            str(finding.get("path"))
-            for finding in selected_findings
-            if finding.get("rule_id") == "source_without_synthesis_link"
-        }
-        capabilities = {
-            str(finding.get("autonomous_capability"))
-            for finding in selected_findings
-        }
-        capability_actions = set().union(
-            *(
-                AUTONOMOUS_CAPABILITY_ACTIONS.get(capability, frozenset())
-                for capability in capabilities
-            )
-        )
-        linked_targets = {
-            target
-            for owner in owner_paths
-            for target in resolved.get(owner, [])
-        }
-        configured_roles = note_role_sets(config)
-
-        def repairs_source_synthesis_link(path: str) -> bool:
-            return (
-                note_role_for_type(roles.get(path), configured_roles)
-                in {"concept", "index"}
-                and any(
-                    source in resolved.get(path, [])
-                    for source in source_synthesis_owners
-                )
-            )
-
-        creates = 0
-        modified_paths: set[str] = set()
-        for operation in normalized:
-            action = operation["action"]
-            relative = str(operation["path"].relative_to(vault))
-            modified_paths.add(relative)
-            if action not in capability_actions:
-                raise PlanError(
-                    "maintenance_request_required: selected autonomous "
-                    f"capabilities do not authorize {action}"
-                )
-            if (
-                action == "update"
-                and relative not in owner_paths
-                and not repairs_source_synthesis_link(relative)
-            ):
-                raise PlanError(
-                    "maintenance_request_required: autonomous repair can only "
-                    "update a selected finding owner or a synthesis note that "
-                    "repairs a selected Source Note"
-                )
-            if action == "create":
-                creates += 1
-                if (
-                    relative not in linked_targets
-                    and not repairs_source_synthesis_link(relative)
-                ):
-                    raise PlanError(
-                        "maintenance_request_required: autonomous repair can only "
-                        "create a note referenced by a selected finding owner or "
-                        "a synthesis note that repairs a selected Source Note"
-                    )
-        if creates > len(selected_findings):
-            raise PlanError(
-                "maintenance_request_required: autonomous repair creates more "
-                "notes than selected findings"
-            )
-        for finding in selected_findings:
-            rule_id = finding.get("rule_id")
-            owner = finding.get("path")
-            if rule_id == "broken_wikilink":
-                identity = ("broken_wikilink", owner, finding.get("target"))
-                if identity in prospective_debt:
-                    raise PlanError(
-                        "autonomous repair does not satisfy the selected finding"
-                    )
-            elif rule_id == "source_without_synthesis_link":
-                if not any(
-                    owner in resolved.get(path, [])
-                    and note_role_for_type(roles.get(path), configured_roles)
-                    in {"concept", "index"}
-                    for path in modified_paths
-                ):
-                    raise PlanError(
-                        "autonomous repair does not satisfy the selected finding"
-                    )
-            else:
-                raise PlanError(
-                    "maintenance_request_required: selected finding has no "
-                    "autonomous repair capability"
-                )
-
     policy = review_policy(config)
     risks: list[str] = []
     if intent == "merge":
@@ -1370,8 +1232,8 @@ def validate_plan(
         risks.extend(["delete", "purge_capture"])
     if contradiction:
         risks.append("contradiction")
-    if authorization["kind"] == "autonomous_repair_policy":
-        risks.append("autonomous_repair")
+    if len(touched) > 15:
+        risks.append("large_transaction")
     if policy.review_all_semantic_transactions and not risks:
         risks.append("vault_policy")
     history = (
@@ -1453,9 +1315,6 @@ def validate_plan(
         *[item["evidence_id"] for item in proposed_contents],
         *[item["evidence_id"] for item in proposed_assets],
     ]
-    review_obsidian_validation = dict(obsidian_validation)
-    if plan_schema_version < 3:
-        review_obsidian_validation.pop("resolved_assets_by_path", None)
     packet_payload = {
         "governance_sha256": governance_sha256,
         "plan": plan,
@@ -1468,14 +1327,13 @@ def validate_plan(
         "purge_captures": purge_evidence,
         "prior_rejections": prior_rejections,
         "proposed_contents": proposed_contents,
-        "obsidian_validation": review_obsidian_validation,
+        "obsidian_validation": obsidian_validation,
         "risks": risks,
         "required_judgments": list(REQUIRED_JUDGMENTS),
         "evidence_ids": evidence_ids,
         "unassessed": [],
     }
-    if plan_schema_version >= 3:
-        packet_payload["proposed_assets"] = proposed_assets
+    packet_payload["proposed_assets"] = proposed_assets
     try:
         review_packet = build_review_packet(packet_payload)
     except ReviewError as exc:
@@ -1569,17 +1427,16 @@ def _validate_review_history(
         expected_fields = {
             "schema_version",
             "plan_sha256",
+            "governance_sha256",
             "transaction_sha256",
             "review_packet_sha256",
             "assessment",
             "review_policy",
             "reviewed_at",
         }
-        if schema_version == 3:
-            expected_fields.add("governance_sha256")
         if (
             set(entry) != expected_fields
-            or schema_version not in {2, 3}
+            or schema_version != PLAN_SCHEMA_VERSION
             or not isinstance(assessment, dict)
             or assessment.get("status") not in {"approve", "reject"}
             or not isinstance(entry.get("reviewed_at"), str)
@@ -1601,11 +1458,10 @@ def _validate_review_history(
                 entry.get("review_packet_sha256"),
                 f"review history entry {index} packet",
             )
-            if schema_version == 3:
-                validate_digest(
-                    entry.get("governance_sha256"),
-                    f"review history entry {index} governance",
-                )
+            validate_digest(
+                entry.get("governance_sha256"),
+                f"review history entry {index} governance",
+            )
         except ReviewError as exc:
             raise PlanError(str(exc)) from exc
         instance_id = assessment.get("instance_id")
@@ -1652,18 +1508,10 @@ def record_review(
             entry["governance_sha256"]
             for entry in history
             if entry["assessment"]["status"] == "reject"
-            and entry["schema_version"] == 3
-        }
-        rejected_legacy_plans = {
-            entry["plan_sha256"]
-            for entry in history
-            if entry["assessment"]["status"] == "reject"
-            and entry["schema_version"] == 2
         }
         if (
             transaction_sha256 in rejected_digests
             or validation["governance_sha256"] in rejected_governance
-            or validation["plan_sha256"] in rejected_legacy_plans
         ):
             raise PlanError("plan and proposed content must change after rejection")
         prior_instance_ids = {
@@ -1678,7 +1526,7 @@ def record_review(
         except ReviewError as exc:
             raise PlanError(str(exc)) from exc
         entry = {
-            "schema_version": 3,
+            "schema_version": PLAN_SCHEMA_VERSION,
             "plan_sha256": validation["plan_sha256"],
             "governance_sha256": validation["governance_sha256"],
             "transaction_sha256": transaction_sha256,
@@ -1774,6 +1622,8 @@ def _freeze_plan_bundle(
         raise PlanError("invalid plan") from exc
     if not isinstance(plan, dict):
         raise PlanError("plan must be a JSON object")
+    if plan.get("schema_version") != PLAN_SCHEMA_VERSION:
+        raise PlanError("unsupported plan schema_version")
     transaction_id = plan.get("transaction_id")
     if not isinstance(transaction_id, str) or not TRANSACTION_ID_PATTERN.fullmatch(
         transaction_id
@@ -1813,10 +1663,8 @@ def _freeze_plan_bundle(
         "review",
         "quality",
         "index",
-        "autonomous_repair",
+        "assets",
     ]
-    if plan.get("schema_version") == PLAN_SCHEMA_VERSION:
-        config_keys.append("assets")
     relevant_config = {key: config.get(key, {}) for key in config_keys}
     digest.update(b"config\0")
     digest.update(canonical_json(relevant_config))
@@ -2036,7 +1884,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 {
                     key: value
                     for key, value in item.items()
-                    if key != "excerpt"
+                    if key not in {"excerpt", "focus_excerpts"}
                 }
                 for item in validation["evidence"]
             ],
@@ -2057,11 +1905,10 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                 for path in sorted(affected)
             ],
         }
-        if validation["plan_schema_version"] >= 3:
-            result["asset_promotions"] = promotion_results(
-                vault,
-                promotions,
-            )
+        result["asset_promotions"] = promotion_results(
+            vault,
+            promotions,
+        )
         result_bytes = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode(
             "utf-8"
         )

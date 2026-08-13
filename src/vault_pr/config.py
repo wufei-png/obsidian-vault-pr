@@ -46,7 +46,6 @@ _CONFIG_FIELDS: dict[str, set[str]] = {
         "max_revision_rounds",
     },
     "quality": {"rag_cases_path", "note_roles"},
-    "autonomous_repair": {"enabled"},
 }
 
 _NOTE_ROLE_FIELDS = {
@@ -95,6 +94,11 @@ def load_config(config_path: Path) -> dict[str, Any]:
 
 
 def _validate_config_shape(config: dict[str, Any]) -> None:
+    if "autonomous_repair" in config:
+        raise ConfigError(
+            "autonomous_repair was removed; delete the [autonomous_repair] "
+            "table and use a Maintenance Request for every repair"
+        )
     unknown_tables = sorted(set(config) - set(_CONFIG_FIELDS))
     if unknown_tables:
         raise ConfigError("unknown config table: " + ", ".join(unknown_tables))
@@ -134,13 +138,9 @@ def _validate_config_shape(config: dict[str, Any]) -> None:
                 raise ConfigError(
                     f"quality.note_roles.{field} must be an array of strings"
                 )
-    for table, field in (
-        ("review", "review_all_semantic_transactions"),
-        ("autonomous_repair", "enabled"),
-    ):
-        value = config.get(table, {}).get(field)
-        if value is not None and not isinstance(value, bool):
-            raise ConfigError(f"{table}.{field} must be boolean")
+    review_all = config.get("review", {}).get("review_all_semantic_transactions")
+    if review_all is not None and not isinstance(review_all, bool):
+        raise ConfigError("review.review_all_semantic_transactions must be boolean")
     for table, field in (
         ("sources", "max_download_bytes"),
         ("sources", "max_asset_files"),
@@ -346,10 +346,6 @@ def max_touched_notes(config: dict[str, Any]) -> int:
         raise ConfigError("semantic.max_touched_notes must be an integer") from exc
     if maximum < 1:
         raise ConfigError("semantic.max_touched_notes must be positive")
-    if maximum > 15:
-        raise ConfigError(
-            "semantic.max_touched_notes cannot exceed the hard limit of 15"
-        )
     return maximum
 
 

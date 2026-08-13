@@ -27,6 +27,7 @@ PROBE_TIMEOUT_SECONDS = 5.0
 PROBE_MAX_MEMORY_BYTES = 512 * 1024 * 1024
 PROBE_MAX_FILE_BYTES = 64 * 1024
 PROBE_MAX_CAPTURE_BYTES = 64 * 1024
+QMD_ALLOWED_VERSION_OUTPUTS = frozenset({"qmd 2.5.3 (c92adb3)"})
 
 
 @dataclass(frozen=True)
@@ -138,91 +139,37 @@ def probe_qmd_capabilities(
     runner: ProbeRunner = _bounded_probe,
     embedding_model_reader: EmbeddingModelReader | None = None,
 ) -> dict[str, object]:
-    """Probe the exact non-mutating qmd surface required by the index kernel."""
+    """Bind one explicitly supported qmd runtime and its retrieval identity."""
     if not index_name.strip():
         raise ToolProbeError("qmd index name must be non-empty")
     if retrieval_mode not in {"lexical", "hybrid"}:
         raise ToolProbeError("qmd retrieval mode must be lexical or hybrid")
-    probes = [
-        CapabilityProbe("index_selection", ("--help",), ("--index",)),
-        CapabilityProbe(
-            "collection_inspection",
-            ("--index", index_name, "collection", "--help"),
-            ("show",),
-        ),
-        CapabilityProbe(
-            "context_inspection",
-            ("--index", index_name, "context", "--help"),
-            ("list",),
-        ),
-        CapabilityProbe(
-            "incremental_update",
-            ("--index", index_name, "update", "--help"),
-        ),
-        CapabilityProbe(
-            "lexical_search",
-            ("--index", index_name, "search", "--help"),
-            ("--format", "--collection", "-n <"),
-        ),
-    ]
-    if retrieval_mode == "hybrid":
-        probes.extend(
-            [
-                CapabilityProbe(
-                    "bounded_embedding_batch",
-                    ("--index", index_name, "embed", "--help"),
-                    (
-                        "[-f]",
-                        "[-c <name>]",
-                        "--max-docs-per-batch",
-                        "--chunk-strategy",
-                    ),
-                ),
-                CapabilityProbe(
-                    "structured_hybrid_query",
-                    ("--index", index_name, "query", "--help"),
-                    (
-                        "lex:",
-                        "vec:",
-                        "--candidate-limit",
-                        "--no-rerank",
-                        "--chunk-strategy",
-                        "--format",
-                        "--collection",
-                        "-n <",
-                    ),
-                ),
-            ]
-        )
-    snapshot = probe_tool_capabilities(
-        tool="qmd",
-        executable=executable,
-        probes=probes,
-        runner=runner,
-    )
+    try:
+        version_result = runner([executable, "--version"])
+    except LimitedProcessTimeout as exc:
+        raise ToolProbeError("qmd version probe timed out") from exc
+    except OSError as exc:
+        raise ToolProbeError("qmd version probe could not start") from exc
+    if version_result.returncode != 0:
+        detail = (version_result.stderr or version_result.stdout).strip()
+        raise ToolProbeError(f"qmd version probe failed: {detail}")
+    version = _normalized_version(version_result.stdout or version_result.stderr)
+    if version not in QMD_ALLOWED_VERSION_OUTPUTS:
+        raise ToolProbeError(f"qmd version is not supported: {version}")
     model_sha256: str | None = None
     chunk_strategy: str | None = None
     if retrieval_mode == "hybrid":
         reader = embedding_model_reader or _read_qmd_embedding_model
-        model = reader(index_name, str(snapshot["version"]))
+        model = reader(index_name, version)
         if not model.strip():
             raise ToolProbeError("qmd embedding model identity is empty")
         model_sha256 = _embedding_model_sha256(model)
         chunk_strategy = "regex"
 
-    capabilities = snapshot["capabilities"]
-    capability_identity = {
-        "schema_version": 2,
-        "tool": "qmd",
-        "capabilities": capabilities,
-    }
-    capability_sha256 = hashlib.sha256(
-        _canonical_json(capability_identity)
-    ).hexdigest()
     runtime_identity = {
-        **capability_identity,
-        "version": snapshot["version"],
-        "capability_sha256": capability_sha256,
+        "schema_version": 3,
+        "tool": "qmd",
+        "version": version,
         "retrieval_mode": retrieval_mode,
         "embedding_model_sha256": model_sha256,
         "chunk_strategy": chunk_strategy,

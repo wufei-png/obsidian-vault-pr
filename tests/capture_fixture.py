@@ -26,10 +26,15 @@ def write_capture(
     source_note: str = "knowledgebase/sources/source.md",
     requested_url: str = "https://example.com/source",
     title: str = "Source Fixture",
+    extracted_content: bytes | None = None,
     secondary_files: dict[str, tuple[bytes, str, str]] | None = None,
 ) -> str:
     raw = b"<main>raw source fixture</main>\n"
-    extracted = b"# Source Fixture\n\n" + b"knowledge " * 100
+    extracted = (
+        extracted_content
+        if extracted_content is not None
+        else b"# Source Fixture\n\n" + b"knowledge " * 100
+    )
     file_records = [
         {
             "path": path,

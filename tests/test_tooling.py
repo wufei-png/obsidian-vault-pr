@@ -20,7 +20,7 @@ from vault_pr.tooling import (
 
 
 class ProbeRunner:
-    def __init__(self, version: str = "qmd fixture") -> None:
+    def __init__(self, version: str = "qmd 2.5.3 (c92adb3)") -> None:
         self.version = version
         self.calls: list[list[str]] = []
 
@@ -76,7 +76,7 @@ class ToolingTests(unittest.TestCase):
         self.assertEqual(snapshot["tool"], "defuddle")
         self.assertTrue(all(snapshot["capabilities"].values()))
 
-    def test_qmd_probe_records_version_and_required_capabilities(self) -> None:
+    def test_qmd_probe_accepts_verified_version_without_help_probes(self) -> None:
         runner = ProbeRunner()
 
         snapshot = probe_qmd_capabilities(
@@ -87,116 +87,24 @@ class ToolingTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot["tool"], "qmd")
-        self.assertEqual(snapshot["version"], "qmd fixture")
-        self.assertTrue(all(snapshot["capabilities"].values()))
+        self.assertEqual(snapshot["version"], "qmd 2.5.3 (c92adb3)")
         self.assertEqual(snapshot["retrieval_mode"], "hybrid")
         self.assertEqual(snapshot["chunk_strategy"], "regex")
         self.assertEqual(
             snapshot["embedding_model_sha256"],
             hashlib.sha256(b"model-fixture").hexdigest(),
         )
-        self.assertEqual(len(runner.calls), 8)
+        self.assertEqual(runner.calls, [["qmd", "--version"]])
 
-    def test_hybrid_probe_requires_every_runtime_query_marker(self) -> None:
-        full_help = (
-            "Syntax: lex: vec: --candidate-limit --no-rerank "
-            "--chunk-strategy --format --collection -n <num>"
-        )
-        for missing in (
-            "--candidate-limit",
-            "--no-rerank",
-            "--chunk-strategy",
-            "--format",
-            "--collection",
-            "-n <num>",
-        ):
-            with self.subTest(missing=missing):
-                runner = ProbeRunner()
+    def test_qmd_probe_rejects_unverified_version(self) -> None:
+        with self.assertRaisesRegex(ToolProbeError, "version is not supported"):
+            probe_qmd_capabilities(
+                "qmd",
+                index_name="fixture",
+                runner=ProbeRunner("qmd 2.5.4 (unknown)"),
+                embedding_model_reader=lambda _name, _version: "model-fixture",
+            )
 
-                def omit_marker(command: Sequence[str]) -> LimitedProcessResult:
-                    if list(command)[-2:] == ["query", "--help"]:
-                        return LimitedProcessResult(
-                            0, full_help.replace(missing, ""), ""
-                        )
-                    return runner(command)
-
-                with self.assertRaisesRegex(
-                    ToolProbeError, "structured_hybrid_query"
-                ):
-                    probe_qmd_capabilities(
-                        "qmd",
-                        index_name="fixture",
-                        runner=omit_marker,
-                        embedding_model_reader=lambda _name, _version: "model-fixture",
-                    )
-
-    def test_hybrid_probe_requires_forced_embed_markers(self) -> None:
-        full_help = (
-            "Usage: qmd embed [-f] [-c <name>]\n"
-            "Options: --max-docs-per-batch --chunk-strategy"
-        )
-        for missing in ("[-f]", "[-c <name>]"):
-            with self.subTest(missing=missing):
-                runner = ProbeRunner()
-
-                def omit_marker(command: Sequence[str]) -> LimitedProcessResult:
-                    if list(command)[-2:] == ["embed", "--help"]:
-                        return LimitedProcessResult(
-                            0, full_help.replace(missing, ""), ""
-                        )
-                    return runner(command)
-
-                with self.assertRaisesRegex(
-                    ToolProbeError, "bounded_embedding_batch"
-                ):
-                    probe_qmd_capabilities(
-                        "qmd",
-                        index_name="fixture",
-                        runner=omit_marker,
-                        embedding_model_reader=lambda _name, _version: "model-fixture",
-                    )
-
-    def test_lexical_probe_requires_every_runtime_search_marker(self) -> None:
-        full_help = "Options: --format --collection -n <num>"
-        for missing in ("--format", "--collection", "-n <num>"):
-            with self.subTest(missing=missing):
-                runner = ProbeRunner()
-
-                def omit_marker(command: Sequence[str]) -> LimitedProcessResult:
-                    if list(command)[-2:] == ["search", "--help"]:
-                        return LimitedProcessResult(
-                            0, full_help.replace(missing, ""), ""
-                        )
-                    return runner(command)
-
-                with self.assertRaisesRegex(ToolProbeError, "lexical_search"):
-                    probe_qmd_capabilities(
-                        "qmd",
-                        index_name="fixture",
-                        retrieval_mode="lexical",
-                        runner=omit_marker,
-                    )
-
-    def test_capability_fingerprint_is_stable_across_version_changes(self) -> None:
-        first = probe_qmd_capabilities(
-            "qmd",
-            index_name="fixture",
-            runner=ProbeRunner("qmd one"),
-            embedding_model_reader=lambda _name, _version: "model-fixture",
-        )
-        second = probe_qmd_capabilities(
-            "qmd",
-            index_name="fixture",
-            runner=ProbeRunner("qmd two"),
-            embedding_model_reader=lambda _name, _version: "model-fixture",
-        )
-
-        self.assertNotEqual(first["version"], second["version"])
-        self.assertEqual(first["capability_sha256"], second["capability_sha256"])
-        self.assertNotEqual(
-            first["runtime_identity_sha256"],
-            second["runtime_identity_sha256"],
-        )
 
     def test_lexical_probe_skips_vector_capabilities_and_model_identity(self) -> None:
         runner = ProbeRunner()
@@ -214,11 +122,7 @@ class ToolingTests(unittest.TestCase):
         self.assertEqual(snapshot["retrieval_mode"], "lexical")
         self.assertIsNone(snapshot["embedding_model_sha256"])
         self.assertIsNone(snapshot["chunk_strategy"])
-        self.assertFalse(
-            any(call[-2:] in (["embed", "--help"], ["query", "--help"])
-                for call in runner.calls)
-        )
-        self.assertEqual(len(runner.calls), 6)
+        self.assertEqual(runner.calls, [["qmd", "--version"]])
 
     def test_hybrid_probe_hashes_unmaterialized_locator_without_path_leak(
         self,

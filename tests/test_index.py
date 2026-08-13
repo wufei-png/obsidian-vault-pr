@@ -41,40 +41,11 @@ def qmd_snapshot(
     *,
     retrieval_mode: str = "hybrid",
     model: str = "model-fixture",
-    extra_capabilities: dict[str, bool] | None = None,
 ) -> dict[str, object]:
-    capabilities = {
-        "index_selection": True,
-        "collection_inspection": True,
-        "context_inspection": True,
-        "incremental_update": True,
-        "lexical_search": True,
-    }
-    if retrieval_mode == "hybrid":
-        capabilities.update(
-            {
-                "bounded_embedding_batch": True,
-                "structured_hybrid_query": True,
-            }
-        )
-    capabilities.update(extra_capabilities or {})
-    capability_identity = {
-        "schema_version": 2,
-        "tool": "qmd",
-        "capabilities": capabilities,
-    }
-    capability_sha256 = hashlib.sha256(
-        json.dumps(
-            capability_identity,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
     runtime_identity = {
-        **capability_identity,
+        "schema_version": 3,
+        "tool": "qmd",
         "version": version,
-        "capability_sha256": capability_sha256,
         "retrieval_mode": retrieval_mode,
         "embedding_model_sha256": (
             hashlib.sha256(model.encode("utf-8")).hexdigest()
@@ -730,38 +701,6 @@ class IndexTests(unittest.TestCase):
             self.assertFalse(stale["eligible"])
             self.assertIn("commit_matches", stale["reasons"])
 
-    def test_freshness_rejects_changed_qmd_capability_fingerprint(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            vault = self.make_vault(Path(temp_dir))
-            config = make_config(vault)
-            runner = QmdRunner(vault, collection_path=vault)
-            update_qmd_index(
-                config,
-                runner=runner,
-                sleeper=lambda _: None,
-                executable="qmd",
-                capability_probe=capability_probe,
-            )
-
-            def changed_probe(
-                _executable: str,
-                *,
-                index_name: str,
-                retrieval_mode: str,
-            ) -> dict[str, object]:
-                return qmd_snapshot(
-                    retrieval_mode=retrieval_mode,
-                    extra_capabilities={"new_read_only_feature": True},
-                )
-
-            stale = validate_qmd_index_freshness(
-                config,
-                runner=runner,
-                executable="qmd",
-                capability_probe=changed_probe,
-            )
-            self.assertFalse(stale["eligible"])
-            self.assertIn("qmd_runtime_matches", stale["reasons"])
 
     def test_freshness_requires_exact_relevant_config_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -8,6 +8,7 @@ import socket
 import subprocess
 import tempfile
 import unittest
+import urllib.parse
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -27,6 +28,8 @@ from vault_pr.acquisition import (
     fetch_url,
     require_public_url,
     snapshot_source,
+    _ResolvedTarget,
+    _open_pinned_connection,
 )
 from vault_pr.ingest import ingest_source
 from vault_pr.mutation import execute_journaled_mutation as execute_mutation
@@ -100,9 +103,10 @@ class UrlSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(IngestError, "sensitive parameters"):
                     canonicalize_url(url)
 
-    def test_fetch_pins_the_single_validated_dns_answer(self) -> None:
+    def test_fetch_retains_all_validated_dns_answers(self) -> None:
         public_result = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
         ]
         opened_targets = []
 
@@ -146,7 +150,58 @@ class UrlSafetyTests(unittest.TestCase):
 
         self.assertEqual(fetched.body, b"pinned body")
         self.assertEqual(resolver.call_count, 1)
-        self.assertEqual(opened_targets[0].address, public_result[0])
+        self.assertEqual(opened_targets[0].addresses, tuple(public_result))
+
+    def test_pinned_connection_tries_next_validated_address(self) -> None:
+        addresses = (
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
+        )
+        target = _ResolvedTarget(
+            "http://example.test/",
+            urllib.parse.urlsplit("http://example.test/"),
+            addresses,
+        )
+        connected = object()
+        with patch(
+            "vault_pr.acquisition._pinned_socket",
+            side_effect=[OSError("IPv6 unavailable"), connected],
+        ) as pinned:
+            connection = _open_pinned_connection(target, 5)
+            connection.connect()
+
+        self.assertIs(connection.sock, connected)
+        self.assertEqual([call.args[0] for call in pinned.call_args_list], list(addresses))
+
+    def test_pinned_connection_shares_one_timeout_across_addresses(self) -> None:
+        addresses = (
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
+        )
+        target = _ResolvedTarget(
+            "http://example.test/",
+            urllib.parse.urlsplit("http://example.test/"),
+            addresses,
+        )
+        connected = object()
+        with (
+            patch(
+                "vault_pr.acquisition.time.monotonic",
+                side_effect=[100.0, 100.0, 104.5],
+            ),
+            patch(
+                "vault_pr.acquisition._pinned_socket",
+                side_effect=[OSError("IPv6 unavailable"), connected],
+            ) as pinned,
+        ):
+            connection = _open_pinned_connection(target, 5.0)
+            connection.connect()
+
+        self.assertIs(connection.sock, connected)
+        self.assertEqual(
+            [call.args[1] for call in pinned.call_args_list],
+            [5.0, 0.5],
+        )
 
     def test_rejects_invalid_port(self) -> None:
         with self.assertRaisesRegex(IngestError, "invalid port"):
@@ -223,6 +278,38 @@ class ExtractionTests(unittest.TestCase):
 
             self.assertEqual(extracted.raw_filename, "source.html")
             self.assertEqual(extracted.extractor, "defuddle")
+
+    def test_defuddle_accepts_short_non_empty_markdown(self) -> None:
+        fetched = FetchedSource(
+            requested_url="https://example.com/brief",
+            final_url="https://example.com/brief",
+            status=200,
+            headers={"content-type": "text/html"},
+            body=b"<main>OK</main>",
+            captured_at="2026-07-15T00:00:00+00:00",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+
+            def run_defuddle(command: list[str], **_: object) -> LimitedProcessResult:
+                if "--version" in command:
+                    return LimitedProcessResult(0, "defuddle 1.0", "")
+                if "-p" in command:
+                    return LimitedProcessResult(0, "Brief", "")
+                (output_dir / "extracted.md").write_text("OK\n", encoding="utf-8")
+                return LimitedProcessResult(0, "", "")
+
+            with (
+                patch("vault_pr.acquisition.shutil.which", return_value="defuddle"),
+                patch(
+                    "vault_pr.acquisition.run_limited_process",
+                    side_effect=run_defuddle,
+                ),
+            ):
+                extracted = extract_source(fetched, output_dir)
+
+            self.assertEqual(extracted.title, "Brief")
+            self.assertEqual((output_dir / "extracted.md").read_text(), "OK\n")
 
     def test_pdf_extracts_page_text(self) -> None:
         fetched = FetchedSource(

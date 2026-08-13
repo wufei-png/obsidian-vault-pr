@@ -371,7 +371,7 @@ class SnapshotBundleTests(unittest.TestCase):
                     max_total_bytes=2_000,
                 )
 
-    def test_rejects_duplicate_content_in_distinct_files(self) -> None:
+    def test_accepts_duplicate_content_in_distinct_declared_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             primary = b"# Article\n"
@@ -388,13 +388,14 @@ class SnapshotBundleTests(unittest.TestCase):
                 ],
             )
 
-            with self.assertRaisesRegex(SnapshotBundleError, "duplicate file content"):
-                validate_snapshot_bundle(
-                    root,
-                    max_primary_bytes=1_000,
-                    max_files=2,
-                    max_total_bytes=2_000,
-                )
+            result = validate_snapshot_bundle(
+                root,
+                max_primary_bytes=1_000,
+                max_files=2,
+                max_total_bytes=2_000,
+            )
+
+            self.assertEqual(len(result["files"]), 2)
 
     def test_revalidates_hash_size_and_mime(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

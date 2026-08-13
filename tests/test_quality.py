@@ -81,7 +81,8 @@ class GraphQualityTests(unittest.TestCase):
                 if finding["rule_id"] == "broken_wikilink"
             )
             self.assertEqual(broken["blocking_scope"], "owning_transaction")
-            self.assertEqual(result["schema_version"], 2)
+            self.assertNotIn("autonomous_capability", broken)
+            self.assertEqual(result["schema_version"], 3)
             self.assertEqual(result["audit"], "graph")
             self.assertNotIn("quality_assessor_packet", result)
             self.assertEqual(len(result["note_inventory"]), 7)

@@ -11,6 +11,7 @@ import shutil
 import socket
 import ssl
 import sys
+import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -79,6 +80,7 @@ SENSITIVE_QUERY_KEY_PARTS = {
 }
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 MAX_REDIRECTS = 5
+MAX_PINNED_ADDRESS_ATTEMPTS = 8
 
 
 @dataclass(frozen=True)
@@ -109,7 +111,7 @@ class ExtractedSource:
 class _ResolvedTarget:
     canonical_url: str
     parsed: urllib.parse.SplitResult
-    address: tuple[int, int, int, str, tuple[Any, ...]]
+    addresses: tuple[tuple[int, int, int, str, tuple[Any, ...]], ...]
 
 
 class _TitleParser(HTMLParser):
@@ -179,7 +181,7 @@ def _is_sensitive_query_key(key: str) -> bool:
 
 
 def _resolve_public_target(url: str) -> _ResolvedTarget:
-    """Resolve once, reject every non-public answer, and retain a pinned address."""
+    """Resolve once, reject every non-public answer, and retain pinned addresses."""
     canonical = canonicalize_url(url)
     parsed = urllib.parse.urlsplit(canonical)
     assert parsed.hostname is not None
@@ -188,13 +190,23 @@ def _resolve_public_target(url: str) -> _ResolvedTarget:
         addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise IngestError(f"unable to resolve URL hostname: {parsed.hostname}") from exc
+    unique_addresses: list[tuple[int, int, int, str, tuple[Any, ...]]] = []
+    seen: set[tuple[int, int, int, tuple[Any, ...]]] = set()
     for address in addresses:
         ip = ipaddress.ip_address(address[4][0])
         if not ip.is_global:
             raise IngestError(f"URL resolves to a non-public address: {ip}")
+        identity = (address[0], address[1], address[2], address[4])
+        if identity not in seen:
+            seen.add(identity)
+            unique_addresses.append(address)
     if not addresses:
         raise IngestError(f"URL hostname has no addresses: {parsed.hostname}")
-    return _ResolvedTarget(canonical, parsed, addresses[0])
+    return _ResolvedTarget(
+        canonical,
+        parsed,
+        tuple(unique_addresses[:MAX_PINNED_ADDRESS_ATTEMPTS]),
+    )
 
 
 def require_public_url(url: str) -> str:
@@ -216,10 +228,18 @@ def _pinned_socket(
         raise
 
 
+def _remaining_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise socket.timeout("source fetch timeout exceeded")
+    return remaining
+
+
 def _open_pinned_connection(
     target: _ResolvedTarget, timeout_seconds: float
 ) -> http.client.HTTPConnection:
     """Open HTTP(S) to the validated address while preserving TLS hostname checks."""
+    deadline = time.monotonic() + timeout_seconds
     hostname = target.parsed.hostname
     assert hostname is not None
     port = target.parsed.port or (443 if target.parsed.scheme == "https" else 80)
@@ -232,20 +252,39 @@ def _open_pinned_connection(
         )
 
         def connect() -> None:
-            raw_socket = _pinned_socket(target.address, timeout_seconds)
-            try:
-                connection.sock = connection._context.wrap_socket(  # noqa: SLF001
-                    raw_socket, server_hostname=hostname
-                )
-            except Exception:
-                raw_socket.close()
-                raise
+            last_error: OSError | ssl.SSLError | None = None
+            for address in target.addresses:
+                remaining = _remaining_timeout(deadline)
+                try:
+                    raw_socket = _pinned_socket(address, remaining)
+                    try:
+                        raw_socket.settimeout(_remaining_timeout(deadline))
+                        connection.sock = connection._context.wrap_socket(  # noqa: SLF001
+                            raw_socket, server_hostname=hostname
+                        )
+                    except Exception:
+                        raw_socket.close()
+                        raise
+                    return
+                except (OSError, ssl.SSLError) as exc:
+                    last_error = exc
+            assert last_error is not None
+            raise last_error
 
     else:
         connection = http.client.HTTPConnection(hostname, port, timeout=timeout_seconds)
 
         def connect() -> None:
-            connection.sock = _pinned_socket(target.address, timeout_seconds)
+            last_error: OSError | None = None
+            for address in target.addresses:
+                remaining = _remaining_timeout(deadline)
+                try:
+                    connection.sock = _pinned_socket(address, remaining)
+                    return
+                except OSError as exc:
+                    last_error = exc
+            assert last_error is not None
+            raise last_error
 
     connection.connect = connect  # type: ignore[method-assign]
     return connection
@@ -255,6 +294,7 @@ def fetch_url(url: str, timeout_seconds: float, max_bytes: int) -> FetchedSource
     """Fetch a public URL with address pinning, redirect, and size safeguards."""
     requested_url = canonicalize_url(url)
     current_url = requested_url
+    deadline = time.monotonic() + timeout_seconds
     try:
         for redirect_count in range(MAX_REDIRECTS + 1):
             target = _resolve_public_target(current_url)
@@ -262,7 +302,10 @@ def fetch_url(url: str, timeout_seconds: float, max_bytes: int) -> FetchedSource
             request_target = urllib.parse.urlunsplit(
                 ("", "", target.parsed.path or "/", target.parsed.query, "")
             )
-            connection = _open_pinned_connection(target, timeout_seconds)
+            connection = _open_pinned_connection(
+                target,
+                _remaining_timeout(deadline),
+            )
             try:
                 connection.request(
                     "GET",
@@ -516,8 +559,8 @@ def extract_source(
     extracted_text = extracted_path.read_text(encoding="utf-8")
     if len(extracted_text) > max_extracted_characters:
         raise IngestError("Defuddle output exceeds the extracted content limit")
-    if len(extracted_text.strip()) < 100:
-        raise IngestError("Defuddle output is too short to trust")
+    if not extracted_text.strip():
+        raise IngestError("Defuddle output is empty")
 
     try:
         title_result = run_limited_process(

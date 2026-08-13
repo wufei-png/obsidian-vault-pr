@@ -319,7 +319,6 @@ def validate_snapshot_bundle(
 
         seen_files: set[Path] = set()
         seen_identities: set[FileIdentity] = {manifest_inspection.identity}
-        seen_hashes: set[str] = set()
         actual_total = 0
         visited_entries = 0
         maximum_entries = len(by_path) + len(expected_directories)
@@ -408,11 +407,6 @@ def validate_snapshot_bundle(
                         f"snapshot bundle files physically alias each other: {relative}"
                     )
                 seen_identities.add(inspected.identity)
-                if inspected.sha256 in seen_hashes:
-                    raise SnapshotBundleError(
-                        f"snapshot bundle contains duplicate file content: {relative}"
-                    )
-                seen_hashes.add(inspected.sha256)
                 _matches_record(relative, inspected, record)
                 actual_total += inspected.size
                 if actual_total > max_total_bytes:

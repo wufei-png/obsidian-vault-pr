@@ -29,18 +29,19 @@ The implemented workflow provides:
   pages; local absolute paths and provider metadata do not define identity;
 - vault-wide lexical or qmd RRF-fused hybrid retrieval for deduplication and
   semantic planning;
-- Plan schema v3 with one Write Authorization Snapshot, multiple Evidence
-  items, explicit retrieval requirements, governed Source Capture Asset
-  promotion, and a 15-note default limit; existing v2 Plans remain readable;
+- Plan schema v4 with one Maintenance Request snapshot, Source Capture Evidence,
+  optional line-based `focus_ranges`, explicit retrieval requirements, governed
+  Source Capture Asset promotion, and a configurable 15-note default limit;
 - deterministic Review Packets and structured assessments for split, merge,
-  delete, contradiction, `purge_capture`, autonomous repair, or review-all policy;
-  the skill orchestration assigns these plans to a separate reviewer agent;
+  delete, contradiction, `purge_capture`, transactions over 15 notes, or
+  review-all policy; the skill orchestration assigns these plans to a separate
+  reviewer agent;
 - deterministic plan apply with rollback-on-error, an audit archive, atomic
   expected-HEAD Git commits, and a durable `apply -> commit -> finalize`
   recovery protocol;
 - read-only `transaction list`, `show`, and content-free `diff` views over
   active journals and committed receipts;
-- qmd collection reconciliation, capability-gated update, exact-HEAD freshness,
+- qmd collection reconciliation, exact-version-gated update, exact-HEAD freshness,
   and incremental embedding with at most three retries after the first attempt;
 - disposable live capture-route canaries for HTML, PDF, provider-assisted
   WeChat, and environment-gated authenticated snapshots;
@@ -50,18 +51,18 @@ The implemented workflow provides:
   behind one user-facing skill.
 
 The governance kernel is the stable core. Capture-route canaries, Capture
-migration, graph/RAG quality workflows, Quality Records, and autonomous repair
-are experimental surfaces: they remain governed and tested, but do not yet carry
-a production-compatibility promise.
+migration, and graph/RAG quality workflows are experimental surfaces: they
+remain governed and tested, but do not yet carry a production-compatibility
+promise.
 
 ## Support boundary
 
 - Python 3.11 through 3.13 on POSIX systems (currently Linux and macOS); Windows
   is unsupported because the transaction lock and file-safety implementation
   use POSIX APIs.
-- Git is required. qmd and Defuddle are external executables whose capabilities
-  are probed by `vault-pr doctor`; compatibility is capability-based rather than
-  a blanket version promise.
+- Git is required. qmd and Defuddle are external executables. `vault-pr doctor`
+  accepts qmd only when its exact runtime version is on the verified allowlist;
+  Defuddle retains its bounded command/output capability probe.
 - Hybrid index freshness binds the qmd version, retrieval mode, embedding-model
   identity, and chunk strategy without exposing the local model path. The model
   identity hashes resolved local bytes or an exactly identified single-file qmd

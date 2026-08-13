@@ -31,8 +31,8 @@ _ROLE_DEFAULTS = {
     "index": {"index", "moc"},
     "excluded": {"audit", "prompt-template", "prompt-archive"},
 }
-GRAPH_RULESET_VERSION = 1
-GRAPH_AUDIT_SCHEMA_VERSION = 2
+GRAPH_RULESET_VERSION = 2
+GRAPH_AUDIT_SCHEMA_VERSION = 3
 GRAPH_AUDIT_PAYLOAD_FIELDS = (
     "schema_version",
     "audit",
@@ -45,16 +45,6 @@ GRAPH_AUDIT_PAYLOAD_FIELDS = (
     "resolved_edges",
     "findings",
 )
-AUTONOMOUS_RULE_CAPABILITIES = {
-    "broken_wikilink": "repair_broken_wikilink",
-    "source_without_synthesis_link": "repair_source_synthesis_link",
-}
-AUTONOMOUS_CAPABILITY_ACTIONS = {
-    "repair_broken_wikilink": frozenset({"create", "update"}),
-    "repair_source_synthesis_link": frozenset({"create", "update"}),
-}
-
-
 def _canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(
         value,
@@ -135,9 +125,6 @@ def _finding(
     }
     if target is not None:
         result["target"] = target
-    capability = AUTONOMOUS_RULE_CAPABILITIES.get(rule_id)
-    if capability is not None:
-        result["autonomous_capability"] = capability
     return result
 
 
@@ -490,10 +477,7 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
     ).hexdigest()
     rules_digest = hashlib.sha256(
         _canonical_json_bytes(
-            {
-                "graph_ruleset_version": GRAPH_RULESET_VERSION,
-                "autonomous_capabilities": AUTONOMOUS_RULE_CAPABILITIES,
-            }
+            {"graph_ruleset_version": GRAPH_RULESET_VERSION}
         )
     ).hexdigest()
     findings.sort(

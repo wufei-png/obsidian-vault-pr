@@ -37,9 +37,6 @@ retry_backoff_seconds = [2, 10, 30]
 review_all_semantic_transactions = true
 max_revision_rounds = 2
 
-[autonomous_repair]
-enabled = false
-
 [quality]
 rag_cases_path = ".vault-pr/quality/rag/cases.jsonl"
 

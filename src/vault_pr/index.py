@@ -383,59 +383,26 @@ def _validate_qmd_snapshot(snapshot: object) -> dict[str, object]:
         "schema_version",
         "tool",
         "version",
-        "capabilities",
-        "capability_sha256",
         "retrieval_mode",
         "embedding_model_sha256",
         "chunk_strategy",
         "runtime_identity_sha256",
     }:
-        raise IndexUpdateError(
-            "index status contains an invalid qmd capability snapshot"
-        )
-    capabilities = snapshot.get("capabilities")
+        raise IndexUpdateError("index status contains an invalid qmd runtime snapshot")
     if (
-        snapshot.get("schema_version") != 2
+        snapshot.get("schema_version") != 3
         or snapshot.get("tool") != "qmd"
         or not isinstance(snapshot.get("version"), str)
         or not snapshot["version"]
-        or not isinstance(capabilities, dict)
-        or not capabilities
-        or not all(
-            isinstance(name, str) and name and value is True
-            for name, value in capabilities.items()
-        )
     ):
-        raise IndexUpdateError(
-            "index status contains an invalid qmd capability snapshot"
-        )
-    capability_identity = {
-        "schema_version": snapshot["schema_version"],
-        "tool": snapshot["tool"],
-        "capabilities": capabilities,
-    }
-    expected_capability = hashlib.sha256(
-        _canonical_json(capability_identity)
-    ).hexdigest()
-    if snapshot.get("capability_sha256") != expected_capability:
-        raise IndexUpdateError("qmd capability snapshot hash does not match")
+        raise IndexUpdateError("index status contains an invalid qmd runtime snapshot")
     mode = snapshot.get("retrieval_mode")
     model_sha256 = snapshot.get("embedding_model_sha256")
     chunk_strategy = snapshot.get("chunk_strategy")
-    required_capabilities = {
-        "index_selection",
-        "collection_inspection",
-        "context_inspection",
-        "incremental_update",
-        "lexical_search",
-    }
     if mode == "lexical":
         if model_sha256 is not None or chunk_strategy is not None:
             raise IndexUpdateError("lexical qmd snapshot contains vector identity")
     elif mode == "hybrid":
-        required_capabilities.update(
-            {"bounded_embedding_batch", "structured_hybrid_query"}
-        )
         if (
             not isinstance(model_sha256, str)
             or not HEX64_PATTERN.fullmatch(model_sha256)
@@ -444,12 +411,10 @@ def _validate_qmd_snapshot(snapshot: object) -> dict[str, object]:
             raise IndexUpdateError("hybrid qmd snapshot lacks vector identity")
     else:
         raise IndexUpdateError("qmd snapshot contains an invalid retrieval mode")
-    if not required_capabilities.issubset(capabilities):
-        raise IndexUpdateError("qmd snapshot lacks required mode capabilities")
     runtime_identity = {
-        **capability_identity,
+        "schema_version": snapshot["schema_version"],
+        "tool": snapshot["tool"],
         "version": snapshot["version"],
-        "capability_sha256": snapshot["capability_sha256"],
         "retrieval_mode": mode,
         "embedding_model_sha256": model_sha256,
         "chunk_strategy": chunk_strategy,
@@ -536,7 +501,6 @@ def _is_default_model_materialization(
         before.get("retrieval_mode") != "hybrid"
         or after.get("retrieval_mode") != "hybrid"
         or before.get("version") != after.get("version")
-        or before.get("capability_sha256") != after.get("capability_sha256")
         or before.get("chunk_strategy") != after.get("chunk_strategy")
     ):
         return False
@@ -613,7 +577,7 @@ def validate_qmd_index_freshness(
         )
         _validate_qmd_snapshot(current_qmd)
     except (ToolProbeError, IndexUpdateError) as exc:
-        raise IndexUpdateError(f"qmd capability validation failed: {exc}") from exc
+        raise IndexUpdateError(f"qmd compatibility validation failed: {exc}") from exc
 
     try:
         status, status_sha256 = load_index_status(vault)
@@ -679,7 +643,7 @@ def update_qmd_index(
         )
         _validate_qmd_snapshot(qmd_snapshot)
     except (ToolProbeError, IndexUpdateError) as exc:
-        raise IndexUpdateError(f"qmd capability validation failed: {exc}") from exc
+        raise IndexUpdateError(f"qmd runtime validation failed: {exc}") from exc
 
     if check_only:
         git_dir = run_git(vault, "rev-parse", "--absolute-git-dir")

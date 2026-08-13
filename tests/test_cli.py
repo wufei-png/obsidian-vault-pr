@@ -56,6 +56,37 @@ class ConfigTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args([*base_args, "--chain-id", "chain_example"])
 
+    def test_plan_init_no_longer_accepts_an_authorization_kind(self) -> None:
+        parser = build_parser()
+        args = [
+            "plan",
+            "init",
+            "--summary",
+            "Repair note",
+            "--authorization-summary",
+            "User requested the repair",
+        ]
+        parsed = parser.parse_args(args)
+        self.assertFalse(hasattr(parsed, "authorization_kind"))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [*args, "--authorization-kind", "autonomous_repair_policy"]
+            )
+
+    def test_rejects_removed_autonomous_repair_config_with_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "config.toml"
+            config.write_text(
+                "[autonomous_repair]\nenabled = true\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ConfigError,
+                r"autonomous_repair was removed.*Maintenance Request",
+            ):
+                load_config(config)
+
     def test_parser_errors_use_one_json_envelope(self) -> None:
         output = io.StringIO()
 

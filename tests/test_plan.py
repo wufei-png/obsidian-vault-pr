@@ -87,12 +87,17 @@ class PlanTests(unittest.TestCase):
         self,
         root: Path,
         *,
+        extracted_content: bytes | None = None,
         secondary_files: dict[str, tuple[bytes, str, str]] | None = None,
     ) -> tuple[Path, str]:
         vault = root / "vault"
         (vault / "knowledgebase" / "sources").mkdir(parents=True)
         (vault / "work" / "sources").mkdir(parents=True)
-        source_id = write_capture(vault, secondary_files=secondary_files)
+        source_id = write_capture(
+            vault,
+            extracted_content=extracted_content,
+            secondary_files=secondary_files,
+        )
         (vault / "knowledgebase" / "concept.md").write_text(
             note("Concept", "Existing synthesis"),
             encoding="utf-8",
@@ -119,7 +124,7 @@ class PlanTests(unittest.TestCase):
         *,
         intent: str = "integrate",
         contradiction: bool = False,
-        schema_version: int = 2,
+        schema_version: int = 4,
     ) -> Path:
         plan_dir = root / "plan"
         files = plan_dir / "files"
@@ -241,7 +246,7 @@ class PlanTests(unittest.TestCase):
                     "path": target,
                 }
             ],
-            schema_version=3,
+            schema_version=4,
         )
         if referenced:
             (root / "plan" / "files" / "synthesis.md").write_text(
@@ -269,7 +274,19 @@ class PlanTests(unittest.TestCase):
 
             self.assertEqual((vault / target).read_bytes(), content)
             self.assertEqual(result["asset_promotions"][0]["status"], "created")
-            self.assertEqual(result["schema_version"], 3)
+            self.assertEqual(result["schema_version"], 4)
+
+    def test_rejects_legacy_plan_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vault, source_id = self.make_vault(root)
+            plan_path = self.write_plan(root, source_id, [])
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["schema_version"] = 3
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(PlanError, "unsupported plan schema_version"):
+                validate_plan(make_config(vault), plan_path)
 
     def test_asset_create_race_never_overwrites_external_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -823,7 +840,7 @@ class PlanTests(unittest.TestCase):
                 {first_source_id, second_source_id},
             )
 
-    def test_rejects_more_than_configured_note_limit(self) -> None:
+    def test_large_configured_transaction_requires_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             vault, source_id = self.make_vault(root)
@@ -843,6 +860,55 @@ class PlanTests(unittest.TestCase):
             plan_path = self.write_plan(root, source_id, operations)
 
             with self.assertRaisesRegex(PlanError, "maximum is 15"):
+                validate_plan(make_config(vault), plan_path)
+
+            checked = validate_plan(make_config(vault, maximum=18), plan_path)
+            self.assertEqual(checked["touched_notes"], 18)
+            self.assertIn("large_transaction", checked["risks"])
+            self.assertTrue(checked["approval_required"])
+
+    def test_long_source_requires_valid_focus_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            extracted = "".join(
+                f"line {index}: " + ("evidence " * 20) + "\n"
+                for index in range(1, 101)
+            ).encode()
+            vault, source_id = self.make_vault(
+                root,
+                extracted_content=extracted,
+            )
+            plan_path = self.write_plan(root, source_id, [])
+
+            with self.assertRaisesRegex(PlanError, "requires non-empty focus_ranges"):
+                validate_plan(make_config(vault), plan_path)
+
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["evidence"][0]["focus_ranges"] = None
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(PlanError, "must be a non-empty array"):
+                validate_plan(make_config(vault), plan_path)
+
+            plan["evidence"][0]["focus_ranges"] = [
+                {"start_line": 50, "end_line": 51}
+            ]
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+            checked = validate_plan(make_config(vault), plan_path)
+            source_evidence = checked["evidence"][0]
+            self.assertEqual(
+                source_evidence["focus_ranges"],
+                [{"start_line": 50, "end_line": 51}],
+            )
+            focused = source_evidence["focus_excerpts"][0]
+            self.assertEqual(focused["context_start_line"], 48)
+            self.assertEqual(focused["context_end_line"], 53)
+            self.assertIn("line 50:", focused["excerpt"])
+
+            plan["evidence"][0]["focus_ranges"] = [
+                {"start_line": 99, "end_line": 101}
+            ]
+            plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(PlanError, "out of bounds"):
                 validate_plan(make_config(vault), plan_path)
 
     def test_review_all_policy_is_vault_wide_not_folder_based(self) -> None:
@@ -1419,169 +1485,6 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(PlanError, "unknown or missing fields"):
                 validate_plan(make_config(vault), plan_path)
 
-    def test_autonomous_repair_cannot_update_unrelated_note(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            vault, _source_id = self.make_vault(root)
-            owner = vault / "knowledgebase" / "owner.md"
-            unrelated = vault / "knowledgebase" / "unrelated.md"
-            owner.write_text(note("Owner", "Broken [[Missing]]."))
-            unrelated.write_text(note("Unrelated"))
-            subprocess.run(["git", "-C", str(vault), "add", "."], check=True)
-            subprocess.run(
-                ["git", "-C", str(vault), "commit", "-qm", "quality fixture"],
-                check=True,
-            )
-            plan_dir = root / "autonomous-plan"
-            files = plan_dir / "files"
-            files.mkdir(parents=True)
-            (files / "unrelated.md").write_text(note("Unrelated", "Changed"))
-            record_id = "quality_11111111111111111111"
-            record_path = root / f"{record_id}.json"
-            record_path.write_text("{}\n")
-            plan_path = plan_dir / "plan.json"
-            plan_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 2,
-                        "transaction_id": "txn_autonomous_scope",
-                        "summary": "Repair selected quality finding",
-                        "authorization": {
-                            "kind": "autonomous_repair_policy",
-                            "summary": "Apply deterministic quality repair",
-                        },
-                        "evidence": [
-                            {
-                                "kind": "quality_record",
-                                "record_id": record_id,
-                                "finding_ids": ["finding_fixture"],
-                            }
-                        ],
-                        "intent": "maintenance",
-                        "retrieval": {
-                            "required": False,
-                            "reason": "quality record identifies the owner",
-                        },
-                        "contradiction": False,
-                        "operations": [
-                            {
-                                "action": "update",
-                                "path": "knowledgebase/unrelated.md",
-                                "expected_sha256": sha256(unrelated),
-                                "content_file": "files/unrelated.md",
-                            }
-                        ],
-                    }
-                )
-                + "\n"
-            )
-            finding = {
-                "finding_id": "finding_fixture",
-                "rule_id": "broken_wikilink",
-                "severity": "error",
-                "path": "knowledgebase/owner.md",
-                "owner_sha256": sha256(owner),
-                "target": "Missing",
-                "blocking_scope": "owning_transaction",
-                "autonomous_capability": "repair_broken_wikilink",
-            }
-            config = make_config(vault)
-            config["autonomous_repair"] = {"enabled": True}
-            with (
-                patch(
-                    "vault_pr.plan.load_quality_record",
-                    return_value=({}, record_path),
-                ),
-                patch(
-                    "vault_pr.plan.revalidate_quality_record",
-                    return_value=[finding],
-                ),
-            ):
-                with self.assertRaisesRegex(
-                    PlanError, "only update a selected finding owner"
-                ):
-                    validate_plan(config, plan_path)
-
-    def test_autonomous_repair_can_add_incoming_source_synthesis_link(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            vault, source_id = self.make_vault(root)
-            source = vault / "knowledgebase" / "sources" / "source.md"
-            concept = vault / "knowledgebase" / "concept.md"
-            plan_dir = root / "autonomous-source-plan"
-            files = plan_dir / "files"
-            files.mkdir(parents=True)
-            (files / "concept.md").write_text(
-                note("Concept", "Synthesized from [[sources/source]]"),
-                encoding="utf-8",
-            )
-            record_id = "quality_22222222222222222222"
-            record_path = root / f"{record_id}.json"
-            record_path.write_text("{}\n", encoding="utf-8")
-            plan_path = plan_dir / "plan.json"
-            plan_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 2,
-                        "transaction_id": "txn_autonomous_source_link",
-                        "summary": "Link source from synthesis",
-                        "authorization": {
-                            "kind": "autonomous_repair_policy",
-                            "summary": "Apply deterministic quality repair",
-                        },
-                        "evidence": [
-                            {
-                                "kind": "quality_record",
-                                "record_id": record_id,
-                                "finding_ids": ["finding_source"],
-                            }
-                        ],
-                        "intent": "maintenance",
-                        "retrieval": {
-                            "required": False,
-                            "reason": "quality record identifies the missing link",
-                        },
-                        "contradiction": False,
-                        "operations": [
-                            {
-                                "action": "update",
-                                "path": "knowledgebase/concept.md",
-                                "expected_sha256": sha256(concept),
-                                "content_file": "files/concept.md",
-                            }
-                        ],
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            finding = {
-                "finding_id": "finding_source",
-                "rule_id": "source_without_synthesis_link",
-                "severity": "warning",
-                "path": "knowledgebase/sources/source.md",
-                "owner_sha256": sha256(source),
-                "blocking_scope": "none",
-                "autonomous_capability": "repair_source_synthesis_link",
-            }
-            config = make_config(vault)
-            config["autonomous_repair"] = {"enabled": True}
-            with (
-                patch(
-                    "vault_pr.plan.load_quality_record",
-                    return_value=({}, record_path),
-                ),
-                patch(
-                    "vault_pr.plan.revalidate_quality_record",
-                    return_value=[finding],
-                ),
-            ):
-                checked = validate_plan(config, plan_path)
-
-            self.assertEqual(
-                checked["operations"][0]["path"],
-                concept.resolve(),
-            )
 
     def test_rejects_invalid_yaml_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1721,7 +1624,7 @@ class PlanTests(unittest.TestCase):
             plan_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 4,
                         "transaction_id": "txn_purge_fixture",
                         "summary": "Purge obsolete capture",
                         "authorization": {
@@ -1791,7 +1694,7 @@ class PlanTests(unittest.TestCase):
             plan_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 4,
                         "transaction_id": "txn_purge_blocked",
                         "summary": "Purge referenced capture",
                         "authorization": {
@@ -1837,8 +1740,8 @@ class PlanTests(unittest.TestCase):
                 ],
             )
 
-            with self.assertRaisesRegex(ConfigError, "hard limit of 15"):
-                validate_plan(make_config(vault, maximum=16), plan_path)
+            checked = validate_plan(make_config(vault, maximum=16), plan_path)
+            self.assertEqual(checked["maximum_touched_notes"], 16)
 
             config = make_config(vault, max_revision_rounds=6)
             with self.assertRaisesRegex(ConfigError, "hard limit of 5"):

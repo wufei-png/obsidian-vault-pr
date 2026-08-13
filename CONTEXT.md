@@ -57,14 +57,6 @@ _Avoid_: Domain, area, folder scope
 A disposable Git-managed vault containing synthetic notes and configuration for repeatable route, policy, and recovery tests.
 _Avoid_: User vault, temporary user vault
 
-**Vault Registry**:
-The local agent-facing list of Vault Boundaries and their routing evidence, configuration paths, and allowed source classes; it selects one vault before a workflow starts.
-_Avoid_: Multi-vault config, domain map
-
-**Knowledge Promotion**:
-A reviewed, de-identified export from a more restricted Vault Boundary followed by a new ingestion into a less restricted Vault Boundary.
-_Avoid_: Move, cross-vault transaction
-
 **Semantic Transaction**:
 A bounded, reviewable set of interlinked knowledge changes containing one Write Authorization Snapshot and zero or more items of Transaction Evidence.
 _Avoid_: Batch edit, import
@@ -106,7 +98,7 @@ A transient candidate returned by lexical or semantic retrieval that may inform 
 _Avoid_: Related note, graph edge
 
 **Quality Finding**:
-An evidence-backed observation about vault integrity, structure, or retrieval quality. It may remain diagnostic and does not by itself authorize autonomous repair.
+An evidence-backed, read-only observation about vault integrity, structure, or retrieval quality. Repairing it requires an explicit Maintenance Request.
 _Avoid_: Error, repair task
 
 **Note Role**:
@@ -114,12 +106,8 @@ The knowledge purpose of a note, which determines the graph and provenance invar
 _Avoid_: Folder, file type
 
 **Quality Record**:
-A versioned, retrieval-excluded artifact under `.vault-pr/quality/` containing eligible deterministic Quality Findings or evaluation outcomes. A diagnostic Quality Finding is recorded only when an agent will use it to propose autonomous repair. A Quality Record may provide Transaction Evidence but never grants write authority by itself.
+A versioned, retrieval-excluded artifact under `.vault-pr/quality/` containing an accepted evaluation outcome. It preserves a regression baseline but never grants write authority.
 _Avoid_: Temporary report, knowledge note
-
-**Autonomous Repair Policy**:
-A current Vault Boundary policy that permits an agent to propose repairs from eligible Git-tracked Quality Records without a new user request. The transaction records the applicable policy in its Write Authorization Snapshot; the referenced Quality Record remains Transaction Evidence.
-_Avoid_: Quality finding authorization, self-approval, automatic fix flag
 
 **Claim Conflict**:
 Two provenance-bound claims that cannot both hold under the same stated scope and time; recording the conflict does not decide which claim is correct.

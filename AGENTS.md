@@ -39,11 +39,13 @@ use temporary directories or synthetic vaults.
   source note and manifest.
 - Preserve conflicting claims and their sources, then update the current
   synthesis and confidence instead of silently overwriting history.
-- Touch at most 15 notes in one transaction; split larger changes into multiple
-  bounded transactions and commit each before starting the next.
+- Touch at most 15 notes by default. A positive local limit may permit a larger
+  bounded transaction, but every transaction over 15 notes requires an
+  independent reviewer.
 - Allow create, rewrite, and rename automatically after validation. Require an
-  independent reviewer agent for split, merge, delete, contradictions, and
-  every transaction when the configured vault enables review-all policy.
+  independent reviewer agent for split, merge, delete, contradictions,
+  transactions over 15 notes, and every transaction when the configured vault
+  enables review-all policy.
 - Commit content even if qmd indexing fails. Retry indexing at most 3 times
   after the initial attempt, then record `index_failed` without rolling back the
   content commit.
