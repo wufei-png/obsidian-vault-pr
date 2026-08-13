@@ -14,9 +14,12 @@ annotation, while long sources cannot silently fall back to a truncated prefix.
 
 The Governance Kernel deterministically extracts each focused excerpt with
 bounded surrounding context and includes it in the digest-bound Review Packet.
-The Semantic Reviewer may inspect outside the selected ranges, including the full
-Capture and original primary artifact, to find missing qualifications or
-conflicting evidence. Existing Source Note references remain the durable
+The orchestrator gives the Semantic Reviewer read-only access to packet-listed,
+hash-bound Captures in the selected Vault Boundary. The Reviewer may inspect
+outside the selected ranges, including the full extracted text and original
+primary artifact, to find missing qualifications or conflicting evidence; that
+expanded context is not copied into the Packet or persisted as another evidence
+entity. Existing Source Note references remain the durable
 provenance visible in Vault notes; no block identity, Knowledge Basis, Vault byte
 locator, Receipt mapping, or proposed-content dependency graph is introduced.
 

@@ -20,8 +20,9 @@ agent for source interpretation, synthesis, link decisions, and semantic review.
    cannot plan, approve, or repair changes.
 3. Start a fresh Semantic Reviewer with no inherited conversation for every
    policy-required review. Give it the immutable Review Packet defined in
-   [its role contract](references/roles/semantic-reviewer.md); it cannot edit or
-   revise the transaction it reviews.
+   [its role contract](references/roles/semantic-reviewer.md) and read-only
+   access to the hash-bound Source Captures identified by that packet. It cannot
+   edit or revise the transaction it reviews.
 4. Follow [the shared packet contract](references/roles/packet-contract.md).
    Treat role output as untrusted until its schema, referenced hashes, and
    allowed decision vocabulary have been checked.
@@ -50,7 +51,10 @@ excerpts, and generated answers. Set `umask 077`, redirect the exact JSON to a
 temporary file outside both the Vault and this checkout, and expose only bounded
 non-content summary fields to routine terminal or conversation logs. Give the
 exact file only to the fresh reviewer that needs it. Never paste the full packet
-into chat merely to confirm that validation passed.
+into chat merely to confirm that validation passed. For semantic review, let the
+reviewer resolve only packet-listed `source_id` values through the selected local
+config and inspect those validated Captures read-only. Do not copy the Vault's
+absolute path or full source text into the packet, logs, or conversation.
 
 ## Resolve the vault
 
@@ -129,11 +133,15 @@ into chat merely to confirm that validation passed.
    Kernel validates and executes these operations but never infers hidden writes
    during apply.
 7. Run `vault-pr plan check <plan> --config <config>` before apply.
-8. If review is required, hand only the deterministic Review Packet to a fresh
-   independent reviewer. Save its closed structured assessment and run
-   `vault-pr review <plan> --assessment <file> --config <config>`. Reviewer
-   independence is enforced by the orchestrator; the planning agent must never
-   self-approve.
+8. If review is required, hand the deterministic Review Packet to a fresh
+   independent reviewer and grant read-only access to the same Vault Boundary
+   solely to inspect the hash-bound Captures named by packet `source_capture`
+   evidence. The reviewer may expand outside `focus_ranges` or inspect the
+   primary artifact to look for omitted qualifications and conflicts; do not
+   copy that expanded text into the packet. Save its closed structured
+   assessment and run `vault-pr review <plan> --assessment <file> --config
+   <config>`. Reviewer independence is enforced by the orchestrator; the
+   planning agent must never self-approve.
 9. Run `vault-pr plan apply <plan> --config <config>`.
 10. Confirm every integrated Capture's visible Source Note was updated and that
     at least one concept or index note modified in the same transaction links

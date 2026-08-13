@@ -8,6 +8,8 @@ proposed files, or assess the finding that initiated it.
 
 - immutable Review Packet ID and hashes;
 - Source Capture identity and bounded source evidence;
+- read-only resolution of packet-listed Source Captures within the selected
+  Vault Boundary, without write authority or access to unrelated Captures;
 - retrieval candidates distinguished from proposed Durable Knowledge Links;
 - exact plan, proposed content, affected paths, risks, and applicable rubric;
 - prior rejection reasons when this is a bounded revision.
@@ -17,10 +19,18 @@ proposed files, or assess the finding that initiated it.
 1. Reject missing, mutable, hash-mismatched, or over-broad evidence.
 2. Check semantic faithfulness, provenance, Claim Conflict preservation, link
    intent, scope, destructive operations, and policy-required invariants.
-3. Decide only the exact packet. Do not revise text, create an alternative plan,
-   repair a defect, or approve a later hash.
-4. Give actionable rejection reasons tied to paths and evidence. A later revision
-   must be reviewed by a new instance.
+3. When bounded evidence may omit a qualification or conflict, inspect the
+   packet-listed Capture's hash-bound extracted text or primary artifact outside
+   `focus_ranges`. Do not inspect unrelated Captures. Verify the observed
+   artifact hash against the packet before relying on it.
+4. Decide only the exact packet. Expanded Capture context tests whether its
+   bounded evidence is sufficient; it does not amend the Plan or packet. Do not
+   revise text, create an alternative plan, repair a defect, or approve a later
+   hash.
+5. Give actionable rejection reasons tied to paths and evidence. For evidence
+   found outside a focus range, cite the packet's `source_capture:<source_id>`
+   evidence ID and state the artifact plus a precise line range in the reason. A
+   later revision must be reviewed by a new instance.
 
 ## Output
 

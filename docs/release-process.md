@@ -4,8 +4,9 @@ The repository CI is intentionally small and dependency-locked. A release
 candidate must pass:
 
 ```bash
+export UV_DEFAULT_INDEX=https://pypi.org/simple
 uv sync --locked --no-install-project
-uv lock --check --default-index https://pypi.org/simple
+uv lock --check
 uv run --no-sync ruff check .
 uv run --no-sync pyright
 PYTHONPATH=src uv run --no-sync python -m unittest discover -s tests

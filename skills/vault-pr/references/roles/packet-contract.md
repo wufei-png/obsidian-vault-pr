@@ -45,6 +45,15 @@ persisted as Transaction Evidence. A revised transaction also binds bounded,
 structured reasons from every prior rejection so a fresh reviewer needs no
 out-of-band conversation history.
 
+For packet-listed Source Captures, the orchestrator may additionally provide
+read-only access to the selected Vault Boundary. This lets the Semantic Reviewer
+inspect context outside `focus_ranges` without duplicating full source text in
+the packet. The Reviewer must match the inspected artifact to the hashes already
+bound by the packet, may not inspect unrelated Captures, and cites the existing
+`source_capture:<source_id>` evidence ID when expanded context changes its
+decision. This access does not add evidence fields or weaken the exact-packet
+decision boundary.
+
 `packet_id` is the first 20 hexadecimal characters of the SHA-256 digest of the
 canonical packet input, prefixed with `pkt_`. Evidence entries use Vault-relative
 paths, case IDs, source IDs, content hashes, or metric IDs; they never contain
