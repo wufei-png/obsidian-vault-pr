@@ -6,7 +6,7 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Iterable, NoReturn, Sequence
 
 from .canary import CanaryError, run_capture_route_canary
 from .config import ConfigError, load_config, load_vault_path, retrieval_mode
@@ -50,12 +50,13 @@ from .transaction import (
 class JsonArgumentParser(argparse.ArgumentParser):
     """Emit parser failures through the stable JSON protocol."""
 
-    def parse_args(
+    def parse_args(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
-        args: Sequence[str] | None = None,
-        namespace: argparse.Namespace | None = None,
+        args: Iterable[str] | None = None,
+        namespace: Any = None,
     ) -> argparse.Namespace:
         parsed = super().parse_args(args, namespace)
+        assert parsed is not None
         if (
             getattr(parsed, "command", None) == "plan"
             and getattr(parsed, "plan_command", None) == "init"
@@ -66,7 +67,7 @@ class JsonArgumentParser(argparse.ArgumentParser):
             )
         return parsed
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         emit(
             error_envelope(
                 "cli",

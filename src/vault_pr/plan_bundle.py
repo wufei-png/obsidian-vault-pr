@@ -17,7 +17,7 @@ def read_json(path: Path, label: str) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise PlanError(f"{label} not found") from exc
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PlanError(f"invalid {label}") from exc
     if not isinstance(value, dict):
         raise PlanError(f"{label} must be a JSON object")

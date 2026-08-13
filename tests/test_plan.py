@@ -14,6 +14,7 @@ from vault_pr.config import ConfigError, source_archive_dir
 from vault_pr.capture import load_validated_capture_assets_bytes
 from vault_pr.git import run_git as vault_run_git
 from vault_pr.plan import PlanError, apply_plan, record_review, validate_plan
+from vault_pr.plan_bundle import read_json
 from vault_pr.recovery import commit_applied_transaction, prepare_active_transaction
 from vault_pr.review import REQUIRED_JUDGMENTS
 
@@ -55,6 +56,14 @@ def make_config(
 
 
 class PlanTests(unittest.TestCase):
+    def test_invalid_utf8_json_is_a_plan_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "assessment.json"
+            path.write_bytes(b"\xff")
+
+            with self.assertRaisesRegex(PlanError, "invalid assessment"):
+                read_json(path, "assessment")
+
     def setUp(self) -> None:
         freshness = patch(
             "vault_pr.plan.validate_qmd_index_freshness",

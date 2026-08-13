@@ -43,6 +43,8 @@ The implemented workflow provides:
   active journals and committed receipts;
 - qmd collection reconciliation, exact-version-gated update, exact-HEAD freshness,
   and incremental embedding with at most three retries after the first attempt;
+- a release-only qmd semantic canary covering hidden governance paths,
+  structured output, Unicode/spaced paths, and duplicate filenames;
 - disposable live capture-route canaries for HTML, PDF, provider-assisted
   WeChat, and environment-gated authenticated snapshots;
 - read-only Note Role graph audits and vault-owned RAG evaluation cases with

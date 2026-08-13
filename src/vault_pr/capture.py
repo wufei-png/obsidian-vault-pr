@@ -310,7 +310,11 @@ def _validate_source_and_acquisition(
     kind = source.get("kind")
     access_kind = source.get("access_kind")
     adapter = acquisition.get("adapter")
-    if not all(isinstance(value, str) for value in (kind, access_kind, adapter)):
+    if (
+        not isinstance(kind, str)
+        or not isinstance(access_kind, str)
+        or not isinstance(adapter, str)
+    ):
         raise CaptureError("capture source and acquisition kinds are invalid")
     expected_source_fields = {
         "kind",
@@ -330,10 +334,13 @@ def _validate_source_and_acquisition(
         "local_file": ("local_file", "local"),
     }
     if kind == "snapshot_bundle":
-        if adapter not in {"wechat", "authenticated"} or access_kind != {
-            "wechat": "public",
-            "authenticated": "authenticated",
-        }[adapter]:
+        if adapter == "wechat":
+            expected_access_kind = "public"
+        elif adapter == "authenticated":
+            expected_access_kind = "authenticated"
+        else:
+            raise CaptureError("capture acquisition does not match its source kind")
+        if access_kind != expected_access_kind:
             raise CaptureError("capture acquisition does not match its source kind")
     elif expected_adapter_access.get(kind) != (adapter, access_kind):
         raise CaptureError("capture acquisition does not match its source kind")

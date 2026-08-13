@@ -8,7 +8,7 @@ import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 
 class LimitedProcessTimeout(RuntimeError):
@@ -22,7 +22,7 @@ class LimitedProcessResult:
     stderr: str
 
 
-def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+def _kill_process_group(process: subprocess.Popen[Any]) -> None:
     if os.name == "posix":
         try:
             os.killpg(process.pid, signal.SIGKILL)

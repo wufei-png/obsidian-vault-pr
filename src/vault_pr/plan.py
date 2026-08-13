@@ -1266,6 +1266,7 @@ def _validate_review_history(
         if (
             set(entry) != expected_fields
             or schema_version != PLAN_SCHEMA_VERSION
+            or not isinstance(digest, str)
             or not isinstance(assessment, dict)
             or assessment.get("status") not in {"approve", "reject"}
             or not isinstance(entry.get("reviewed_at"), str)
@@ -1667,6 +1668,12 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         )
         final_mode.update({path: "100644" for path in archive_payloads})
 
+        def required_final_mode(path: Path) -> str:
+            mode = final_mode[path]
+            if mode is None:
+                raise PlanError("write target has no final Git mode")
+            return mode
+
         def write(active_dir: Path) -> None:
             write_index = 0
             for operation in operations:
@@ -1677,7 +1684,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                         target,
                         content_snapshots[operation["content_file"]],
                         active_dir / "write-staging" / str(write_index),
-                        final_mode[target],
+                        required_final_mode(target),
                     )
                     write_index += 1
                 elif action == "promote_asset":
@@ -1686,7 +1693,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                             vault,
                             target,
                             asset_snapshots[target],
-                            final_mode[target],
+                            required_final_mode(target),
                         )
                 elif action == "delete":
                     target.unlink()
@@ -1697,7 +1704,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                             target,
                             content_snapshots[operation["content_file"]],
                             active_dir / "write-staging" / str(write_index),
-                            final_mode[target],
+                            required_final_mode(target),
                         )
                         write_index += 1
                         operation["from"].unlink()
@@ -1725,7 +1732,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                     archive_path,
                     content,
                     active_dir / "write-staging" / str(write_index),
-                    final_mode[archive_path],
+                    required_final_mode(archive_path),
                 )
                 write_index += 1
 

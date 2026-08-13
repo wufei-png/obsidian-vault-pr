@@ -78,20 +78,22 @@ def _v2_files(capture_dir: Path, manifest: dict[str, Any]) -> dict[Path, str]:
     asset_hashes = manifest.get("asset_sha256", {})
     if not isinstance(asset_hashes, dict):
         raise MigrationError("schema-v2 capture asset hashes are invalid")
-    expected: dict[Path, str] = {
-        raw: manifest.get("raw_sha256"),
-        extracted: manifest.get("extracted_sha256"),
-    }
+    raw_digest = manifest.get("raw_sha256")
+    extracted_digest = manifest.get("extracted_sha256")
+    if not all(
+        isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+        for digest in (raw_digest, extracted_digest)
+    ):
+        raise MigrationError("schema-v2 capture contains invalid artifact hashes")
+    assert isinstance(raw_digest, str) and isinstance(extracted_digest, str)
+    expected: dict[Path, str] = {raw: raw_digest, extracted: extracted_digest}
     for raw_path, digest in asset_hashes.items():
         path = _relative_artifact(raw_path, "asset")
         if path in expected:
             raise MigrationError("schema-v2 capture declares a duplicate artifact path")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise MigrationError("schema-v2 capture contains invalid artifact hashes")
         expected[path] = digest
-    if not all(
-        isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
-        for digest in expected.values()
-    ):
-        raise MigrationError("schema-v2 capture contains invalid artifact hashes")
 
     expected_paths = {Path("manifest.json"), *expected}
     expected_directories = {Path(".")}

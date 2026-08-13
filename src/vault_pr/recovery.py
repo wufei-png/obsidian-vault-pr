@@ -506,6 +506,10 @@ def prepare_active_transaction(
                 )
             backup_name: str | None = None
             if original is not None:
+                if original_bytes is None or original_mode is None:
+                    raise RecoveryError(
+                        f"unable to snapshot affected path: {relative}"
+                    )
                 backup_name = f"backups/{index}"
                 backup_path = active_dir / backup_name
                 backup_path.write_bytes(original_bytes)

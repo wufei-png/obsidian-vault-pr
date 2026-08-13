@@ -5,7 +5,12 @@ candidate must pass:
 
 ```bash
 uv sync --locked --no-install-project
+uv lock --check --default-index https://pypi.org/simple
+uv run --no-sync ruff check .
+uv run --no-sync pyright
 PYTHONPATH=src uv run --no-sync python -m unittest discover -s tests
+PYTHONPATH=src uv run --no-sync coverage run --branch -m unittest discover -s tests
+uv run --no-sync coverage report
 PYTHONPATH=src uv run --no-sync python -m compileall -q src
 npx --yes skills-ref@0.1.5 validate skills/vault-pr
 uv build --wheel \
@@ -14,18 +19,20 @@ uv export --locked --no-dev --no-emit-project \
   --format requirements.txt --output-file .smoke-requirements.txt
 ```
 
-CI runs the Python checks on Linux and macOS with Python 3.11, 3.12, and 3.13,
-validates the skill schema, builds the wheel with a hash-locked PEP 517 build
-environment, installs runtime dependencies exported from `uv.lock` into a fresh
-environment, installs the wheel with `--no-deps`, and smoke-tests the `vault-pr`
-entry point. Third-party Actions are pinned to full commit hashes.
+CI runs the Python tests on Linux and macOS with Python 3.11, 3.12, and 3.13. A
+separate Python 3.11 quality job runs Ruff, Pyright over `src/`, the full suite
+under branch coverage, prints the coverage report without a percentage gate,
+and verifies that all checks leave the checkout clean. CI also validates the
+skill schema, builds the wheel with a hash-locked PEP 517 environment, installs
+runtime dependencies exported from `uv.lock` into a fresh environment, installs
+the wheel with `--no-deps`, and smoke-tests the `vault-pr` entry point.
+Third-party Actions are pinned to full commit hashes.
 
-Before release, also run `vault-pr doctor` with a machine-local configuration
-against each supported real qmd/Defuddle setup. CI does not contain a private
+Before release, run `uv run --frozen python scripts/qmd-semantic-canary.py` and
+`vault-pr doctor` with a machine-local configuration against each supported real
+qmd/Defuddle setup. The qmd canary must pass before its exact version enters the
+runtime allowlist; it covers hidden `.vault-pr` exclusion, JSON results,
+Unicode/spaced paths, and duplicate filenames. CI does not contain qmd or a private
 Vault and cannot establish live-provider, private-source, full qmd model, or
 human semantic-review evidence. Record those results separately and do not turn
 a passing fixture suite into a production-readiness claim.
-
-Ruff, static type checking, and a coverage threshold are not release gates yet.
-They should be introduced only with repository-owned configuration, a clean
-baseline, and locked tool versions rather than as drifting ad hoc CI commands.

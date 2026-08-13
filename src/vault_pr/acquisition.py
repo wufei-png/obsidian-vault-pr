@@ -244,11 +244,12 @@ def _open_pinned_connection(
     assert hostname is not None
     port = target.parsed.port or (443 if target.parsed.scheme == "https" else 80)
     if target.parsed.scheme == "https":
+        tls_context = ssl.create_default_context()
         connection = http.client.HTTPSConnection(
             hostname,
             port,
             timeout=timeout_seconds,
-            context=ssl.create_default_context(),
+            context=tls_context,
         )
 
         def connect() -> None:
@@ -259,7 +260,7 @@ def _open_pinned_connection(
                     raw_socket = _pinned_socket(address, remaining)
                     try:
                         raw_socket.settimeout(_remaining_timeout(deadline))
-                        connection.sock = connection._context.wrap_socket(  # noqa: SLF001
+                        connection.sock = tls_context.wrap_socket(
                             raw_socket, server_hostname=hostname
                         )
                     except Exception:

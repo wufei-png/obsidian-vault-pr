@@ -445,13 +445,13 @@ def ingest_source(
             )
         affected = {capture_dir / relative for relative in staged_hashes}
         affected.add(note_path)
-        final_sha256 = {
+        final_sha256: dict[Path, str | None] = {
             capture_dir / relative: digest for relative, digest in staged_hashes.items()
         }
         final_sha256[note_path] = hashlib.sha256(
             note_content.encode("utf-8")
         ).hexdigest()
-        final_mode = {path: "100644" for path in affected}
+        final_mode: dict[Path, str | None] = {path: "100644" for path in affected}
 
         def write(active_dir: Path) -> None:
             staged_capture = active_dir / "capture-staging"
