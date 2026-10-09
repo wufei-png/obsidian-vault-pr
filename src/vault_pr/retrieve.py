@@ -22,6 +22,7 @@ from .config import (
 from .errors import IngestError
 from .index import IndexUpdateError, validate_qmd_index_freshness
 from .source_note import resolve_source_note
+from .tooling import QMD_PATH_PRESERVING_VERSION_OUTPUTS
 
 
 class RetrievalError(RuntimeError):
@@ -201,7 +202,9 @@ def _qmd_handelize(path: str) -> str:
     return "/".join(segment for segment in normalized if segment)
 
 
-def build_qmd_path_map(root_dir: Path) -> dict[str, list[Path]]:
+def build_qmd_path_map(
+    root_dir: Path, *, preserve_paths: bool = False
+) -> dict[str, list[Path]]:
     """Map qmd virtual paths back to exact files, retaining collisions."""
     ignored_dirs = {"node_modules", ".git", ".cache", "vendor", "dist", "build"}
     mapped: dict[str, list[Path]] = defaultdict(list)
@@ -212,7 +215,8 @@ def build_qmd_path_map(root_dir: Path) -> dict[str, list[Path]]:
         resolved = candidate.resolve()
         if not resolved.is_file() or not resolved.is_relative_to(root_dir):
             continue
-        mapped[_qmd_handelize(relative.as_posix())].append(resolved)
+        key = relative.as_posix() if preserve_paths else _qmd_handelize(relative.as_posix())
+        mapped[key].append(resolved)
     return dict(mapped)
 
 
@@ -267,7 +271,11 @@ def retrieve_related_notes(
         source_note = str(resolve_source_note(config, vault, source_id).relative_to(vault))
     except IngestError as exc:
         raise RetrievalError(str(exc)) from exc
-    path_map = build_qmd_path_map(spec.root_dir)
+    qmd_version = index_freshness.get("qmd", {}).get("version")
+    path_map = build_qmd_path_map(
+        spec.root_dir,
+        preserve_paths=qmd_version in QMD_PATH_PRESERVING_VERSION_OUTPUTS,
+    )
 
     strategy = qmd_retrieval_strategy(config)
     command = build_qmd_retrieval_command(

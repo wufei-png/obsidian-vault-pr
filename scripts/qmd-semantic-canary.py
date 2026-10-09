@@ -5,13 +5,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
+from vault_pr.retrieve import build_qmd_path_map, resolve_qmd_path
+from vault_pr.tooling import (
+    QMD_ALLOWED_VERSION_OUTPUTS,
+    QMD_PATH_PRESERVING_VERSION_OUTPUTS,
+)
 
-EXPECTED_VERSION = "qmd 2.5.3 (c92adb3)"
 COLLECTION = "qmd-semantic-canary"
 EXPECTED_TOKENS = {
     "QMD_CANARY_ALPHA_DUPLICATE",
@@ -57,12 +63,28 @@ def main() -> int:
     parser.add_argument("--qmd", default="qmd")
     args = parser.parse_args()
     version = _run([args.qmd, "--version"]).strip()
-    if version != EXPECTED_VERSION:
+    if version not in QMD_ALLOWED_VERSION_OUTPUTS:
         raise RuntimeError(f"unsupported qmd runtime: {version}")
 
     fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "qmd_semantic"
+    preserve_paths = version in QMD_PATH_PRESERVING_VERSION_OUTPUTS
+    expected_tokens = set(EXPECTED_TOKENS)
+    expected_paths = {
+        "Alpha/Shared.md",
+        "Beta/Shared.md",
+        "Unicode Notes/知识 图谱.md" if preserve_paths else "Unicode-Notes/知识-图谱.md",
+    }
     with tempfile.TemporaryDirectory(prefix="vault-pr-qmd-canary-") as temporary:
         index = Path(temporary) / "index.sqlite"
+        fixture = shutil.copytree(fixture, Path(temporary) / "fixture").resolve()
+        if preserve_paths:
+            collisions = fixture / "Collision"
+            collisions.mkdir()
+            for index_number, filename in enumerate(("A B.md", "A-B.md", "A_B.md")):
+                token = f"QMD_CANARY_COLLISION_{index_number}"
+                (collisions / filename).write_text(f"# {filename}\n\n{token}\n")
+                expected_tokens.add(token)
+                expected_paths.add(f"Collision/{filename}")
         _run(
             [
                 args.qmd,
@@ -80,11 +102,20 @@ def main() -> int:
         _run([args.qmd, "--index", str(index), "update"])
         results = _search(args.qmd, index, "QMD_CANARY")
         hidden = _search(args.qmd, index, "QMD_CANARY_HIDDEN_INTERNAL")
+        path_map = build_qmd_path_map(fixture, preserve_paths=preserve_paths)
+        for item in results:
+            parsed = urlsplit(str(item.get("file", "")))
+            if parsed.scheme != "qmd" or parsed.netloc != COLLECTION:
+                raise RuntimeError("qmd returned a result outside the fixture collection")
+            resolve_qmd_path(fixture, unquote(parsed.path).lstrip("/"), path_map)
 
     if hidden:
         raise RuntimeError("qmd indexed hidden .vault-pr content")
-    if len(results) != 3:
-        raise RuntimeError(f"qmd returned {len(results)} visible canary results, expected 3")
+    if len(results) != len(expected_paths):
+        raise RuntimeError(
+            f"qmd returned {len(results)} visible canary results, "
+            f"expected {len(expected_paths)}"
+        )
     for item in results:
         if not all(
             isinstance(item.get(field), expected)
@@ -99,14 +130,10 @@ def main() -> int:
         ):
             raise RuntimeError("qmd result lacks the required structured fields")
     snippets = "\n".join(str(item["snippet"]) for item in results)
-    if {token for token in EXPECTED_TOKENS if token in snippets} != EXPECTED_TOKENS:
+    if {token for token in expected_tokens if token in snippets} != expected_tokens:
         raise RuntimeError("qmd results lost a duplicate-name or Unicode/spaced-path fixture")
-    files = {str(item["file"]).split("?", 1)[0] for item in results}
-    if not {
-        f"qmd://{COLLECTION}/Alpha/Shared.md",
-        f"qmd://{COLLECTION}/Beta/Shared.md",
-        f"qmd://{COLLECTION}/Unicode-Notes/知识-图谱.md",
-    }.issubset(files):
+    files = {unquote(urlsplit(str(item["file"])).path).lstrip("/") for item in results}
+    if files != expected_paths:
         raise RuntimeError("qmd virtual paths do not preserve the required identities")
 
     print(

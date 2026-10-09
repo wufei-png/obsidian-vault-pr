@@ -33,7 +33,10 @@ Before release, run `uv run --frozen python scripts/qmd-semantic-canary.py` and
 `vault-pr doctor` with a machine-local configuration against each supported real
 qmd/Defuddle setup. The qmd canary must pass before its exact version enters the
 runtime allowlist; it covers hidden `.vault-pr` exclusion, JSON results,
-Unicode/spaced paths, and duplicate filenames. CI does not contain qmd or a private
+Unicode/spaced paths, duplicate filenames, and (for 2.8.3) names differing only
+by spaces, hyphens, or underscores. It also resolves the returned paths through
+the application resolver. Supported builds are `qmd 2.5.3 (c92adb3)` and the
+stamped release `qmd 2.8.3 (facd35e)`. CI does not contain qmd or a private
 Vault and cannot establish live-provider, private-source, full qmd model, or
 human semantic-review evidence. Record those results separately and do not turn
 a passing fixture suite into a production-readiness claim.

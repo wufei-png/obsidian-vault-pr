@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 from vault_pr.retrieve import (
     RetrievalError,
@@ -275,6 +276,41 @@ class RetrieveTests(unittest.TestCase):
             )
 
             self.assertEqual(result["candidates"], [])
+
+    def test_stamped_release_resolves_exact_paths_and_preserves_colliding_names(self) -> None:
+        filenames = ["知识 图谱.md", "A B.md", "A-B.md", "A_B.md"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir) / "vault"
+            source_note = "knowledgebase/sources/Article title--a1b2c3d4.md"
+            source_id = write_capture(vault, source_note=source_note)
+            notes = vault / "knowledgebase" / "Unicode Notes"
+            notes.mkdir(parents=True)
+            for filename in filenames:
+                (notes / filename).write_text(f"# {filename}\n", encoding="utf-8")
+            paths = [f"knowledgebase/Unicode Notes/{name}" for name in filenames]
+            results = [
+                {"file": f"qmd://fixture-vault/{quote(path)}?index=test", "score": 0.8}
+                for path in [source_note, *paths]
+            ]
+
+            def runner(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(command, 0, json.dumps(results), "")
+
+            def stamped_index(*_: object, **__: object) -> dict[str, object]:
+                return {
+                    "eligible": True,
+                    "reasons": [],
+                    "qmd": {"version": "qmd 2.8.3 (facd35e)"},
+                }
+
+            result = retrieve_related_notes(
+                self.config(vault),
+                source_id,
+                runner=runner,
+                executable="qmd",
+                index_validator=stamped_index,
+            )
+            self.assertEqual([item["path"] for item in result["candidates"]], paths)
 
     def test_rejects_tampered_capture_before_querying_qmd(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
