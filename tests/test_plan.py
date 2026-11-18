@@ -168,9 +168,7 @@ class PlanTests(unittest.TestCase):
                         "kind": "maintenance_request",
                         "summary": "Integrate the fixture source",
                     },
-                    "evidence": [
-                        {"kind": "source_capture", "source_id": source_id}
-                    ],
+                    "evidence": [{"kind": "source_capture", "source_id": source_id}],
                     "intent": intent,
                     "retrieval": {"required": True},
                     "contradiction": contradiction,
@@ -273,9 +271,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, target = self._asset_plan(root, source_id, content)
 
@@ -304,9 +300,7 @@ class PlanTests(unittest.TestCase):
             external = b"\x89PNG\r\n\x1a\nexternal content"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, target = self._asset_plan(root, source_id, content)
             target_path = vault / target
@@ -340,9 +334,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, target = self._asset_plan(root, source_id, content)
             target_path = vault / target
@@ -374,9 +366,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, target = self._asset_plan(root, source_id, content)
             (vault / target).parent.mkdir()
@@ -401,9 +391,7 @@ class PlanTests(unittest.TestCase):
             external = b"\x89PNG\r\n\x1a\nconcurrent replacement"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, target = self._asset_plan(root, source_id, content)
             target_path = vault / target
@@ -490,9 +478,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, _target = self._asset_plan(
                 root,
@@ -510,9 +496,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, _target = self._asset_plan(root, source_id, content)
             config = make_config(vault)
@@ -527,9 +511,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             digest = hashlib.sha256(content).hexdigest()
             existing = f"attachments/existing--{digest[:12]}.png"
@@ -557,9 +539,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, target = self._asset_plan(root, source_id, content)
             duplicate = target.replace("chart--", "figure--")
@@ -594,9 +574,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, target = self._asset_plan(root, source_id, content)
             (vault / target).parent.mkdir()
@@ -611,9 +589,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             (vault / "real-attachments").mkdir()
             (vault / "attachments").symlink_to("real-attachments")
@@ -628,9 +604,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, _target = self._asset_plan(root, source_id, content)
             config = make_config(vault)
@@ -645,9 +619,7 @@ class PlanTests(unittest.TestCase):
             content = b"\x89PNG\r\n\x1a\nasset fixture"
             vault, source_id = self.make_vault(
                 root,
-                secondary_files={
-                    "images/chart.png": (content, "image/png", "asset")
-                },
+                secondary_files={"images/chart.png": (content, "image/png", "asset")},
             )
             plan_path, _target = self._asset_plan(root, source_id, content)
             for protected in (".VAULT-PR", ".Obsidian", ".Git"):
@@ -675,9 +647,7 @@ class PlanTests(unittest.TestCase):
                 chart,
             )
             figure_digest = hashlib.sha256(figure).hexdigest()
-            figure_target = (
-                f"attachments/figure--{figure_digest[:12]}.png"
-            )
+            figure_target = f"attachments/figure--{figure_digest[:12]}.png"
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             plan["operations"].append(
                 {
@@ -880,8 +850,7 @@ class PlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             extracted = "".join(
-                f"line {index}: " + ("evidence " * 20) + "\n"
-                for index in range(1, 101)
+                f"line {index}: " + ("evidence " * 20) + "\n" for index in range(1, 101)
             ).encode()
             vault, source_id = self.make_vault(
                 root,
@@ -898,9 +867,7 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(PlanError, "must be a non-empty array"):
                 validate_plan(make_config(vault), plan_path)
 
-            plan["evidence"][0]["focus_ranges"] = [
-                {"start_line": 50, "end_line": 51}
-            ]
+            plan["evidence"][0]["focus_ranges"] = [{"start_line": 50, "end_line": 51}]
             plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
             checked = validate_plan(make_config(vault), plan_path)
             source_evidence = checked["evidence"][0]
@@ -913,9 +880,7 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(focused["context_end_line"], 53)
             self.assertIn("line 50:", focused["excerpt"])
 
-            plan["evidence"][0]["focus_ranges"] = [
-                {"start_line": 99, "end_line": 101}
-            ]
+            plan["evidence"][0]["focus_ranges"] = [{"start_line": 99, "end_line": 101}]
             plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(PlanError, "out of bounds"):
                 validate_plan(make_config(vault), plan_path)
@@ -1059,9 +1024,7 @@ class PlanTests(unittest.TestCase):
             )
             committed_retry = apply_plan(config, plan_path)
             self.assertEqual(committed_retry["status"], "already_committed")
-            self.assertEqual(
-                committed_retry["transaction_id"], first["transaction_id"]
-            )
+            self.assertEqual(committed_retry["transaction_id"], first["transaction_id"])
             self.assertFalse(committed_retry["requires_commit"])
 
     def test_review_revision_rounds_are_bounded_and_require_changed_content(
@@ -1079,26 +1042,20 @@ class PlanTests(unittest.TestCase):
             )
             self.assertEqual(first["remaining_revision_rounds"], 1)
             with self.assertRaisesRegex(PlanError, "must change after rejection"):
-                self.record_assessment(
-                    config, plan_path, "reviewer-2", "approve"
-                )
+                self.record_assessment(config, plan_path, "reviewer-2", "approve")
 
             proposed.write_text(source_note_text(source_id, "Revision one"))
-            revised_packet = validate_plan(config, plan_path)[
-                "semantic_review_packet"
-            ]["payload"]
+            revised_packet = validate_plan(config, plan_path)["semantic_review_packet"][
+                "payload"
+            ]
             self.assertEqual(len(revised_packet["prior_rejections"]), 1)
             prior = revised_packet["prior_rejections"][0]
             self.assertEqual(prior["reasons"][0]["message"], "revise")
             self.assertIn(prior["evidence_id"], revised_packet["evidence_ids"])
-            self.record_assessment(
-                config, plan_path, "reviewer-2", "reject"
-            )
+            self.record_assessment(config, plan_path, "reviewer-2", "reject")
             proposed.write_text(source_note_text(source_id, "Revision two"))
             with self.assertRaisesRegex(PlanError, "revision limit exhausted"):
-                self.record_assessment(
-                    config, plan_path, "reviewer-3", "approve"
-                )
+                self.record_assessment(config, plan_path, "reviewer-3", "approve")
 
     def test_apply_rechecks_revision_limit_with_the_vault_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1118,9 +1075,7 @@ class PlanTests(unittest.TestCase):
                 proposed.write_text(
                     source_note_text(source_id, f"Revision {revision + 1}")
                 )
-            self.record_assessment(
-                permissive, plan_path, "reviewer-final", "approve"
-            )
+            self.record_assessment(permissive, plan_path, "reviewer-final", "approve")
 
             configured = make_config(vault, review_all=True, max_revision_rounds=2)
             with self.assertRaisesRegex(PlanError, "revision limit exceeded"):
@@ -1132,9 +1087,7 @@ class PlanTests(unittest.TestCase):
             vault, source_id = self.make_vault(root)
             plan_path = self.write_plan(root, source_id, [])
             config = make_config(vault, review_all=True)
-            rejected = self.record_assessment(
-                config, plan_path, "reviewer-1", "reject"
-            )
+            rejected = self.record_assessment(config, plan_path, "reviewer-1", "reject")
             history_path = Path(rejected["review_history"])
             approval_path = Path(rejected["assessment_path"])
             history = json.loads(history_path.read_text())
@@ -1217,8 +1170,9 @@ class PlanTests(unittest.TestCase):
                 writes.append(path)
                 real_atomic_write(path, content)
 
-            with patch("vault_pr.plan.vault_write_lock", tracking_lock), patch(
-                "vault_pr.plan._atomic_write", side_effect=checked_write
+            with (
+                patch("vault_pr.plan.vault_write_lock", tracking_lock),
+                patch("vault_pr.plan._atomic_write", side_effect=checked_write),
             ):
                 self.record_assessment(
                     config, plan_path, "serialized-reviewer", "approve"
@@ -1494,7 +1448,6 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(PlanError, "unknown or missing fields"):
                 validate_plan(make_config(vault), plan_path)
 
-
     def test_rejects_invalid_yaml_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1678,9 +1631,7 @@ class PlanTests(unittest.TestCase):
 
             self.assertEqual(applied["status"], "applied")
             self.assertFalse(
-                (
-                    vault / ".vault-pr" / "sources" / "public" / source_id
-                ).exists()
+                (vault / ".vault-pr" / "sources" / "public" / source_id).exists()
             )
             self.assertFalse(
                 (vault / "knowledgebase" / "sources" / "source.md").exists()

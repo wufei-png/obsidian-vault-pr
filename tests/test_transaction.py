@@ -87,9 +87,7 @@ class TransactionObservabilityTests(unittest.TestCase):
                 if item["path"] == "knowledgebase/note.md"
             )
             self.assertTrue(note_change["original_state_available"])
-            self.assertEqual(
-                note_change["original"]["sha256"], _digest(b"original\n")
-            )
+            self.assertEqual(note_change["original"]["sha256"], _digest(b"original\n"))
             self.assertEqual(note_change["final"]["sha256"], _digest(b"updated\n"))
 
             commit_applied_transaction(
@@ -133,9 +131,7 @@ class TransactionObservabilityTests(unittest.TestCase):
 
             self.assertEqual(shown["state"], "RECOVERY_REQUIRED")
             self.assertEqual(shown["allowed_actions"], ["recover"])
-            self.assertEqual(
-                shown["blocking_reasons"], ["transaction_not_applied"]
-            )
+            self.assertEqual(shown["blocking_reasons"], ["transaction_not_applied"])
 
     def test_head_change_with_dirty_applied_state_requires_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -254,9 +250,7 @@ class TransactionObservabilityTests(unittest.TestCase):
 
             self.assertEqual(shown["state"], "RECOVERY_REQUIRED")
             self.assertEqual(shown["allowed_actions"], [])
-            self.assertEqual(
-                shown["blocking_reasons"], ["unrelated_vault_changes"]
-            )
+            self.assertEqual(shown["blocking_reasons"], ["unrelated_vault_changes"])
             self.assertFalse(retry["requires_commit"])
             self.assertIsNone(retry["next_action"])
 

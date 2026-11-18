@@ -37,7 +37,9 @@ def content_file(
         raise PlanError("content_file escapes the plan directory")
     if content_snapshots is not None:
         if content_path not in content_snapshots:
-            raise PlanError(f"content_file is missing from plan bundle: {raw_content_file}")
+            raise PlanError(
+                f"content_file is missing from plan bundle: {raw_content_file}"
+            )
     elif not content_path.is_file():
         raise PlanError(f"content_file does not exist: {raw_content_file}")
     return content_path

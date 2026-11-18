@@ -108,14 +108,12 @@ def _validate_judgment(
         raise ReviewError(f"judgment {name} must be an object")
     if set(judgment) != {"status", "reason", "evidence_refs"}:
         raise ReviewError(f"judgment {name} has unknown or missing fields")
-    if not isinstance(judgment.get("status"), str) or judgment[
-        "status"
-    ] not in {"pass", "fail"}:
+    if not isinstance(judgment.get("status"), str) or judgment["status"] not in {
+        "pass",
+        "fail",
+    }:
         raise ReviewError(f"judgment {name} status must be pass or fail")
-    if (
-        not isinstance(judgment.get("reason"), str)
-        or not judgment["reason"].strip()
-    ):
+    if not isinstance(judgment.get("reason"), str) or not judgment["reason"].strip():
         raise ReviewError(f"judgment {name} reason must be non-empty")
     refs = _validate_evidence_refs(
         judgment.get("evidence_refs"),
@@ -215,9 +213,7 @@ def validate_assessment(
     if set(judgments) & set(unassessed):
         raise ReviewError("a judgment cannot also be unassessed")
     if set(judgments) | set(unassessed) != set(REQUIRED_JUDGMENTS):
-        raise ReviewError(
-            "judgments and unassessed must cover every required judgment"
-        )
+        raise ReviewError("judgments and unassessed must cover every required judgment")
     if status == "approve":
         if set(judgments) != set(REQUIRED_JUDGMENTS):
             raise ReviewError("approval must assess every required judgment")

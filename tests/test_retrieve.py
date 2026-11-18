@@ -89,9 +89,7 @@ class RetrieveTests(unittest.TestCase):
             self.assertTrue(runner.calls[0][4].startswith("lex: "))
             self.assertIn("\nvec: ", runner.calls[0][4])
             self.assertEqual(
-                runner.calls[0][
-                    runner.calls[0].index("--candidate-limit") + 1
-                ],
+                runner.calls[0][runner.calls[0].index("--candidate-limit") + 1],
                 "40",
             )
             self.assertIn("--no-rerank", runner.calls[0])
@@ -277,7 +275,9 @@ class RetrieveTests(unittest.TestCase):
 
             self.assertEqual(result["candidates"], [])
 
-    def test_stamped_release_resolves_exact_paths_and_preserves_colliding_names(self) -> None:
+    def test_stamped_release_resolves_exact_paths_and_preserves_colliding_names(
+        self,
+    ) -> None:
         filenames = ["知识 图谱.md", "A B.md", "A-B.md", "A_B.md"]
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir) / "vault"
@@ -293,7 +293,9 @@ class RetrieveTests(unittest.TestCase):
                 for path in [source_note, *paths]
             ]
 
-            def runner(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                command: list[str], **_: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(command, 0, json.dumps(results), "")
 
             def stamped_index(*_: object, **__: object) -> dict[str, object]:

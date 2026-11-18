@@ -72,9 +72,7 @@ def _v2_files(capture_dir: Path, manifest: dict[str, Any]) -> dict[Path, str]:
     if not isinstance(artifacts, dict):
         raise MigrationError("schema-v2 capture artifact metadata is invalid")
     raw = _relative_artifact(artifacts.get("raw"), "raw artifact")
-    extracted = _relative_artifact(
-        artifacts.get("extracted"), "extracted artifact"
-    )
+    extracted = _relative_artifact(artifacts.get("extracted"), "extracted artifact")
     asset_hashes = manifest.get("asset_sha256", {})
     if not isinstance(asset_hashes, dict):
         raise MigrationError("schema-v2 capture asset hashes are invalid")
@@ -192,7 +190,9 @@ def _read_v2_capture(
     try:
         linked = source_note_has_id(source_note, old_source_id)
     except CaptureError as exc:
-        raise MigrationError("schema-v2 capture source note linkage is invalid") from exc
+        raise MigrationError(
+            "schema-v2 capture source note linkage is invalid"
+        ) from exc
     if not note_path_allowed(config, vault, source_note) or not linked:
         raise MigrationError("schema-v2 capture source note linkage is invalid")
     raw_relative = _relative_artifact(
@@ -248,9 +248,7 @@ def _read_v2_capture(
         "title": manifest.get("title"),
         "primary": primary_record,
         "files": asset_records,
-        "derived": {
-            "extracted": extracted_record
-        },
+        "derived": {"extracted": extracted_record},
         "acquisition": {
             "adapter": adapter,
         },
@@ -300,9 +298,7 @@ def _remove_frontmatter_domain(content: str) -> str:
     )
 
 
-def _replace_source_id_tokens(
-    content: str, replacements: dict[str, str]
-) -> str:
+def _replace_source_id_tokens(content: str, replacements: dict[str, str]) -> str:
     updated = content
     for old_source_id, new_source_id in replacements.items():
         updated = re.sub(
@@ -344,9 +340,7 @@ def migrate_captures_v3(
     if archive_root.is_dir():
         for path in sorted(archive_root.iterdir()):
             if path.is_symlink() or not path.is_dir():
-                raise MigrationError(
-                    "capture archive contains a non-directory entry"
-                )
+                raise MigrationError("capture archive contains a non-directory entry")
             manifest_path = path / "manifest.json"
             if manifest_path.is_symlink():
                 raise MigrationError("capture archive contains a symbolic link")
@@ -396,15 +390,13 @@ def migrate_captures_v3(
     source_notes: set[Path] = set()
     collisions: dict[str, list[str]] = {}
     for capture_dir in v2_dirs:
-        manifest, artifacts, source_note = _read_v2_capture(
-            config, vault, capture_dir
-        )
+        manifest, artifacts, source_note = _read_v2_capture(config, vault, capture_dir)
         old_source_id = capture_dir.name
         new_source_id = manifest["source_id"]
         if new_source_id in new_to_old:
-            collisions.setdefault(
-                new_source_id, [new_to_old[new_source_id]]
-            ).append(old_source_id)
+            collisions.setdefault(new_source_id, [new_to_old[new_source_id]]).append(
+                old_source_id
+            )
             continue
         target = archive_root / new_source_id
         if target.exists():
@@ -485,7 +477,9 @@ def migrate_captures_v3(
             original_modes[new_path] = None
             finals[new_path] = hashlib.sha256(content).hexdigest()
             final_modes[new_path] = (
-                "100644" if relative == Path("manifest.json") else original_modes[old_path]
+                "100644"
+                if relative == Path("manifest.json")
+                else original_modes[old_path]
             )
             staged_files[new_path] = content
 

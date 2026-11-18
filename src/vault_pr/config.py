@@ -115,9 +115,7 @@ def _validate_config_shape(config: dict[str, Any]) -> None:
             )
         unknown_fields = sorted(set(value) - allowed_fields)
         if unknown_fields:
-            raise ConfigError(
-                f"unknown {table} field: " + ", ".join(unknown_fields)
-            )
+            raise ConfigError(f"unknown {table} field: " + ", ".join(unknown_fields))
     quality = config.get("quality")
     if isinstance(quality, dict) and "note_roles" in quality:
         note_roles = quality["note_roles"]
@@ -129,11 +127,8 @@ def _validate_config_shape(config: dict[str, Any]) -> None:
                 "unknown quality.note_roles field: " + ", ".join(unknown_roles)
             )
         for field, values in note_roles.items():
-            if (
-                not isinstance(values, list)
-                or not all(
-                    isinstance(value, str) and value.strip() for value in values
-                )
+            if not isinstance(values, list) or not all(
+                isinstance(value, str) and value.strip() for value in values
             ):
                 raise ConfigError(
                     f"quality.note_roles.{field} must be an array of strings"
@@ -172,9 +167,7 @@ def _validate_config_shape(config: dict[str, Any]) -> None:
             for value in backoff
         )
     ):
-        raise ConfigError(
-            "index.retry_backoff_seconds must be an array of numbers"
-        )
+        raise ConfigError("index.retry_backoff_seconds must be an array of numbers")
     retrieval_mode(config)
 
 
@@ -378,9 +371,7 @@ def source_archive_dir(config: dict[str, Any], vault: Path) -> Path:
     for part in relative.parts:
         current /= part
         if current.is_symlink():
-            raise ConfigError(
-                "sources.capture_archive_dir must not traverse a symlink"
-            )
+            raise ConfigError("sources.capture_archive_dir must not traverse a symlink")
     return directory
 
 

@@ -215,7 +215,11 @@ def build_qmd_path_map(
         resolved = candidate.resolve()
         if not resolved.is_file() or not resolved.is_relative_to(root_dir):
             continue
-        key = relative.as_posix() if preserve_paths else _qmd_handelize(relative.as_posix())
+        key = (
+            relative.as_posix()
+            if preserve_paths
+            else _qmd_handelize(relative.as_posix())
+        )
         mapped[key].append(resolved)
     return dict(mapped)
 
@@ -268,7 +272,9 @@ def retrieve_related_notes(
     index_name = config.get("index", {}).get("name", "notebook")
     query = _retrieval_query(str(manifest.get("title", "")), extracted)
     try:
-        source_note = str(resolve_source_note(config, vault, source_id).relative_to(vault))
+        source_note = str(
+            resolve_source_note(config, vault, source_id).relative_to(vault)
+        )
     except IngestError as exc:
         raise RetrievalError(str(exc)) from exc
     qmd_version = index_freshness.get("qmd", {}).get("version")
@@ -294,7 +300,9 @@ def retrieve_related_notes(
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
-        raise RetrievalError(f"qmd {strategy['retrieval_mode']} retrieval failed: {detail}")
+        raise RetrievalError(
+            f"qmd {strategy['retrieval_mode']} retrieval failed: {detail}"
+        )
 
     candidates: list[dict[str, Any]] = []
     seen_paths: set[str] = set()

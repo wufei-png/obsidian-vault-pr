@@ -86,12 +86,15 @@ def _receipt_bytes(
             for path in sorted(final_sha256)
         ],
     }
-    return json.dumps(
-        receipt,
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-    ).encode("utf-8") + b"\n"
+    return (
+        json.dumps(
+            receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        ).encode("utf-8")
+        + b"\n"
+    )
 
 
 def _read_receipt(path: Path) -> dict[str, Any]:
@@ -126,11 +129,7 @@ def _read_receipt(path: Path) -> dict[str, Any]:
         if not isinstance(completion_path, str):
             raise MutationError("transaction receipt completion path is invalid")
         relative = Path(completion_path)
-        if (
-            relative.is_absolute()
-            or relative == Path(".")
-            or ".." in relative.parts
-        ):
+        if relative.is_absolute() or relative == Path(".") or ".." in relative.parts:
             raise MutationError("transaction receipt completion path is unsafe")
     return receipt
 
@@ -142,9 +141,7 @@ def _validate_committed_receipt(
 ) -> None:
     try:
         if not committed_file_matches_worktree(vault, receipt_path):
-            raise MutationError(
-                "transaction receipt is not committed exactly in HEAD"
-            )
+            raise MutationError("transaction receipt is not committed exactly in HEAD")
         seen: set[str] = set()
         for item in receipt["files"]:
             if (
@@ -164,9 +161,11 @@ def _validate_committed_receipt(
                 raise MutationError("transaction receipt path is unsafe")
             sha256 = item.get("sha256")
             mode = item.get("mode")
-            if (sha256 is None) != (mode is None) or (
-                sha256 is not None and not _SHA256_PATTERN.fullmatch(sha256)
-            ) or mode not in {None, "100644", "100755"}:
+            if (
+                (sha256 is None) != (mode is None)
+                or (sha256 is not None and not _SHA256_PATTERN.fullmatch(sha256))
+                or mode not in {None, "100644", "100755"}
+            ):
                 raise MutationError("transaction receipt file states are invalid")
     except RecoveryError as exc:
         raise MutationError(str(exc)) from exc

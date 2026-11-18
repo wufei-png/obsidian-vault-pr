@@ -147,12 +147,8 @@ class SnapshotBundleTests(unittest.TestCase):
                 ["context.txt", "images/cover.png"],
             )
             self.assertEqual((destination / "article.md").read_bytes(), primary)
-            self.assertEqual(
-                (destination / "images" / "cover.png").read_bytes(), image
-            )
-            self.assertEqual(
-                (destination / "context.txt").read_bytes(), supplement
-            )
+            self.assertEqual((destination / "images" / "cover.png").read_bytes(), image)
+            self.assertEqual((destination / "context.txt").read_bytes(), supplement)
             self.assertTrue((destination / "snapshot-manifest.json").is_file())
 
     def test_rejects_unknown_manifest_fields(self) -> None:
@@ -167,9 +163,7 @@ class SnapshotBundleTests(unittest.TestCase):
                 extra={"unexpected": True},
             )
 
-            with self.assertRaisesRegex(
-                SnapshotBundleError, "unknown fields"
-            ):
+            with self.assertRaisesRegex(SnapshotBundleError, "unknown fields"):
                 validate_snapshot_bundle(
                     root,
                     max_primary_bytes=1_000,
@@ -194,9 +188,7 @@ class SnapshotBundleTests(unittest.TestCase):
                 },
             )
 
-            with self.assertRaisesRegex(
-                SnapshotBundleError, "provider has unknown"
-            ):
+            with self.assertRaisesRegex(SnapshotBundleError, "provider has unknown"):
                 validate_snapshot_bundle(
                     root,
                     max_primary_bytes=1_000,
@@ -211,9 +203,7 @@ class SnapshotBundleTests(unittest.TestCase):
             outside.write_bytes(b"# Outside\n")
             _write_manifest(
                 root,
-                primary=_record(
-                    "../outside.md", outside.read_bytes(), "text/markdown"
-                ),
+                primary=_record("../outside.md", outside.read_bytes(), "text/markdown"),
                 files=[],
             )
 
@@ -235,9 +225,7 @@ class SnapshotBundleTests(unittest.TestCase):
                 files=[],
             )
 
-            with self.assertRaisesRegex(
-                SnapshotBundleError, "missing declared files"
-            ):
+            with self.assertRaisesRegex(SnapshotBundleError, "missing declared files"):
                 validate_snapshot_bundle(
                     root,
                     max_primary_bytes=1_000,
@@ -255,11 +243,7 @@ class SnapshotBundleTests(unittest.TestCase):
             _write_manifest(
                 root,
                 primary=_record("article.md", primary, "text/markdown"),
-                files=[
-                    _record(
-                        "context.txt", supplement, "text/plain", "supplement"
-                    )
-                ],
+                files=[_record("context.txt", supplement, "text/plain", "supplement")],
             )
 
             with self.assertRaisesRegex(SnapshotBundleError, "0-file limit"):
@@ -283,18 +267,14 @@ class SnapshotBundleTests(unittest.TestCase):
             primary = b"# Article\n"
             (root / "article.md").write_bytes(primary)
             (root / "images").mkdir()
-            (root / "images" / "cover.png").write_bytes(
-                b"\x89PNG\r\n\x1a\nundeclared"
-            )
+            (root / "images" / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\nundeclared")
             _write_manifest(
                 root,
                 primary=_record("article.md", primary, "text/markdown"),
                 files=[],
             )
 
-            with self.assertRaisesRegex(
-                SnapshotBundleError, "undeclared content"
-            ):
+            with self.assertRaisesRegex(SnapshotBundleError, "undeclared content"):
                 validate_snapshot_bundle(
                     root,
                     max_primary_bytes=1_000,
@@ -465,9 +445,7 @@ class SnapshotBundleTests(unittest.TestCase):
             _write_manifest(
                 root,
                 primary=_record("article.md", primary, "text/markdown"),
-                files=[
-                    _record("more.md", supplement, "text/markdown", "asset")
-                ],
+                files=[_record("more.md", supplement, "text/markdown", "asset")],
             )
 
             with self.assertRaisesRegex(SnapshotBundleError, "not allowed"):

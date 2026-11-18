@@ -203,9 +203,7 @@ def _qmd_config_path(index_name: str) -> Path:
 
 def _qmd_model_cache_dir() -> Path:
     configured = os.environ.get("XDG_CACHE_HOME")
-    cache_root = (
-        Path(configured).expanduser() if configured else Path.home() / ".cache"
-    )
+    cache_root = Path(configured).expanduser() if configured else Path.home() / ".cache"
     return cache_root / "qmd" / "models"
 
 
@@ -219,7 +217,9 @@ def _qmd_huggingface_cache_filename(model: str) -> str | None:
         return None
     user, repository, filename = matched.groups()
     prefix = ["hf", user]
-    repository_stem = repository[:-5] if repository.casefold().endswith("-gguf") else None
+    repository_stem = (
+        repository[:-5] if repository.casefold().endswith("-gguf") else None
+    )
     filename_stem = filename[:-5] if filename.casefold().endswith(".gguf") else None
     filename_matches_repository = (
         repository_stem is not None

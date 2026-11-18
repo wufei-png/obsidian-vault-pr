@@ -14,9 +14,7 @@ PLAN_SCHEMA_VERSION = 4
 ALLOWED_ACTIONS = frozenset(
     {"create", "update", "delete", "rename", "purge_capture", "promote_asset"}
 )
-ALLOWED_INTENTS = frozenset(
-    {"integrate", "maintenance", "merge", "split", "rename"}
-)
+ALLOWED_INTENTS = frozenset({"integrate", "maintenance", "merge", "split", "rename"})
 SOURCE_ID_PATTERN = re.compile(r"src_[0-9a-f]{20}")
 TRANSACTION_ID_PATTERN = re.compile(r"txn_[A-Za-z0-9_-]{1,80}")
 HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -81,9 +79,8 @@ def normalize_maintenance_authorization(raw: object) -> dict[str, Any]:
     if request_ref is not None:
         if not isinstance(request_ref, str) or not request_ref.strip():
             raise PlanError("authorization request_ref must be non-empty")
-        if (
-            not isinstance(request_sha256, str)
-            or not HEX64_PATTERN.fullmatch(request_sha256)
+        if not isinstance(request_sha256, str) or not HEX64_PATTERN.fullmatch(
+            request_sha256
         ):
             raise PlanError("authorization request_sha256 must be a SHA-256 digest")
         normalized["request_ref"] = request_ref.strip()
@@ -135,9 +132,7 @@ def source_review_evidence(
             raise PlanError(
                 "source_capture focused excerpts exceed the per-source review budget"
             )
-        normalized_ranges.append(
-            {"start_line": start_line, "end_line": end_line}
-        )
+        normalized_ranges.append({"start_line": start_line, "end_line": end_line})
         focus_excerpts.append(
             {
                 "start_line": start_line,

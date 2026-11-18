@@ -38,9 +38,7 @@ class MutationExecutorTests(unittest.TestCase):
         seed.write_text("seed\n", encoding="utf-8")
         _git(vault, "add", "seed.md")
         _git(vault, "commit", "-qm", "fixture")
-        git_dir = Path(
-            _git(vault, "rev-parse", "--absolute-git-dir").stdout.strip()
-        )
+        git_dir = Path(_git(vault, "rev-parse", "--absolute-git-dir").stdout.strip())
         return vault, git_dir
 
     def test_write_failure_rolls_back_and_is_wrapped(self) -> None:
@@ -64,9 +62,7 @@ class MutationExecutorTests(unittest.TestCase):
                     affected={destination},
                     expected_original_sha256={destination: None},
                     expected_original_mode={destination: None},
-                    final_sha256={
-                        destination: hashlib.sha256(content).hexdigest()
-                    },
+                    final_sha256={destination: hashlib.sha256(content).hexdigest()},
                     final_mode={destination: "100644"},
                     write=write,
                 )

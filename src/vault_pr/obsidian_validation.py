@@ -257,9 +257,7 @@ def _file_candidates(
     relative = _collapse(str(source_parent / decoded))
     exact = _collapse(decoded)
     candidates = {
-        value
-        for value in (relative, exact)
-        if value is not None and value in files
+        value for value in (relative, exact) if value is not None and value in files
     }
     if "/" not in decoded:
         candidates.update(path for path in files if Path(path).name == decoded)
@@ -301,13 +299,19 @@ def _markdown_destination(raw: str) -> str:
 def _validate_base(vault: Path, relative: str) -> None:
     path = vault / relative
     if path.is_symlink() or not path.is_file():
-        raise ObsidianValidationError(f"Base dependency is missing or unsafe: {relative}")
+        raise ObsidianValidationError(
+            f"Base dependency is missing or unsafe: {relative}"
+        )
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise ObsidianValidationError(f"Base dependency is invalid: {relative}") from exc
+        raise ObsidianValidationError(
+            f"Base dependency is invalid: {relative}"
+        ) from exc
     if not isinstance(value, dict):
-        raise ObsidianValidationError(f"Base dependency must be a YAML mapping: {relative}")
+        raise ObsidianValidationError(
+            f"Base dependency must be a YAML mapping: {relative}"
+        )
     if "views" in value and not isinstance(value["views"], list):
         raise ObsidianValidationError(f"Base views must be an array: {relative}")
     if "formulas" in value and not isinstance(value["formulas"], dict):
@@ -350,9 +354,7 @@ def _issues(
                 else []
             )
             if suffix and suffix != ".md" and (embed or file_candidates):
-                if _references_internal_path(
-                    source_path, target, file_candidates
-                ):
+                if _references_internal_path(source_path, target, file_candidates):
                     issues.append(
                         {
                             "kind": "asset_promotion_required",
@@ -371,9 +373,7 @@ def _issues(
                         }
                     )
                 else:
-                    resolved_assets_by_path[source_path].append(
-                        file_candidates[0]
-                    )
+                    resolved_assets_by_path[source_path].append(file_candidates[0])
                     if suffix == ".base":
                         try:
                             _validate_base(vault, file_candidates[0])
@@ -398,8 +398,7 @@ def _issues(
                 continue
             resolved_by_path[source_path].append(resolved)
             if separator and (
-                anchor_validation_paths is None
-                or resolved in anchor_validation_paths
+                anchor_validation_paths is None or resolved in anchor_validation_paths
             ):
                 if not _anchor_exists(contents[resolved], anchor):
                     issues.append(
@@ -438,10 +437,7 @@ def _issues(
     return (
         issues,
         {path: sorted(values) for path, values in resolved_by_path.items()},
-        {
-            path: sorted(set(values))
-            for path, values in resolved_assets_by_path.items()
-        },
+        {path: sorted(set(values)) for path, values in resolved_assets_by_path.items()},
     )
 
 

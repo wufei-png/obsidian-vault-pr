@@ -115,12 +115,7 @@ class CaptureMigrationTests(unittest.TestCase):
             vault, config = self._vault(Path(temp_dir))
             source_id = _v2_capture(vault)
             manifest_path = (
-                vault
-                / ".vault-pr"
-                / "sources"
-                / "public"
-                / source_id
-                / "manifest.json"
+                vault / ".vault-pr" / "sources" / "public" / source_id / "manifest.json"
             )
             manifest = json.loads(manifest_path.read_text())
             manifest["schema_version"] = 1
@@ -257,9 +252,7 @@ class CaptureMigrationTests(unittest.TestCase):
             )
             committed_retry = migrate_captures_v3(config, apply=True)
             self.assertEqual(committed_retry["status"], "already_committed")
-            self.assertEqual(
-                committed_retry["transaction_id"], first["transaction_id"]
-            )
+            self.assertEqual(committed_retry["transaction_id"], first["transaction_id"])
             self.assertFalse(committed_retry["requires_commit"])
 
 

@@ -15,6 +15,7 @@ from .errors import IngestError
 from .snapshot_bundle import ASSET_MIMES, PRIMARY_MIMES, SUPPLEMENT_MIMES
 from .source_files import _detected_mime
 
+
 class CaptureError(RuntimeError):
     """Raised when a source capture cannot be trusted."""
 
@@ -135,29 +136,22 @@ def _read_capture_file(
                     follow_symlinks=False,
                 )
             except OSError as exc:
-                raise CaptureError(
-                    f"capture artifact is missing: {relative}"
-                ) from exc
+                raise CaptureError(f"capture artifact is missing: {relative}") from exc
             if not stat.S_ISDIR(before.st_mode):
                 raise CaptureError(
                     f"capture artifact parent is not a regular directory: {relative}"
                 )
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(
-                os, "O_DIRECTORY", 0
-            )
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
             try:
-                child_descriptor = os.open(
-                    part, flags, dir_fd=directory_descriptor
-                )
+                child_descriptor = os.open(part, flags, dir_fd=directory_descriptor)
             except OSError as exc:
                 raise CaptureError(
                     f"capture artifact parent changed during validation: {relative}"
                 ) from exc
             opened = os.fstat(child_descriptor)
-            if (
-                not stat.S_ISDIR(opened.st_mode)
-                or _identity(before) != _identity(opened)
+            if not stat.S_ISDIR(opened.st_mode) or _identity(before) != _identity(
+                opened
             ):
                 os.close(child_descriptor)
                 raise CaptureError(
@@ -184,9 +178,7 @@ def _read_capture_file(
             | getattr(os, "O_NOFOLLOW", 0)
         )
         try:
-            file_descriptor = os.open(
-                name, flags, dir_fd=directory_descriptor
-            )
+            file_descriptor = os.open(name, flags, dir_fd=directory_descriptor)
         except OSError as exc:
             raise CaptureError(f"capture artifact is missing: {relative}") from exc
         digest = hashlib.sha256()
@@ -197,10 +189,7 @@ def _read_capture_file(
         try:
             opened = os.fstat(file_descriptor)
             identity = _identity(opened)
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or _identity(before) != identity
-            ):
+            if not stat.S_ISREG(opened.st_mode) or _identity(before) != identity:
                 raise CaptureError(
                     f"capture artifact changed during validation: {relative}"
                 )
@@ -293,10 +282,7 @@ def _file_record(
         or not mime.strip()
         or (
             with_role
-            and (
-                not isinstance(role, str)
-                or role not in {"asset", "supplement"}
-            )
+            and (not isinstance(role, str) or role not in {"asset", "supplement"})
         )
     ):
         raise CaptureError(f"capture manifest {label} metadata is invalid")
@@ -319,11 +305,7 @@ def _validate_source_and_acquisition(
     expected_source_fields = {
         "kind",
         "access_kind",
-        *(
-            {"logical_name"}
-            if kind == "local_file"
-            else {"requested_url", "final_url"}
-        ),
+        *({"logical_name"} if kind == "local_file" else {"requested_url", "final_url"}),
     }
     if "supersedes" in source:
         expected_source_fields.add("supersedes")
@@ -373,9 +355,7 @@ def _validate_capture_tree(
     visited_entries = 0
     seen_files: set[Path] = set()
 
-    def inspect_directory(
-        directory_descriptor: int, relative_directory: Path
-    ) -> None:
+    def inspect_directory(directory_descriptor: int, relative_directory: Path) -> None:
         nonlocal visited_entries
         names: list[str] = []
         with os.scandir(directory_descriptor) as entries:
@@ -392,9 +372,7 @@ def _validate_capture_tree(
                     follow_symlinks=False,
                 )
             except OSError as exc:
-                raise CaptureError(
-                    "capture changed during validation"
-                ) from exc
+                raise CaptureError("capture changed during validation") from exc
             relative = relative_directory / name
             if stat.S_ISDIR(metadata.st_mode):
                 if relative not in expected_directories:
@@ -402,23 +380,18 @@ def _validate_capture_tree(
                         f"capture contains undeclared content: {relative}/"
                     )
                 flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(
-                    os, "O_DIRECTORY", 0
-                )
+                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
                 try:
-                    child_descriptor = os.open(
-                        name, flags, dir_fd=directory_descriptor
-                    )
+                    child_descriptor = os.open(name, flags, dir_fd=directory_descriptor)
                 except OSError as exc:
                     raise CaptureError(
                         f"capture directory changed during validation: {relative}"
                     ) from exc
                 try:
                     opened = os.fstat(child_descriptor)
-                    if (
-                        not stat.S_ISDIR(opened.st_mode)
-                        or _identity(metadata) != _identity(opened)
-                    ):
+                    if not stat.S_ISDIR(opened.st_mode) or _identity(
+                        metadata
+                    ) != _identity(opened):
                         raise CaptureError(
                             f"capture directory changed during validation: {relative}"
                         )
@@ -427,17 +400,13 @@ def _validate_capture_tree(
                     os.close(child_descriptor)
                 continue
             if not stat.S_ISREG(metadata.st_mode) or relative not in expected_files:
-                raise CaptureError(
-                    f"capture contains undeclared content: {relative}"
-                )
+                raise CaptureError(f"capture contains undeclared content: {relative}")
             seen_files.add(relative)
 
     inspect_directory(root_descriptor, Path())
     missing = sorted(str(path) for path in expected_files - seen_files)
     if missing:
-        raise CaptureError(
-            "capture is missing declared content: " + ", ".join(missing)
-        )
+        raise CaptureError("capture is missing declared content: " + ", ".join(missing))
 
 
 def _load_validated_capture(
@@ -478,7 +447,8 @@ def _load_validated_capture(
             or not isinstance(source.get("kind"), str)
             or source["kind"] not in {"url", "local_file", "snapshot_bundle"}
             or not isinstance(source.get("access_kind"), str)
-            or source["access_kind"] not in {
+            or source["access_kind"]
+            not in {
                 "public",
                 "authenticated",
                 "local",
@@ -492,9 +462,10 @@ def _load_validated_capture(
             raise CaptureError("capture manifest metadata is invalid")
         _validate_source_and_acquisition(source, acquisition)
         if source["kind"] == "local_file":
-            if not isinstance(source.get("logical_name"), str) or not source[
-                "logical_name"
-            ].strip():
+            if (
+                not isinstance(source.get("logical_name"), str)
+                or not source["logical_name"].strip()
+            ):
                 raise CaptureError("local capture logical_name is invalid")
             if "requested_url" in source or "final_url" in source:
                 raise CaptureError("local capture must not contain URL fields")
@@ -521,8 +492,8 @@ def _load_validated_capture(
         primary_path, primary_hash, primary_size, primary_mime, _role = _file_record(
             manifest.get("primary"), label="primary"
         )
-        extracted_path, extracted_hash, extracted_size, extracted_mime, _role = _file_record(
-            derived.get("extracted"), label="extracted"
+        extracted_path, extracted_hash, extracted_size, extracted_mime, _role = (
+            _file_record(derived.get("extracted"), label="extracted")
         )
         if primary_mime not in PRIMARY_MIMES:
             raise CaptureError("capture primary MIME type is unsupported")
@@ -573,9 +544,7 @@ def _load_validated_capture(
                 raise CaptureError(
                     f"capture manifest has unknown artifact: {content_artifact}"
                 )
-            requested_paths.setdefault(requested_path, []).append(
-                content_artifact
-            )
+            requested_paths.setdefault(requested_path, []).append(content_artifact)
 
         expected_files = {Path("manifest.json"), *expected_records}
         expected_directories = {Path(".")}
@@ -609,18 +578,14 @@ def _load_validated_capture(
                 )
             seen_identities.add(file_identity)
             if actual_hash != expected_hash:
-                raise CaptureError(
-                    f"capture artifact integrity failed: {relative}"
-                )
+                raise CaptureError(f"capture artifact integrity failed: {relative}")
             if actual_size != expected_size:
                 raise CaptureError(f"capture artifact size failed: {relative}")
             expected_mime = next(
                 record[3]
                 for record in [
                     _file_record(manifest["primary"], label="primary"),
-                    _file_record(
-                        manifest["derived"]["extracted"], label="extracted"
-                    ),
+                    _file_record(manifest["derived"]["extracted"], label="extracted"),
                     *[
                         _file_record(
                             raw,
@@ -633,9 +598,7 @@ def _load_validated_capture(
                 if record[0] == relative
             )
             if actual_mime != expected_mime:
-                raise CaptureError(
-                    f"capture artifact MIME type failed: {relative}"
-                )
+                raise CaptureError(f"capture artifact MIME type failed: {relative}")
             for requested in requested_paths.get(relative, []):
                 assert content is not None
                 requested_content[requested] = content
@@ -695,9 +658,7 @@ def load_validated_capture_artifact_text(
     try:
         text = content_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise CaptureError(
-            f"capture {artifact} artifact is not valid UTF-8"
-        ) from exc
+        raise CaptureError(f"capture {artifact} artifact is not valid UTF-8") from exc
     return manifest, text
 
 

@@ -77,9 +77,7 @@ def _retrieve(config: dict[str, Any], source_id: str) -> dict[str, Any]:
     return retrieve_related_notes(config, source_id, limit=5)
 
 
-def _probe_source_note(
-    config: dict[str, Any], source_id: str, source_note: str
-) -> int:
+def _probe_source_note(config: dict[str, Any], source_id: str, source_note: str) -> int:
     qmd = shutil.which("qmd")
     if not qmd:
         raise CanaryError("required tool missing: qmd")
@@ -199,9 +197,7 @@ def run_capture_route_canary(
                 raise CanaryError("capture route manifest is unreadable") from exc
             acquisition = manifest.get("acquisition")
             actual_adapter = (
-                acquisition.get("adapter")
-                if isinstance(acquisition, dict)
-                else None
+                acquisition.get("adapter") if isinstance(acquisition, dict) else None
             )
             if not isinstance(actual_adapter, str):
                 raise CanaryError("capture route manifest has no adapter")

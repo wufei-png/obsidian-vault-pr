@@ -89,8 +89,7 @@ def normalize_asset_promotion(
         or not source_path
     ):
         raise AssetPromotionError(
-            f"operation {index} promotion must use declared "
-            "source_capture evidence"
+            f"operation {index} promotion must use declared source_capture evidence"
         )
     manifest = source_manifests[source_id]
     asset = next(
@@ -148,14 +147,9 @@ def normalize_asset_promotion(
         existing = exact_matches[0].relative_to(vault)
         raise AssetPromotionError(f"asset_reuse_required: {existing}")
     if target.exists():
-        if (
-            target.is_symlink()
-            or not target.is_file()
-            or target not in exact_matches
-        ):
+        if target.is_symlink() or not target.is_file() or target not in exact_matches:
             raise AssetPromotionError(
-                f"operation {index} promotion target exists with "
-                "different content"
+                f"operation {index} promotion target exists with different content"
             )
         disposition = "reuse"
     else:
@@ -199,8 +193,7 @@ def validate_asset_promotion_batch(
         existing = target_by_digest.setdefault(digest, target)
         if target != existing:
             raise AssetPromotionError(
-                "asset_reuse_required: "
-                + existing.relative_to(vault).as_posix()
+                "asset_reuse_required: " + existing.relative_to(vault).as_posix()
             )
 
 
@@ -212,8 +205,7 @@ def validate_promotion_references(
 ) -> None:
     """Require every promotion target to be referenced by this transaction."""
     promoted_paths = {
-        str(operation["path"].relative_to(vault))
-        for operation in promotions
+        str(operation["path"].relative_to(vault)) for operation in promotions
     }
     referenced_assets = {
         asset
@@ -266,8 +258,7 @@ def load_promotion_snapshots(
                 source_id=source_id,
                 vault=vault,
                 artifact_paths=[
-                    operation["source_path"]
-                    for operation in source_promotions
+                    operation["source_path"] for operation in source_promotions
                 ],
             )
         except CaptureError as exc:
@@ -281,9 +272,7 @@ def load_promotion_snapshots(
                 or asset["size"] != operation["size"]
                 or asset["mime"] != operation["mime"]
             ):
-                raise AssetPromotionError(
-                    "promoted asset changed during validation"
-                )
+                raise AssetPromotionError("promoted asset changed during validation")
             snapshots[operation["path"]] = content
     return snapshots
 
@@ -300,11 +289,7 @@ def promotion_results(
             "path": str(operation["path"].relative_to(vault)),
             "sha256": operation["sha256"],
             "mime": operation["mime"],
-            "status": (
-                "created"
-                if operation["disposition"] == "create"
-                else "reused"
-            ),
+            "status": ("created" if operation["disposition"] == "create" else "reused"),
         }
         for operation in promotions
     ]

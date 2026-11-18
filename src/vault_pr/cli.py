@@ -62,9 +62,7 @@ class JsonArgumentParser(argparse.ArgumentParser):
             and getattr(parsed, "plan_command", None) == "init"
             and (parsed.request_ref is None) != (parsed.request_sha256 is None)
         ):
-            self.error(
-                "--request-ref and --request-sha256 must be provided together"
-            )
+            self.error("--request-ref and --request-sha256 must be provided together")
         return parsed
 
     def error(self, message: str) -> NoReturn:
@@ -111,9 +109,7 @@ def doctor(config_path: Path) -> int:
         require_clean_git_root(vault)
         checks.append({"check": "git_clean", "status": "pass"})
     except GitSafetyError as exc:
-        checks.append(
-            {"check": "git_clean", "status": "fail", "message": str(exc)}
-        )
+        checks.append({"check": "git_clean", "status": "fail", "message": str(exc)})
         failed = True
 
     git_dir_result = run_git(vault, "rev-parse", "--absolute-git-dir")
@@ -193,9 +189,7 @@ def doctor(config_path: Path) -> int:
             checks.append(
                 {
                     "check": "qmd_collection",
-                    "status": (
-                        "pass" if alignment["status"] == "aligned" else "fail"
-                    ),
+                    "status": ("pass" if alignment["status"] == "aligned" else "fail"),
                     "data": alignment,
                 }
             )
@@ -299,11 +293,11 @@ def build_parser() -> argparse.ArgumentParser:
         "captures-v3", help="upgrade every schema-v2 source capture"
     )
     captures_v3.add_argument(
-        "--apply", action="store_true", help="write one recoverable migration transaction"
+        "--apply",
+        action="store_true",
+        help="write one recoverable migration transaction",
     )
-    captures_v3.add_argument(
-        "--config", type=Path, default=Path("vault-pr.local.toml")
-    )
+    captures_v3.add_argument("--config", type=Path, default=Path("vault-pr.local.toml"))
 
     canary_parser = subparsers.add_parser(
         "canary", help="run a capture route in a disposable synthetic vault"
@@ -339,9 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--answers", type=Path, help="temporary JSONL answers to judge semantically"
     )
     quality_rag.add_argument("--limit", type=int, default=10)
-    quality_rag.add_argument(
-        "--config", type=Path, default=Path("vault-pr.local.toml")
-    )
+    quality_rag.add_argument("--config", type=Path, default=Path("vault-pr.local.toml"))
     quality_rag_accept = quality_subparsers.add_parser(
         "rag-accept", help="record a passed RAG assessment as a Git transaction"
     )

@@ -507,9 +507,7 @@ def prepare_active_transaction(
             backup_name: str | None = None
             if original is not None:
                 if original_bytes is None or original_mode is None:
-                    raise RecoveryError(
-                        f"unable to snapshot affected path: {relative}"
-                    )
+                    raise RecoveryError(f"unable to snapshot affected path: {relative}")
                 backup_name = f"backups/{index}"
                 backup_path = active_dir / backup_name
                 backup_path.write_bytes(original_bytes)
@@ -593,13 +591,11 @@ def _read_journal(vault: Path, active_dir: Path) -> dict[str, Any]:
             valid_ref = run_git(vault, "check-ref-format", head_ref)
             if valid_ref.returncode != 0:
                 raise RecoveryError("recovery journal contains an invalid HEAD ref")
-    if not isinstance(journal.get("transaction_sha256"), str) or not SHA256_PATTERN.fullmatch(
-        journal["transaction_sha256"]
-    ):
+    if not isinstance(
+        journal.get("transaction_sha256"), str
+    ) or not SHA256_PATTERN.fullmatch(journal["transaction_sha256"]):
         raise RecoveryError("recovery journal has an invalid transaction digest")
-    request_sha256 = journal.get(
-        "request_sha256", journal.get("transaction_sha256")
-    )
+    request_sha256 = journal.get("request_sha256", journal.get("transaction_sha256"))
     if not isinstance(request_sha256, str) or not SHA256_PATTERN.fullmatch(
         request_sha256
     ):
@@ -639,8 +635,8 @@ def inspect_active_transaction(vault: Path, active_dir: Path) -> dict[str, Any]:
     expected_dirty = _changed_journal_paths(journal)
     unrelated_changes = bool(dirty_paths - expected_dirty)
     current_head_ref, head_commit = _head_identity(vault)
-    head_identity_matches = (
-        "head_ref" in journal and current_head_ref == journal.get("head_ref")
+    head_identity_matches = "head_ref" in journal and current_head_ref == journal.get(
+        "head_ref"
     )
     commit_observed = (
         journal["phase"] == "applied"
@@ -973,9 +969,11 @@ def _verify_committed_transaction_unlocked(
             raise RecoveryError(
                 f"applied path does not match final state: {entry['path']}"
             )
-        if _git_head_file_oid(vault, entry["path"]) != _git_worktree_blob_oid(
-            vault, entry["path"]
-        ) or _git_head_file_mode(vault, entry["path"]) != final_mode:
+        if (
+            _git_head_file_oid(vault, entry["path"])
+            != _git_worktree_blob_oid(vault, entry["path"])
+            or _git_head_file_mode(vault, entry["path"]) != final_mode
+        ):
             raise RecoveryError(
                 f"Git commit does not contain final path state: {entry['path']}"
             )
@@ -1237,18 +1235,21 @@ def commit_applied_transaction(
                     "temporary index paths do not match transaction journal: "
                     + "; ".join(details)
                 )
-            for relative, (final, final_mode) in final_by_path.items():
-                if _git_index_file_oid(
-                    vault,
-                    relative,
-                    index_path=index_path,
-                ) != _git_worktree_blob_oid(
-                    vault, relative
-                ) or _git_index_file_mode(
-                    vault,
-                    relative,
-                    index_path=index_path,
-                ) != final_mode:
+            for relative, (_final, final_mode) in final_by_path.items():
+                if (
+                    _git_index_file_oid(
+                        vault,
+                        relative,
+                        index_path=index_path,
+                    )
+                    != _git_worktree_blob_oid(vault, relative)
+                    or _git_index_file_mode(
+                        vault,
+                        relative,
+                        index_path=index_path,
+                    )
+                    != final_mode
+                ):
                     raise RecoveryError(
                         f"temporary index state does not match journal: {relative}"
                     )
@@ -1277,17 +1278,14 @@ def commit_applied_transaction(
                 expected_old,
             )
             if updated.returncode != 0:
-                raise RecoveryError(
-                    "vault HEAD changed before transaction commit CAS"
-                )
+                raise RecoveryError("vault HEAD changed before transaction commit CAS")
             if _head_identity(vault) != (head_ref, commit_oid):
                 rolled_back = _rollback_committed_ref(
                     vault, head_ref, base_commit, commit_oid
                 )
                 suffix = "" if rolled_back else "; ref rollback also failed"
                 raise RecoveryError(
-                    "vault HEAD identity changed after transaction commit CAS"
-                    + suffix
+                    "vault HEAD identity changed after transaction commit CAS" + suffix
                 )
             synchronized = run_git(
                 vault,

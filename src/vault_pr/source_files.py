@@ -42,29 +42,20 @@ def _regular_file_descriptor(path: Path, label: str) -> int:
         raise IngestError(f"{label} file must not be a symbolic link")
     if not stat.S_ISREG(before.st_mode):
         raise IngestError(f"{label} path is not a regular file")
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
         raise IngestError(f"unable to open {label} file") from exc
     opened = os.fstat(descriptor)
-    if (
-        not stat.S_ISREG(opened.st_mode)
-        or _identity(before) != _identity(opened)
-    ):
+    if not stat.S_ISREG(opened.st_mode) or _identity(before) != _identity(opened):
         os.close(descriptor)
         raise IngestError(f"{label} path changed or is not a regular file")
     return descriptor
 
 
-def read_bounded_regular_file(
-    path: Path, *, max_bytes: int, label: str
-) -> bytes:
+def read_bounded_regular_file(path: Path, *, max_bytes: int, label: str) -> bytes:
     """Read at most one byte beyond the configured limit from a regular file."""
     descriptor = _regular_file_descriptor(path, label)
     with os.fdopen(descriptor, "rb") as file:
@@ -74,9 +65,7 @@ def read_bounded_regular_file(
     return body
 
 
-def sha256_regular_file_identity(
-    path: Path, label: str
-) -> tuple[str, FileIdentity]:
+def sha256_regular_file_identity(path: Path, label: str) -> tuple[str, FileIdentity]:
     """Hash one stable regular file and return its physical identity."""
     descriptor = _regular_file_descriptor(path, label)
     digest = hashlib.sha256()
@@ -284,10 +273,7 @@ def inspect_regular_file_at(
         raise IngestError(f"unable to open {label} file: {display_name}") from exc
     try:
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or _identity(before) != _identity(opened)
-        ):
+        if not stat.S_ISREG(opened.st_mode) or _identity(before) != _identity(opened):
             raise IngestError(
                 f"{label} path changed or is not a regular file: {display_name}"
             )
@@ -379,23 +365,18 @@ def copy_snapshot_assets(
                 raise IngestError("snapshot image directory must not contain symlinks")
             if stat.S_ISDIR(metadata.st_mode):
                 flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(
-                    os, "O_DIRECTORY", 0
-                )
+                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
                 try:
-                    child_descriptor = os.open(
-                        name, flags, dir_fd=directory_descriptor
-                    )
+                    child_descriptor = os.open(name, flags, dir_fd=directory_descriptor)
                 except OSError as exc:
                     raise IngestError(
                         "snapshot asset directory changed during capture"
                     ) from exc
                 try:
                     opened_directory = os.fstat(child_descriptor)
-                    if (
-                        not stat.S_ISDIR(opened_directory.st_mode)
-                        or _identity(metadata) != _identity(opened_directory)
-                    ):
+                    if not stat.S_ISDIR(opened_directory.st_mode) or _identity(
+                        metadata
+                    ) != _identity(opened_directory):
                         raise IngestError(
                             "snapshot asset directory changed during capture"
                         )
@@ -407,15 +388,11 @@ def copy_snapshot_assets(
                 raise IngestError("snapshot assets must be regular files")
 
             flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NONBLOCK", 0)
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
             )
             flags |= getattr(os, "O_NOFOLLOW", 0)
             try:
-                source_descriptor = os.open(
-                    name, flags, dir_fd=directory_descriptor
-                )
+                source_descriptor = os.open(name, flags, dir_fd=directory_descriptor)
             except OSError as exc:
                 raise IngestError("snapshot asset changed during capture") from exc
             copied_asset = destination / relative
@@ -441,9 +418,7 @@ def copy_snapshot_assets(
                     | getattr(os, "O_CLOEXEC", 0)
                     | getattr(os, "O_NOFOLLOW", 0)
                 )
-                destination_descriptor = os.open(
-                    copied_asset, destination_flags, 0o600
-                )
+                destination_descriptor = os.open(copied_asset, destination_flags, 0o600)
                 try:
                     while chunk := os.read(source_descriptor, 65_536):
                         copied_bytes += len(chunk)
@@ -531,23 +506,18 @@ def materialize_regular_tree(
                         f"staged capture contains undeclared content: {relative}/"
                     )
                 flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(
-                    os, "O_DIRECTORY", 0
-                )
+                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
                 try:
-                    child_descriptor = os.open(
-                        name, flags, dir_fd=directory_descriptor
-                    )
+                    child_descriptor = os.open(name, flags, dir_fd=directory_descriptor)
                 except OSError as exc:
                     raise IngestError(
                         "staged capture directory changed during validation"
                     ) from exc
                 try:
                     opened_directory = os.fstat(child_descriptor)
-                    if (
-                        not stat.S_ISDIR(opened_directory.st_mode)
-                        or _identity(metadata) != _identity(opened_directory)
-                    ):
+                    if not stat.S_ISDIR(opened_directory.st_mode) or _identity(
+                        metadata
+                    ) != _identity(opened_directory):
                         raise IngestError(
                             "staged capture directory changed during validation"
                         )
@@ -567,9 +537,7 @@ def materialize_regular_tree(
                 | getattr(os, "O_NOFOLLOW", 0)
             )
             try:
-                source_descriptor = os.open(
-                    name, flags, dir_fd=directory_descriptor
-                )
+                source_descriptor = os.open(name, flags, dir_fd=directory_descriptor)
             except OSError as exc:
                 raise IngestError(
                     f"staged capture file changed during validation: {relative}"
@@ -601,9 +569,7 @@ def materialize_regular_tree(
                         | getattr(os, "O_CLOEXEC", 0)
                         | getattr(os, "O_NOFOLLOW", 0)
                     )
-                    destination_descriptor = os.open(
-                        copied, destination_flags, 0o600
-                    )
+                    destination_descriptor = os.open(copied, destination_flags, 0o600)
                 while chunk := os.read(source_descriptor, 65_536):
                     digest.update(chunk)
                     if destination_descriptor is not None:
@@ -612,9 +578,7 @@ def materialize_regular_tree(
                             written = os.write(destination_descriptor, view)
                             view = view[written:]
                 if digest.hexdigest() != expected_hashes[relative]:
-                    raise IngestError(
-                        f"staged capture integrity failed: {relative}"
-                    )
+                    raise IngestError(f"staged capture integrity failed: {relative}")
                 if destination_descriptor is not None:
                     os.fchmod(destination_descriptor, 0o644)
             finally:

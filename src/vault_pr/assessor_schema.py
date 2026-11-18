@@ -35,9 +35,10 @@ def _judgment(
         "evidence_refs",
     }:
         raise AssessorSchemaError(f"{field} has unknown or missing fields")
-    if not isinstance(value.get("decision"), str) or value[
-        "decision"
-    ] not in {"pass", "fail"}:
+    if not isinstance(value.get("decision"), str) or value["decision"] not in {
+        "pass",
+        "fail",
+    }:
         raise AssessorSchemaError(f"{field}.decision must be pass or fail")
     reason = value.get("reason")
     refs = _refs(value.get("evidence_refs"), allowed_evidence, f"{field}.evidence_refs")
@@ -110,9 +111,10 @@ def validate_rag_assessment(
         )
     if assessment.get("mode") != "rag_blind":
         raise AssessorSchemaError("Quality Assessor mode does not match the packet")
-    if not isinstance(assessment.get("status"), str) or assessment[
-        "status"
-    ] not in {"pass", "fail"}:
+    if not isinstance(assessment.get("status"), str) or assessment["status"] not in {
+        "pass",
+        "fail",
+    }:
         raise AssessorSchemaError("Quality Assessor status must be pass or fail")
     instance_id = assessment.get("instance_id")
     if not isinstance(instance_id, str) or not instance_id.strip():
@@ -201,7 +203,9 @@ def validate_rag_assessment(
                 raise AssessorSchemaError(
                     f"case_judgments[{index}].{name} pass must cite note evidence"
                 )
-        failed = failed or answer["decision"] == "fail" or provenance["decision"] == "fail"
+        failed = (
+            failed or answer["decision"] == "fail" or provenance["decision"] == "fail"
+        )
 
     unassessed = assessment.get("unassessed")
     if not isinstance(unassessed, list):
@@ -239,7 +243,9 @@ def validate_rag_assessment(
                 "passed assessment must cover every case with no unassessed items"
             )
         if failed:
-            raise AssessorSchemaError("passed assessment cannot contain failed judgments")
+            raise AssessorSchemaError(
+                "passed assessment cannot contain failed judgments"
+            )
     elif not failed:
         raise AssessorSchemaError(
             "failed assessment requires at least one failed structured judgment"

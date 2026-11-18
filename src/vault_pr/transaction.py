@@ -43,9 +43,9 @@ def _active_view(vault: Path, active_dir: Path) -> dict[str, Any]:
         state = "RECOVERY_REQUIRED"
         allowed_actions = ["recover"]
         blocking_reasons = ["head_identity_changed"]
-    elif snapshot["head_commit"] != snapshot["base_commit"] and not snapshot[
-        "git_clean"
-    ]:
+    elif (
+        snapshot["head_commit"] != snapshot["base_commit"] and not snapshot["git_clean"]
+    ):
         state = "RECOVERY_REQUIRED"
         allowed_actions = ["recover"]
         blocking_reasons = ["vault_not_clean_after_head_change"]
@@ -142,8 +142,7 @@ def _transaction_views(config: dict[str, Any]) -> list[dict[str, Any]]:
     try:
         with vault_write_lock(vault):
             active = [
-                _active_view(vault, path)
-                for path in list_active_transactions(git_dir)
+                _active_view(vault, path) for path in list_active_transactions(git_dir)
             ]
             active_ids = {item["transaction_id"] for item in active}
             finalized = [

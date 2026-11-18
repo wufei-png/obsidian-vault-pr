@@ -22,13 +22,7 @@ def _git(vault: Path, *args: str) -> None:
 
 def _note(title: str, body: str) -> str:
     return (
-        "---\n"
-        f"title: {title}\n"
-        "type: concept\n"
-        "aliases: []\n"
-        "---\n\n"
-        f"# {title}\n\n"
-        f"{body}\n"
+        f"---\ntitle: {title}\ntype: concept\naliases: []\n---\n\n# {title}\n\n{body}\n"
     )
 
 
@@ -47,7 +41,7 @@ class ObsidianValidationTests(unittest.TestCase):
             "notes": {
                 "include": ["**/*.md"],
                 "exclude": [".git/**", ".obsidian/**", ".vault-pr/**"],
-            }
+            },
         }
 
     def _commit(self, vault: Path) -> None:
@@ -111,9 +105,7 @@ class ObsidianValidationTests(unittest.TestCase):
             )
             self.assertEqual(preserved["status"], "valid")
 
-            with self.assertRaisesRegex(
-                ObsidianValidationError, "broken_anchor"
-            ):
+            with self.assertRaisesRegex(ObsidianValidationError, "broken_anchor"):
                 validate_proposed_obsidian_state(
                     config,
                     vault,
@@ -348,8 +340,7 @@ class ObsidianValidationTests(unittest.TestCase):
                         "knowledgebase/note.md",
                         _note(
                             "Note",
-                            "![[.vault-pr/sources/"
-                            "src_11111111111111111111/cover.png]]",
+                            "![[.vault-pr/sources/src_11111111111111111111/cover.png]]",
                         ),
                     ),
                 )
@@ -374,11 +365,11 @@ class ObsidianValidationTests(unittest.TestCase):
                         "knowledgebase/note.md",
                         _note(
                             "Note",
-                            "![[.VAULT-PR/sources/"
-                            "src_11111111111111111111/cover.png]]",
+                            "![[.VAULT-PR/sources/src_11111111111111111111/cover.png]]",
                         ),
                     ),
                 )
+
 
 if __name__ == "__main__":
     unittest.main()

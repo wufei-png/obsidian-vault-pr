@@ -47,9 +47,7 @@ IndexValidator = Callable[[dict[str, Any], str], dict[str, Any]]
 RAG_BASELINE_SCHEMA_VERSION = 2
 
 
-def _validate_index_evidence(
-    config: dict[str, Any], executable: str
-) -> dict[str, Any]:
+def _validate_index_evidence(config: dict[str, Any], executable: str) -> dict[str, Any]:
     try:
         return validate_qmd_index_freshness(
             config,
@@ -245,6 +243,8 @@ def _load_answers(
             for case_id, item in answers.items()
         ]
     )
+
+
 def _note_evidence(vault: Path, paths: set[str]) -> list[dict[str, Any]]:
     if len(paths) > 500:
         raise RagEvaluationError("RAG note evidence exceeds the 500-note limit")
@@ -408,8 +408,7 @@ def evaluate_rag(
                 thresholds = case["thresholds"]
                 retrieval_pass = (
                     recall >= thresholds["min_recall_at_k"]
-                    and reciprocal_rank
-                    >= thresholds["min_reciprocal_rank"]
+                    and reciprocal_rank >= thresholds["min_reciprocal_rank"]
                 )
                 answer = answers.get(str(case["case_id"]))
                 evidence_paths = (
@@ -432,9 +431,7 @@ def evaluate_rag(
                         "expected_provenance": case["expected_provenance"],
                         "evidence_note_refs": sorted(evidence_paths),
                         "answer": answer["answer"] if answer else None,
-                        "answer_provenance": (
-                            answer["provenance"] if answer else []
-                        ),
+                        "answer_provenance": (answer["provenance"] if answer else []),
                     }
                 )
     except GitSafetyError as exc:
@@ -443,12 +440,8 @@ def evaluate_rag(
     head = run_git(vault, "rev-parse", "HEAD")
     relative_cases = path.relative_to(vault).as_posix()
     tracked_cases = run_git(vault, "ls-files", "--error-unmatch", "--", relative_cases)
-    expected_paths = {
-        path for case in cases for path in case["expected_paths"]
-    }
-    retrieved_paths = {
-        path for result in results for path in result["retrieved_paths"]
-    }
+    expected_paths = {path for case in cases for path in case["expected_paths"]}
+    retrieved_paths = {path for result in results for path in result["retrieved_paths"]}
     provenance_paths = {
         path
         for result in results
@@ -483,9 +476,7 @@ def evaluate_rag(
         }
     ]
     if answers_sha256 is not None:
-        packet_evidence.append(
-            {"kind": "generated_answers", "sha256": answers_sha256}
-        )
+        packet_evidence.append({"kind": "generated_answers", "sha256": answers_sha256})
     if isinstance(index_evidence.get("status_sha256"), str):
         packet_evidence.append(
             {
@@ -623,11 +614,8 @@ def _validate_rag_evaluation_projection(
     expected_metrics = {
         "cases": len(cases),
         "retrieval_passed": sum(item["retrieval_pass"] for item in cases),
-        "mean_recall_at_k": sum(item["recall_at_k"] for item in cases)
-        / len(cases),
-        "mean_reciprocal_rank": sum(
-            item["reciprocal_rank"] for item in cases
-        )
+        "mean_recall_at_k": sum(item["recall_at_k"] for item in cases) / len(cases),
+        "mean_reciprocal_rank": sum(item["reciprocal_rank"] for item in cases)
         / len(cases),
     }
     expected_candidate_eligible = (
@@ -681,9 +669,7 @@ def _validate_rag_baseline_inputs(
     """Revalidate every authoritative RAG input against current vault state."""
     head = run_git(vault, "rev-parse", "HEAD")
     if head.returncode != 0 or head.stdout.strip() != payload["git_commit"]:
-        raise RagEvaluationError(
-            "vault HEAD no longer matches the assessed evaluation"
-        )
+        raise RagEvaluationError("vault HEAD no longer matches the assessed evaluation")
     status = run_git(vault, "status", "--porcelain=v1")
     if status.returncode != 0 or status.stdout:
         raise RagEvaluationError(
@@ -697,18 +683,14 @@ def _validate_rag_baseline_inputs(
         or not qmd
         or index_validator(config, qmd) != packet_index_evidence
     ):
-        raise RagEvaluationError(
-            "qmd index evidence no longer matches the assessment"
-        )
+        raise RagEvaluationError("qmd index evidence no longer matches the assessment")
 
     case_item = next(
         item for item in payload["evidence"] if item["kind"] == "rag_case_set"
     )
     case_relative = Path(case_item["path"])
     if case_relative.is_absolute() or ".." in case_relative.parts:
-        raise RagEvaluationError(
-            "assessor packet contains an unsafe RAG case path"
-        )
+        raise RagEvaluationError("assessor packet contains an unsafe RAG case path")
     try:
         cases_path, cases_bytes = _read_safe_vault_file(
             vault,
@@ -722,16 +704,10 @@ def _validate_rag_baseline_inputs(
             case_relative,
         )
     except (ConfigError, RagEvaluationError) as exc:
-        raise RagEvaluationError(
-            "RAG case set is no longer available"
-        ) from exc
+        raise RagEvaluationError("RAG case set is no longer available") from exc
     if hashlib.sha256(cases_bytes).hexdigest() != payload["cases_sha256"]:
-        raise RagEvaluationError(
-            "RAG case set no longer matches the assessment"
-        )
-    authoritative_by_id = {
-        item["case_id"]: item for item in authoritative_cases
-    }
+        raise RagEvaluationError("RAG case set no longer matches the assessment")
+    authoritative_by_id = {item["case_id"]: item for item in authoritative_cases}
     packet_cases = payload["cases"]
     if {item["case_id"] for item in packet_cases} != set(authoritative_by_id):
         raise RagEvaluationError(
@@ -746,10 +722,7 @@ def _validate_rag_baseline_inputs(
     )
     for case in packet_cases:
         authoritative = authoritative_by_id[case["case_id"]]
-        if any(
-            case[field] != authoritative[field]
-            for field in authoritative_fields
-        ):
+        if any(case[field] != authoritative[field] for field in authoritative_fields):
             raise RagEvaluationError(
                 "RAG packet case semantics do not match the authoritative case set"
             )
@@ -785,9 +758,7 @@ def _validate_rag_baseline_inputs(
             or note["excerpt_truncated"] is not (len(note_text) > 4000)
             or catalog_excerpt_bytes > 2_000_000
         ):
-            raise RagEvaluationError(
-                "RAG note evidence no longer matches the vault"
-            )
+            raise RagEvaluationError("RAG note evidence no longer matches the vault")
         catalog_paths.add(relative_note.as_posix())
         tracked_paths.add(relative_note.as_posix())
 
@@ -809,20 +780,17 @@ def _validate_rag_baseline_inputs(
             )
             for path in case[field]
         }
-        if (
-            set(case["evidence_note_refs"]) != expected_evidence_refs
-            or not expected_evidence_refs.issubset(catalog_paths)
+        if set(
+            case["evidence_note_refs"]
+        ) != expected_evidence_refs or not expected_evidence_refs.issubset(
+            catalog_paths
         ):
-            raise RagEvaluationError(
-                "RAG case evidence references are incomplete"
-            )
+            raise RagEvaluationError("RAG case evidence references are incomplete")
         expected = case["expected_paths"]
         retrieved = case["retrieved_paths"]
         thresholds = case["thresholds"]
         ranked_hits = [
-            index + 1
-            for index, item in enumerate(retrieved)
-            if item in set(expected)
+            index + 1 for index, item in enumerate(retrieved) if item in set(expected)
         ]
         recall = len(ranked_hits) / len(set(expected))
         reciprocal_rank = 1 / ranked_hits[0] if ranked_hits else 0.0
@@ -836,13 +804,9 @@ def _validate_rag_baseline_inputs(
             or case["retrieval_pass"] is not retrieval_pass
             or not retrieval_pass
         ):
-            raise RagEvaluationError(
-                "failed retrieval thresholds cannot be baselined"
-            )
+            raise RagEvaluationError("failed retrieval thresholds cannot be baselined")
     if not _all_paths_tracked(vault, tracked_paths):
-        raise RagEvaluationError(
-            "RAG baseline evidence must remain Git tracked"
-        )
+        raise RagEvaluationError("RAG baseline evidence must remain Git tracked")
     if destination.exists() or destination.is_symlink():
         raise RagEvaluationError("RAG baseline record already exists")
 
@@ -871,7 +835,9 @@ def accept_rag_baseline(
         raise RagEvaluationError(str(exc)) from exc
     _validate_rag_evaluation_projection(evaluation, packet, payload)
     if assessment.get("status") != "pass":
-        raise RagEvaluationError("only a passed Quality Assessor output can be recorded")
+        raise RagEvaluationError(
+            "only a passed Quality Assessor output can be recorded"
+        )
     if assessment.get("unassessed"):
         raise RagEvaluationError("Quality Assessor output still has unassessed items")
     packet_id = str(packet["packet_id"])
@@ -922,8 +888,7 @@ def accept_rag_baseline(
             raise RagEvaluationError(str(exc)) from exc
         if existing is not None:
             if existing["status"] == "already_committed" and (
-                not destination.is_file()
-                or destination.read_bytes() != record_bytes
+                not destination.is_file() or destination.read_bytes() != record_bytes
             ):
                 raise RagEvaluationError(
                     "committed RAG baseline integrity validation failed"

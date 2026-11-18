@@ -253,9 +253,7 @@ def _bounded_excerpt(path: Path) -> str:
     return text[:MAX_EVIDENCE_EXCERPT_CHARACTERS]
 
 
-def _review_retrieval_context(
-    config: dict[str, Any], source_id: str
-) -> dict[str, Any]:
+def _review_retrieval_context(config: dict[str, Any], source_id: str) -> dict[str, Any]:
     """Bind one live retrieval result into the private semantic review packet."""
     try:
         result = retrieve_related_notes(config, source_id)
@@ -289,9 +287,7 @@ def _review_retrieval_context(
         if title is not None and not isinstance(title, str):
             raise PlanError(f"required retrieval candidate {index} title is invalid")
         if snippet is not None and not isinstance(snippet, str):
-            raise PlanError(
-                f"required retrieval candidate {index} snippet is invalid"
-            )
+            raise PlanError(f"required retrieval candidate {index} snippet is invalid")
         candidates.append(
             {
                 "evidence_id": f"retrieval_candidate:{source_id}:{path}",
@@ -483,9 +479,7 @@ def _normalize_source_evidence(
     source_manifests[source_id] = manifest
     manifest_path = capture / "manifest.json"
     derived = manifest.get("derived")
-    if not isinstance(derived, dict) or not isinstance(
-        derived.get("extracted"), dict
-    ):
+    if not isinstance(derived, dict) or not isinstance(derived.get("extracted"), dict):
         raise PlanError("source capture manifest is missing derived.extracted")
     review_evidence = source_review_evidence(
         extracted_text,
@@ -665,9 +659,7 @@ def validate_plan(
             )
     elif retrieval.get("required") is False:
         if set(retrieval) != {"required", "reason"}:
-            raise PlanError(
-                "retrieval_not_required declaration has unknown fields"
-            )
+            raise PlanError("retrieval_not_required declaration has unknown fields")
         reason = normalized_summary(
             retrieval.get("reason"), "retrieval_not_required reason"
         )
@@ -680,9 +672,7 @@ def validate_plan(
     contradiction = plan.get("contradiction", False)
     if not isinstance(contradiction, bool):
         raise PlanError("plan contradiction must be boolean")
-    source_evidence = [
-        item for item in evidence if item["kind"] == "source_capture"
-    ]
+    source_evidence = [item for item in evidence if item["kind"] == "source_capture"]
     if intent == "integrate" and not source_evidence:
         raise PlanError("integration plan requires source_capture evidence")
     operations = plan.get("operations")
@@ -724,18 +714,14 @@ def validate_plan(
             except AssetPromotionError as exc:
                 raise PlanError(str(exc)) from exc
             if promotion["path"] in affected_paths:
-                raise PlanError(
-                    f"operation {index} duplicates an affected asset path"
-                )
+                raise PlanError(f"operation {index} duplicates an affected asset path")
             affected_paths.add(promotion["path"])
             actions.add(action)
             normalized.append(promotion)
             continue
         if action == "purge_capture":
             if set(raw_operation) != {"action", "source_id"}:
-                raise PlanError(
-                    f"operation {index} purge_capture has unknown fields"
-                )
+                raise PlanError(f"operation {index} purge_capture has unknown fields")
             if authorization["kind"] != "maintenance_request":
                 raise PlanError(
                     "maintenance_request_required: purge_capture requires an "
@@ -743,9 +729,8 @@ def validate_plan(
                     code="maintenance_request_required",
                 )
             source_id = raw_operation.get("source_id")
-            if (
-                not isinstance(source_id, str)
-                or not SOURCE_ID_PATTERN.fullmatch(source_id)
+            if not isinstance(source_id, str) or not SOURCE_ID_PATTERN.fullmatch(
+                source_id
             ):
                 raise PlanError(f"operation {index} has invalid source_id")
             capture_dir = source_archive_dir(config, vault) / source_id
@@ -762,16 +747,11 @@ def validate_plan(
                 Path("manifest.json"),
                 Path(str(manifest["primary"]["path"])),
                 Path(str(manifest["derived"]["extracted"]["path"])),
-                *[
-                    Path(str(item["path"]))
-                    for item in manifest.get("files", [])
-                ],
+                *[Path(str(item["path"])) for item in manifest.get("files", [])],
             }
             purge_paths = [capture_dir / relative for relative in sorted(declared)]
             if source_note in touched:
-                raise PlanError(
-                    f"operation {index} duplicates an affected note path"
-                )
+                raise PlanError(f"operation {index} duplicates an affected note path")
             touched.add(source_note)
             affected_paths.add(source_note)
             actions.add(action)
@@ -808,9 +788,7 @@ def validate_plan(
         if action == "rename" and "content_file" in raw_operation:
             operation_fields.add("content_file")
         if set(raw_operation) != operation_fields:
-            raise PlanError(
-                f"operation {index} {action} has unknown or missing fields"
-            )
+            raise PlanError(f"operation {index} {action} has unknown or missing fields")
         raw_path = raw_operation.get("path")
         target = vault_relative_path(vault, raw_path, f"operations[{index}].path")
         if target.suffix.lower() != ".md" or not note_path_allowed(
@@ -871,9 +849,7 @@ def validate_plan(
         normalized.append(operation)
 
     promotions = [
-        operation
-        for operation in normalized
-        if operation["action"] == "promote_asset"
+        operation for operation in normalized if operation["action"] == "promote_asset"
     ]
     try:
         validate_asset_promotion_batch(
@@ -890,8 +866,7 @@ def validate_plan(
             source_updates = [
                 operation
                 for operation in normalized
-                if operation["action"] == "update"
-                and operation["path"] == source_note
+                if operation["action"] == "update" and operation["path"] == source_note
             ]
             if not source_updates:
                 raise PlanError(
@@ -977,7 +952,9 @@ def validate_plan(
                 + ", ".join(sorted(remaining_references))
             )
         archive_root = source_archive_dir(config, vault)
-        for candidate in sorted(archive_root.iterdir()) if archive_root.is_dir() else []:
+        for candidate in (
+            sorted(archive_root.iterdir()) if archive_root.is_dir() else []
+        ):
             if candidate.name == purge_source_id or not candidate.is_dir():
                 continue
             try:
@@ -1082,9 +1059,7 @@ def validate_plan(
     plan_bytes = bundle.plan_bytes if bundle is not None else plan_path.read_bytes()
     content_snapshots = {
         path: (
-            bundle_contents[path]
-            if bundle_contents is not None
-            else path.read_bytes()
+            bundle_contents[path] if bundle_contents is not None else path.read_bytes()
         )
         for path in content_paths
     }
@@ -1322,7 +1297,10 @@ def record_review(
     with vault_write_lock(vault):
         bundle = _freeze_plan_bundle(config, plan_path)
         validation = validate_plan(config, plan_path, bundle=bundle)
-        if _freeze_plan_bundle(config, plan_path).request_sha256 != bundle.request_sha256:
+        if (
+            _freeze_plan_bundle(config, plan_path).request_sha256
+            != bundle.request_sha256
+        ):
             raise PlanError("plan bundle changed during review validation")
         assessment = _read_json(assessment_path, "semantic review assessment")
         transaction_sha256 = validation["transaction_sha256"]
@@ -1345,9 +1323,7 @@ def record_review(
             or validation["governance_sha256"] in rejected_governance
         ):
             raise PlanError("plan and proposed content must change after rejection")
-        prior_instance_ids = {
-            entry["assessment"]["instance_id"] for entry in history
-        }
+        prior_instance_ids = {entry["assessment"]["instance_id"] for entry in history}
         try:
             validate_assessment(
                 assessment,
@@ -1519,9 +1495,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                             and not target.is_symlink()
                             and _sha256_file(target) == operation["sha256"]
                         )
-                        validated_original_mode[target] = worktree_file_mode(
-                            target
-                        )
+                        validated_original_mode[target] = worktree_file_mode(target)
                 elif action == "create":
                     unchanged = not target.exists()
                     validated_original_mode[target] = None
@@ -1661,12 +1635,12 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         if review_history_bytes is not None:
             archive_payloads[archive / "review-history.json"] = review_history_bytes
         affected.update(archive_payloads)
-        expected_original_sha256.update({path: None for path in archive_payloads})
-        expected_original_mode.update({path: None for path in archive_payloads})
+        expected_original_sha256.update(dict.fromkeys(archive_payloads))
+        expected_original_mode.update(dict.fromkeys(archive_payloads))
         final_sha256.update(
             {path: _sha256_bytes(content) for path, content in archive_payloads.items()}
         )
-        final_mode.update({path: "100644" for path in archive_payloads})
+        final_mode.update(dict.fromkeys(archive_payloads, "100644"))
 
         def required_final_mode(path: Path) -> str:
             mode = final_mode[path]
@@ -1717,11 +1691,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             }:
                 capture_dir = source_archive_dir(config, vault) / source_id
                 for directory in sorted(
-                    (
-                        path
-                        for path in capture_dir.rglob("*")
-                        if path.is_dir()
-                    ),
+                    (path for path in capture_dir.rglob("*") if path.is_dir()),
                     key=lambda path: len(path.parts),
                     reverse=True,
                 ):
@@ -1745,8 +1715,7 @@ def apply_plan(config: dict[str, Any], plan_path: Path) -> dict[str, Any]:
                     target.is_symlink()
                     or not target.is_file()
                     or _sha256_file(target) != operation["sha256"]
-                    or worktree_file_mode(target)
-                    != validated_original_mode[target]
+                    or worktree_file_mode(target) != validated_original_mode[target]
                 ):
                     raise PlanError(
                         "reused asset changed during transaction: "

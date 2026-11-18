@@ -50,7 +50,7 @@ class GraphQualityTests(unittest.TestCase):
             (vault / "examples.md").write_text(
                 "---\ntype: concept\n---\n\n"
                 "`[[inline-example]]`\n\n```sh\necho '[[fenced-example]]'\n```\n"
-                "if [[ -z \"${NODES}\" ]]; then\n"
+                'if [[ -z "${NODES}" ]]; then\n'
                 "Citation [[35]](https://example.com/reference).\n",
                 encoding="utf-8",
             )
@@ -95,9 +95,7 @@ class GraphQualityTests(unittest.TestCase):
             self.assertNotIn("fenced-example", broken_targets)
             self.assertNotIn('-z "${NODES}"', broken_targets)
             self.assertNotIn("35", broken_targets)
-            evidence = {
-                item["kind"]: item["sha256"] for item in result["evidence"]
-            }
+            evidence = {item["kind"]: item["sha256"] for item in result["evidence"]}
             findings_sha256 = hashlib.sha256(
                 json.dumps(
                     result["findings"],

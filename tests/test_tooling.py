@@ -105,7 +105,9 @@ class ToolingTests(unittest.TestCase):
                 embedding_model_reader=lambda _name, _version: "model-fixture",
             )
 
-    def test_qmd_probe_accepts_stamped_release_and_rejects_unverified_builds(self) -> None:
+    def test_qmd_probe_accepts_stamped_release_and_rejects_unverified_builds(
+        self,
+    ) -> None:
         version = "qmd 2.8.3 (facd35e)"
         snapshot = probe_qmd_capabilities(
             "qmd",
@@ -126,7 +128,6 @@ class ToolingTests(unittest.TestCase):
                         index_name="fixture",
                         runner=ProbeRunner(unverified),
                     )
-
 
     def test_lexical_probe_skips_vector_capabilities_and_model_identity(self) -> None:
         runner = ProbeRunner()

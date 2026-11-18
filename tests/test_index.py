@@ -177,10 +177,7 @@ class FailingQmdRunner(QmdRunner):
             return subprocess.CompletedProcess(
                 command, 1, "", f"injected add failure: {args[2]}"
             )
-        if (
-            args[:2] == ["context", "add"]
-            and args[-1] in self.fail_context_values
-        ):
+        if args[:2] == ["context", "add"] and args[-1] in self.fail_context_values:
             self.calls.append(command)
             return subprocess.CompletedProcess(
                 command, 1, "", f"injected context failure: {args[-1]}"
@@ -426,9 +423,7 @@ class IndexTests(unittest.TestCase):
             self.assertTrue(any("embed" in call for call in runner.calls))
             embed_call = next(call for call in runner.calls if call[3] == "embed")
             self.assertIn("-f", embed_call)
-            self.assertEqual(
-                embed_call[embed_call.index("-c") + 1], "notebook-tech"
-            )
+            self.assertEqual(embed_call[embed_call.index("-c") + 1], "notebook-tech")
             self.assertEqual(
                 embed_call[embed_call.index("--chunk-strategy") + 1],
                 "regex",
@@ -492,9 +487,7 @@ class IndexTests(unittest.TestCase):
                 call for call in changed_runner.calls if call[3] == "embed"
             )
             self.assertIn("-f", embed_call)
-            self.assertEqual(
-                embed_call[embed_call.index("-c") + 1], "notebook-tech"
-            )
+            self.assertEqual(embed_call[embed_call.index("-c") + 1], "notebook-tech")
 
     def test_refuses_fresh_status_when_qmd_identity_changes_during_refresh(
         self,
@@ -521,9 +514,7 @@ class IndexTests(unittest.TestCase):
                     capability_probe=lambda _executable, **_kwargs: next(snapshots),
                 )
 
-            self.assertFalse(
-                (vault / ".git" / "vault-pr-index-status.json").exists()
-            )
+            self.assertFalse((vault / ".git" / "vault-pr-index-status.json").exists())
 
     def test_accepts_first_run_default_model_materialization(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -701,7 +692,6 @@ class IndexTests(unittest.TestCase):
             self.assertFalse(stale["eligible"])
             self.assertIn("commit_matches", stale["reasons"])
 
-
     def test_freshness_requires_exact_relevant_config_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = self.make_vault(Path(temp_dir))
@@ -746,9 +736,11 @@ class IndexTests(unittest.TestCase):
                 config,
                 runner=runner,
                 executable="qmd",
-                capability_probe=lambda _executable, *, index_name, retrieval_mode: qmd_snapshot(
-                    "qmd compatible upgrade",
-                    retrieval_mode=retrieval_mode,
+                capability_probe=lambda _executable, *, index_name, retrieval_mode: (
+                    qmd_snapshot(
+                        "qmd compatible upgrade",
+                        retrieval_mode=retrieval_mode,
+                    )
                 ),
             )
             self.assertFalse(stale["eligible"])
@@ -771,9 +763,11 @@ class IndexTests(unittest.TestCase):
                 config,
                 runner=runner,
                 executable="qmd",
-                capability_probe=lambda _executable, *, index_name, retrieval_mode: qmd_snapshot(
-                    retrieval_mode=retrieval_mode,
-                    model="different-model",
+                capability_probe=lambda _executable, *, index_name, retrieval_mode: (
+                    qmd_snapshot(
+                        retrieval_mode=retrieval_mode,
+                        model="different-model",
+                    )
                 ),
             )
 
@@ -797,9 +791,7 @@ class IndexTests(unittest.TestCase):
             status["legacy_config_sha256"] = "a" * 64
             status_path.write_text(json.dumps(status))
 
-            with self.assertRaisesRegex(
-                IndexUpdateError, "unknown or missing fields"
-            ):
+            with self.assertRaisesRegex(IndexUpdateError, "unknown or missing fields"):
                 load_index_status(vault)
 
 

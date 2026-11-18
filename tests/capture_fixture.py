@@ -43,9 +43,7 @@ def write_capture(
             "mime": mime,
             "role": role,
         }
-        for path, (content, mime, role) in sorted(
-            (secondary_files or {}).items()
-        )
+        for path, (content, mime, role) in sorted((secondary_files or {}).items())
     ]
     identity = {
         "schema_version": 3,

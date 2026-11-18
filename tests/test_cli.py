@@ -23,7 +23,9 @@ from vault_pr.plan import PlanError
 
 
 class ConfigTests(unittest.TestCase):
-    def test_plan_protocol_codes_are_structured_not_inferred_from_messages(self) -> None:
+    def test_plan_protocol_codes_are_structured_not_inferred_from_messages(
+        self,
+    ) -> None:
         for code in (
             "maintenance_request_required",
             "review_required",
@@ -123,10 +125,13 @@ class ConfigTests(unittest.TestCase):
             config.write_text(f'[vault]\npath = "{vault.resolve()}"\n')
             output = io.StringIO()
 
-            with patch(
-                "vault_pr.cli.ingest_source",
-                side_effect=RuntimeError(f"secret failure at {vault}"),
-            ), redirect_stderr(output):
+            with (
+                patch(
+                    "vault_pr.cli.ingest_source",
+                    side_effect=RuntimeError(f"secret failure at {vault}"),
+                ),
+                redirect_stderr(output),
+            ):
                 status = main(
                     [
                         "ingest",
@@ -152,10 +157,13 @@ class ConfigTests(unittest.TestCase):
             config = Path(temp_dir) / "config.toml"
             config.write_text(f'[vault]\npath = "{vault.resolve()}"\n')
 
-            with patch(
-                "vault_pr.cli.ingest_source",
-                side_effect=RuntimeError("debug fixture"),
-            ), self.assertRaisesRegex(RuntimeError, "debug fixture"):
+            with (
+                patch(
+                    "vault_pr.cli.ingest_source",
+                    side_effect=RuntimeError("debug fixture"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "debug fixture"),
+            ):
                 main(
                     [
                         "--debug",
@@ -187,9 +195,7 @@ class ConfigTests(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                status = main(
-                    ["transaction", "list", "--config", str(config)]
-                )
+                status = main(["transaction", "list", "--config", str(config)])
 
             payload = json.loads(output.getvalue())
             self.assertEqual(status, 0)

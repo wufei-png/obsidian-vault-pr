@@ -785,9 +785,7 @@ else:
             vault, existing, created, active = self.prepare_interrupted(Path(temp_dir))
             subprocess.run(["git", "-C", str(vault), "add", str(existing)], check=True)
 
-            with self.assertRaisesRegex(
-                RecoveryError, "staged paths do not match"
-            ):
+            with self.assertRaisesRegex(RecoveryError, "staged paths do not match"):
                 recover_interrupted_transaction(vault, vault / ".git")
 
             self.assertEqual(existing.read_bytes(), b"updated\n")
@@ -1077,9 +1075,7 @@ else:
 
             self.assertEqual(result["status"], "committed_and_finalized")
             self.assertEqual(
-                recovery_module.run_git(
-                    vault, "symbolic-ref", "-q", "HEAD"
-                ).returncode,
+                recovery_module.run_git(vault, "symbolic-ref", "-q", "HEAD").returncode,
                 1,
             )
             self.assertNotEqual(
@@ -1139,18 +1135,14 @@ else:
                         "Losing transaction commit",
                     )
 
-            subject = real_run_git(
-                vault, "log", "-1", "--format=%s"
-            ).stdout.strip()
+            subject = real_run_git(vault, "log", "-1", "--format=%s").stdout.strip()
             self.assertEqual(subject, "Concurrent commit")
             self.assertTrue(active.exists())
             self.assertFalse((active / "commit-index").exists())
 
     def test_commit_rollback_preserves_concurrent_worktree_edit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            vault, existing, _created, active = self.prepare_interrupted(
-                Path(temp_dir)
-            )
+            vault, existing, _created, active = self.prepare_interrupted(Path(temp_dir))
             mark_active_applied(active)
             real_run_git = recovery_module.run_git
             base_commit = real_run_git(vault, "rev-parse", "HEAD").stdout.strip()
@@ -1187,18 +1179,14 @@ else:
                 base_commit,
             )
             self.assertEqual(
-                real_run_git(
-                    vault, "diff", "--cached", "--name-only"
-                ).stdout,
+                real_run_git(vault, "diff", "--cached", "--name-only").stdout,
                 "",
             )
             self.assertTrue(active.exists())
 
     def test_recovery_finishes_index_sync_after_crash_following_ref_cas(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            vault, existing, created, active = self.prepare_interrupted(
-                Path(temp_dir)
-            )
+            vault, existing, created, active = self.prepare_interrupted(Path(temp_dir))
             mark_active_applied(active)
             real_run_git = recovery_module.run_git
             base_commit = real_run_git(vault, "rev-parse", "HEAD").stdout.strip()
@@ -1223,9 +1211,7 @@ else:
                         "Commit interrupted after ref CAS",
                     )
 
-            committed_head = real_run_git(
-                vault, "rev-parse", "HEAD"
-            ).stdout.strip()
+            committed_head = real_run_git(vault, "rev-parse", "HEAD").stdout.strip()
             self.assertNotEqual(committed_head, base_commit)
             self.assertEqual(existing.read_bytes(), b"updated\n")
             self.assertEqual(created.read_bytes(), b"created\n")
@@ -1302,9 +1288,7 @@ else:
                 recover_interrupted_transaction(vault, vault / ".git")
 
             self.assertEqual(
-                recovery_module._git_index_file_oid(
-                    vault, "knowledgebase/existing.md"
-                ),
+                recovery_module._git_index_file_oid(vault, "knowledgebase/existing.md"),
                 external_blob,
             )
             self.assertTrue(active.exists())

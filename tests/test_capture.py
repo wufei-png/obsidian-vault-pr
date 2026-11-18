@@ -26,9 +26,7 @@ class CaptureValidationTests(unittest.TestCase):
             manifest["acquisition"]["adapter"] = "local_file"
             manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(
-                CaptureError, "acquisition does not match"
-            ):
+            with self.assertRaisesRegex(CaptureError, "acquisition does not match"):
                 load_validated_capture(
                     capture,
                     source_id=source_id,
@@ -39,9 +37,7 @@ class CaptureValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             vault = Path(temp_dir)
             old_source_id = write_capture(vault)
-            old_capture = (
-                vault / ".vault-pr" / "sources" / "public" / old_source_id
-            )
+            old_capture = vault / ".vault-pr" / "sources" / "public" / old_source_id
             manifest_path = old_capture / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             metadata = b'{"kind":"supplement"}\n'
@@ -56,8 +52,7 @@ class CaptureValidationTests(unittest.TestCase):
                 }
             )
             new_source_id = (
-                "src_"
-                + source_identity_digest(source_identity_payload(manifest))[:20]
+                "src_" + source_identity_digest(source_identity_payload(manifest))[:20]
             )
             manifest["source_id"] = new_source_id
             new_capture = old_capture.with_name(new_source_id)

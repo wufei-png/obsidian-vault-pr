@@ -105,7 +105,13 @@ class UrlSafetyTests(unittest.TestCase):
 
     def test_fetch_retains_all_validated_dns_answers(self) -> None:
         public_result = [
-            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0)),
+            (
+                socket.AF_INET6,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0),
+            ),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
         ]
         opened_targets = []
@@ -154,7 +160,13 @@ class UrlSafetyTests(unittest.TestCase):
 
     def test_pinned_connection_tries_next_validated_address(self) -> None:
         addresses = (
-            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0)),
+            (
+                socket.AF_INET6,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0),
+            ),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
         )
         target = _ResolvedTarget(
@@ -171,11 +183,19 @@ class UrlSafetyTests(unittest.TestCase):
             connection.connect()
 
         self.assertIs(connection.sock, connected)
-        self.assertEqual([call.args[0] for call in pinned.call_args_list], list(addresses))
+        self.assertEqual(
+            [call.args[0] for call in pinned.call_args_list], list(addresses)
+        )
 
     def test_pinned_connection_shares_one_timeout_across_addresses(self) -> None:
         addresses = (
-            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0)),
+            (
+                socket.AF_INET6,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("2606:2800:220:1:248:1893:25c8:1946", 80, 0, 0),
+            ),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
         )
         target = _ResolvedTarget(
@@ -255,9 +275,7 @@ class ExtractionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
 
-            def run_defuddle(
-                command: list[str], **_: object
-            ) -> LimitedProcessResult:
+            def run_defuddle(command: list[str], **_: object) -> LimitedProcessResult:
                 if "--version" in command:
                     return LimitedProcessResult(0, "defuddle 1.0", "")
                 if "-p" in command:
@@ -323,9 +341,7 @@ class ExtractionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
 
-            def run_worker(
-                command: list[str], **_: object
-            ) -> LimitedProcessResult:
+            def run_worker(command: list[str], **_: object) -> LimitedProcessResult:
                 (output_dir / "extracted.md").write_text(
                     "# PDF Title\n\n## Page 1\n\n" + "PDF text " * 30
                 )
@@ -335,7 +351,9 @@ class ExtractionTests(unittest.TestCase):
                     "",
                 )
 
-            with patch("vault_pr.acquisition.run_limited_process", side_effect=run_worker):
+            with patch(
+                "vault_pr.acquisition.run_limited_process", side_effect=run_worker
+            ):
                 extracted = extract_source(fetched, Path(temp_dir))
 
             self.assertEqual(extracted.extractor, "pypdf")
@@ -752,8 +770,7 @@ class IngestTests(unittest.TestCase):
             source_id = "src_11111111111111111111"
             body_only = root / "body-only.md"
             body_only.write_text(
-                "---\ntitle: Body only\n---\n\n"
-                f"source_id: {source_id}\n"
+                f"---\ntitle: Body only\n---\n\nsource_id: {source_id}\n"
             )
             wrong_frontmatter = root / "wrong.md"
             wrong_frontmatter.write_text(
@@ -799,9 +816,7 @@ class IngestTests(unittest.TestCase):
                 "source_id": source_id,
                 "title": "Same",
             }
-            (final_capture / "manifest.json").write_text(
-                json.dumps(manifest) + "\n"
-            )
+            (final_capture / "manifest.json").write_text(json.dumps(manifest) + "\n")
 
             with self.assertRaisesRegex(CaptureError, "manifest schema is invalid"):
                 load_validated_capture(
@@ -840,8 +855,7 @@ class IngestTests(unittest.TestCase):
             raw.write_bytes(b"same")
             os.link(raw, final_capture / "extracted.md")
             (final_capture / "manifest.json").write_text(
-                json.dumps({**identity, "source_id": source_id, "title": "Same"})
-                + "\n"
+                json.dumps({**identity, "source_id": source_id, "title": "Same"}) + "\n"
             )
 
             with self.assertRaisesRegex(CaptureError, "manifest schema is invalid"):
@@ -870,9 +884,7 @@ class IngestTests(unittest.TestCase):
                 "adapter": "http",
                 "raw_sha256": hashlib.sha256(raw).hexdigest(),
                 "extracted_sha256": hashlib.sha256(extracted).hexdigest(),
-                "asset_sha256": {
-                    "images/cover.bin": hashlib.sha256(asset).hexdigest()
-                },
+                "asset_sha256": {"images/cover.bin": hashlib.sha256(asset).hexdigest()},
                 "artifacts": {
                     "raw": "raw.bin",
                     "extracted": "extracted.md",
@@ -912,9 +924,7 @@ class IngestTests(unittest.TestCase):
                 return original_open(path, flags, mode, dir_fd=dir_fd)
 
             with patch("vault_pr.capture.os.open", side_effect=raced_open):
-                with self.assertRaisesRegex(
-                    CaptureError, "manifest schema is invalid"
-                ):
+                with self.assertRaisesRegex(CaptureError, "manifest schema is invalid"):
                     load_validated_capture(
                         capture,
                         source_id=source_id,
@@ -1121,9 +1131,7 @@ class IngestTests(unittest.TestCase):
                     apply=True,
                 )
             self.assertEqual(committed_retry["status"], "already_committed")
-            self.assertEqual(
-                committed_retry["transaction_id"], first["transaction_id"]
-            )
+            self.assertEqual(committed_retry["transaction_id"], first["transaction_id"])
             self.assertFalse(committed_retry["requires_commit"])
 
     def test_apply_adopts_valid_committed_capture_without_a_receipt(self) -> None:
@@ -1349,11 +1357,12 @@ class IngestTests(unittest.TestCase):
                 )
                 return execute_mutation(**kwargs)
 
-            with patch(
-                "vault_pr.ingest.fetch_url", return_value=source
-            ), patch(
-                "vault_pr.ingest.execute_journaled_mutation",
-                side_effect=advance_head,
+            with (
+                patch("vault_pr.ingest.fetch_url", return_value=source),
+                patch(
+                    "vault_pr.ingest.execute_journaled_mutation",
+                    side_effect=advance_head,
+                ),
             ):
                 with self.assertRaisesRegex(IngestError, "HEAD changed"):
                     ingest_url(
@@ -1364,9 +1373,7 @@ class IngestTests(unittest.TestCase):
 
             self.assertFalse(receipt.exists())
             active_root = vault / ".git" / "vault-pr-active"
-            self.assertFalse(
-                active_root.exists() and any(active_root.iterdir())
-            )
+            self.assertFalse(active_root.exists() and any(active_root.iterdir()))
 
     def test_same_capture_with_different_title_is_a_request_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1493,12 +1500,8 @@ class IngestTests(unittest.TestCase):
             manifest = json.loads(
                 (vault / result["capture_dir"] / "manifest.json").read_text()
             )
-            self.assertEqual(
-                manifest["acquisition"]["adapter"], "authenticated"
-            )
-            self.assertEqual(
-                manifest["source"]["access_kind"], "authenticated"
-            )
+            self.assertEqual(manifest["acquisition"]["adapter"], "authenticated")
+            self.assertEqual(manifest["source"]["access_kind"], "authenticated")
 
     def test_local_file_is_hashed_by_kernel_without_persisting_absolute_path(
         self,

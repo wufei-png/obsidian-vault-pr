@@ -83,9 +83,7 @@ def _packet_strings(
         not isinstance(value, list)
         or not minimum <= len(value) <= maximum
         or not all(
-            isinstance(item, str)
-            and item.strip()
-            and len(item) <= max_length
+            isinstance(item, str) and item.strip() and len(item) <= max_length
             for item in value
         )
         or len(value) != len(set(value))
@@ -96,9 +94,7 @@ def _packet_strings(
 
 def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
     if set(payload) != _RAG_PAYLOAD_FIELDS:
-        raise RagContractError(
-            "Quality Assessor payload has unknown or missing fields"
-        )
+        raise RagContractError("Quality Assessor payload has unknown or missing fields")
     limit = payload.get("limit")
     if (
         payload.get("mode") != "rag_blind"
@@ -138,10 +134,7 @@ def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
             or not _SHA256.fullmatch(item["sha256"])
             or (
                 kind == "rag_case_set"
-                and (
-                    not isinstance(item.get("path"), str)
-                    or not item["path"]
-                )
+                and (not isinstance(item.get("path"), str) or not item["path"])
             )
         ):
             raise RagContractError("Quality Assessor payload evidence is invalid")
@@ -152,10 +145,8 @@ def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
             {"rag_case_set", "generated_answers"},
             {"rag_case_set", "generated_answers", "qmd_index_status"},
         )
-        or evidence_by_kind["rag_case_set"]["sha256"]
-        != payload["cases_sha256"]
-        or evidence_by_kind["generated_answers"]["sha256"]
-        != payload["answers_sha256"]
+        or evidence_by_kind["rag_case_set"]["sha256"] != payload["cases_sha256"]
+        or evidence_by_kind["generated_answers"]["sha256"] != payload["answers_sha256"]
     ):
         raise RagContractError("Quality Assessor payload evidence is incomplete")
     status_sha256 = payload["index_evidence"].get("status_sha256")
@@ -168,9 +159,7 @@ def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
             or status_evidence["sha256"] != status_sha256
         )
     ) or (status_sha256 is None) != (status_evidence is None):
-        raise RagContractError(
-            "Quality Assessor index evidence is not hash-bound"
-        )
+        raise RagContractError("Quality Assessor index evidence is not hash-bound")
 
     note_evidence = payload.get("note_evidence")
     if not isinstance(note_evidence, list) or not 1 <= len(note_evidence) <= 500:
@@ -179,8 +168,7 @@ def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
     for note in note_evidence:
         if (
             not isinstance(note, dict)
-            or set(note)
-            != {"path", "sha256", "excerpt", "excerpt_truncated"}
+            or set(note) != {"path", "sha256", "excerpt", "excerpt_truncated"}
             or not isinstance(note.get("path"), str)
             or not note["path"]
             or note["path"] in note_paths
@@ -218,8 +206,7 @@ def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
             or len(answer) > 20_000
             or not isinstance(case.get("retrieval_pass"), bool)
             or not isinstance(thresholds, dict)
-            or set(thresholds)
-            != {"min_recall_at_k", "min_reciprocal_rank"}
+            or set(thresholds) != {"min_recall_at_k", "min_reciprocal_rank"}
         ):
             raise RagContractError("Quality Assessor RAG case is invalid")
         case_ids.add(case_id)
@@ -260,10 +247,7 @@ def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
             maximum=500,
         )
         expected_refs = set(
-            expected_paths
-            + retrieved_paths
-            + expected_provenance
-            + answer_provenance
+            expected_paths + retrieved_paths + expected_provenance + answer_provenance
         )
         numeric_values = (
             thresholds["min_recall_at_k"],
@@ -300,18 +284,14 @@ def _validate_rag_packet_payload(payload: dict[str, Any]) -> None:
             or not isinstance(item.get("case_id"), str)
             or not isinstance(item.get("kind"), str)
         ):
-            raise RagContractError(
-                "Quality Assessor required judgments are invalid"
-            )
+            raise RagContractError("Quality Assessor required judgments are invalid")
         actual_judgments.add((item["case_id"], item["kind"]))
     if (
         len(actual_judgments) != len(required)
         or actual_judgments != expected_judgments
         or payload.get("unassessed") != ["answer_claims", "provenance"]
     ):
-        raise RagContractError(
-            "Quality Assessor required judgments are incomplete"
-        )
+        raise RagContractError("Quality Assessor required judgments are incomplete")
 
 
 def validated_assessor_packet(
@@ -319,19 +299,15 @@ def validated_assessor_packet(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Validate and return a blind RAG assessor packet and payload."""
     packet = evaluation.get("quality_assessor_packet")
-    if (
-        not isinstance(packet, dict)
-        or set(packet)
-        != {
-            "schema_version",
-            "packet_type",
-            "packet_id",
-            "created_at",
-            "input_sha256",
-            "mode",
-            "payload",
-        }
-    ):
+    if not isinstance(packet, dict) or set(packet) != {
+        "schema_version",
+        "packet_type",
+        "packet_id",
+        "created_at",
+        "input_sha256",
+        "mode",
+        "payload",
+    }:
         raise RagContractError("evaluation has no Quality Assessor packet")
     payload = packet.get("payload")
     if not isinstance(payload, dict):

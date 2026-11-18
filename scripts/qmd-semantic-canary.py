@@ -66,13 +66,17 @@ def main() -> int:
     if version not in QMD_ALLOWED_VERSION_OUTPUTS:
         raise RuntimeError(f"unsupported qmd runtime: {version}")
 
-    fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "qmd_semantic"
+    fixture = (
+        Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "qmd_semantic"
+    )
     preserve_paths = version in QMD_PATH_PRESERVING_VERSION_OUTPUTS
     expected_tokens = set(EXPECTED_TOKENS)
     expected_paths = {
         "Alpha/Shared.md",
         "Beta/Shared.md",
-        "Unicode Notes/知识 图谱.md" if preserve_paths else "Unicode-Notes/知识-图谱.md",
+        "Unicode Notes/知识 图谱.md"
+        if preserve_paths
+        else "Unicode-Notes/知识-图谱.md",
     }
     with tempfile.TemporaryDirectory(prefix="vault-pr-qmd-canary-") as temporary:
         index = Path(temporary) / "index.sqlite"
@@ -106,7 +110,9 @@ def main() -> int:
         for item in results:
             parsed = urlsplit(str(item.get("file", "")))
             if parsed.scheme != "qmd" or parsed.netloc != COLLECTION:
-                raise RuntimeError("qmd returned a result outside the fixture collection")
+                raise RuntimeError(
+                    "qmd returned a result outside the fixture collection"
+                )
             resolve_qmd_path(fixture, unquote(parsed.path).lstrip("/"), path_map)
 
     if hidden:
@@ -131,7 +137,9 @@ def main() -> int:
             raise RuntimeError("qmd result lacks the required structured fields")
     snippets = "\n".join(str(item["snippet"]) for item in results)
     if {token for token in expected_tokens if token in snippets} != expected_tokens:
-        raise RuntimeError("qmd results lost a duplicate-name or Unicode/spaced-path fixture")
+        raise RuntimeError(
+            "qmd results lost a duplicate-name or Unicode/spaced-path fixture"
+        )
     files = {unquote(urlsplit(str(item["file"])).path).lstrip("/") for item in results}
     if files != expected_paths:
         raise RuntimeError("qmd virtual paths do not preserve the required identities")

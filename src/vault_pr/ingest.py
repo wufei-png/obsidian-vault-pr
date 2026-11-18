@@ -59,9 +59,7 @@ def _git_dir(vault: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def _acquisition(
-    adapter: str, provider: dict[str, str] | None
-) -> dict[str, Any]:
+def _acquisition(adapter: str, provider: dict[str, str] | None) -> dict[str, Any]:
     return {
         "adapter": adapter,
         **({"provider": provider} if provider is not None else {}),
@@ -148,9 +146,7 @@ def ingest_source(
 
         raw_path = capture_stage / extracted.raw_filename
         extracted_path = capture_stage / extracted.extracted_filename
-        raw_sha256, raw_identity = sha256_regular_file_identity(
-            raw_path, "primary"
-        )
+        raw_sha256, raw_identity = sha256_regular_file_identity(raw_path, "primary")
         extracted_sha256, extracted_identity = sha256_regular_file_identity(
             extracted_path, "extracted"
         )
@@ -265,8 +261,7 @@ def ingest_source(
             Path(str(primary["path"])): str(primary["sha256"]),
             Path(str(extracted_record["path"])): str(extracted_record["sha256"]),
             **{
-                Path(str(record["path"])): str(record["sha256"])
-                for record in secondary
+                Path(str(record["path"])): str(record["sha256"]) for record in secondary
             },
             Path("manifest.json"): hashlib.sha256(manifest_bytes).hexdigest(),
         }
@@ -389,16 +384,12 @@ def ingest_source(
                     if key != "captured_at"
                 }
                 if current_without_capture_time != expected_without_capture_time:
-                    raise IngestError(
-                        "existing capture changed before adoption"
-                    )
+                    raise IngestError("existing capture changed before adoption")
                 current_note = resolve_source_note(config, vault, source_id)
                 if current_note != existing_note or not source_note_has_id(
                     current_note, source_id
                 ):
-                    raise IngestError(
-                        "existing Source Note changed before adoption"
-                    )
+                    raise IngestError("existing Source Note changed before adoption")
                 governed_paths = {
                     capture_dir / relative for relative in staged_hashes
                 } | {existing_note}
@@ -434,9 +425,7 @@ def ingest_source(
                     ),
                 )
             except (GitSafetyError, MutationError) as exc:
-                raise IngestError(
-                    f"unable to adopt existing capture: {exc}"
-                ) from exc
+                raise IngestError(f"unable to adopt existing capture: {exc}") from exc
             return mutation_response(outcome, applied_status="adopted")
         if note_path.exists() and not source_note_has_id(note_path, source_id):
             raise IngestError(
@@ -451,7 +440,7 @@ def ingest_source(
         final_sha256[note_path] = hashlib.sha256(
             note_content.encode("utf-8")
         ).hexdigest()
-        final_mode: dict[Path, str | None] = {path: "100644" for path in affected}
+        final_mode: dict[Path, str | None] = dict.fromkeys(affected, "100644")
 
         def write(active_dir: Path) -> None:
             staged_capture = active_dir / "capture-staging"
@@ -488,15 +477,13 @@ def ingest_source(
                 operation="ingest",
                 receipt_data=result,
                 affected=affected,
-                expected_original_sha256={path: None for path in affected},
-                expected_original_mode={path: None for path in affected},
+                expected_original_sha256=dict.fromkeys(affected),
+                expected_original_mode=dict.fromkeys(affected),
                 final_sha256=final_sha256,
                 final_mode=final_mode,
                 write=write,
                 postcondition=postcondition,
-                completion_path=str(
-                    (capture_dir / "manifest.json").relative_to(vault)
-                ),
+                completion_path=str((capture_dir / "manifest.json").relative_to(vault)),
             )
         except (GitSafetyError, MutationError) as exc:
             detail = str(exc)

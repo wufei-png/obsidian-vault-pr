@@ -8,6 +8,7 @@ export UV_DEFAULT_INDEX=https://pypi.org/simple
 uv sync --locked --no-install-project
 uv lock --check
 uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
 uv run --no-sync pyright
 PYTHONPATH=src uv run --no-sync python -m unittest discover -s tests
 PYTHONPATH=src uv run --no-sync coverage run --branch -m unittest discover -s tests
@@ -21,13 +22,13 @@ uv export --locked --no-dev --no-emit-project \
 ```
 
 CI runs the Python tests on Linux and macOS with Python 3.11, 3.12, and 3.13. A
-separate Python 3.11 quality job runs Ruff, Pyright over `src/`, the full suite
-under branch coverage, prints the coverage report without a percentage gate,
-and verifies that all checks leave the checkout clean. CI also validates the
-skill schema, builds the wheel with a hash-locked PEP 517 environment, installs
-runtime dependencies exported from `uv.lock` into a fresh environment, installs
-the wheel with `--no-deps`, and smoke-tests the `vault-pr` entry point.
-Third-party Actions are pinned to full commit hashes.
+separate Python 3.11 quality job runs Ruff lint and formatting checks, Pyright
+over `src/`, the full suite under branch coverage, prints the coverage report
+without a percentage gate, and verifies that all checks leave the checkout
+clean. CI also validates the skill schema, builds the wheel with a hash-locked
+PEP 517 environment, installs runtime dependencies exported from `uv.lock` into
+a fresh environment, installs the wheel with `--no-deps`, and smoke-tests the
+`vault-pr` entry point. Third-party Actions are pinned to full commit hashes.
 
 Before release, run `uv run --frozen python scripts/qmd-semantic-canary.py` and
 `vault-pr doctor` with a machine-local configuration against each supported real

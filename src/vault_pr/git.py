@@ -118,7 +118,9 @@ def vault_write_lock(vault: Path) -> Iterator[None]:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise GitSafetyError("another vault-pr writer holds the vault lock") from exc
+            raise GitSafetyError(
+                "another vault-pr writer holds the vault lock"
+            ) from exc
         yield
     finally:
         try:

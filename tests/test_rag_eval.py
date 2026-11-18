@@ -113,10 +113,7 @@ class RagEvaluationTests(unittest.TestCase):
                         "reason": "Claims are supported",
                         "evidence_refs": [
                             f"case:{case['case_id']}",
-                            *[
-                                f"note:{path}"
-                                for path in case["evidence_note_refs"]
-                            ],
+                            *[f"note:{path}" for path in case["evidence_note_refs"]],
                         ],
                     },
                     "provenance": {
@@ -124,10 +121,7 @@ class RagEvaluationTests(unittest.TestCase):
                         "reason": "Provenance is sufficient",
                         "evidence_refs": [
                             f"case:{case['case_id']}",
-                            *[
-                                f"note:{path}"
-                                for path in case["evidence_note_refs"]
-                            ],
+                            *[f"note:{path}" for path in case["evidence_note_refs"]],
                         ],
                     },
                 }
@@ -258,9 +252,7 @@ class RagEvaluationTests(unittest.TestCase):
             "unassessed": [],
         }
 
-        with self.assertRaisesRegex(
-            AssessorSchemaError, "references unknown evidence"
-        ):
+        with self.assertRaisesRegex(AssessorSchemaError, "references unknown evidence"):
             validate_rag_assessment(packet, assessment)
 
     def test_scores_retrieval_and_builds_assessor_packet(self) -> None:
@@ -268,7 +260,9 @@ class RagEvaluationTests(unittest.TestCase):
             _vault, config, answers = self._fixture(Path(temp_dir))
             commands: list[list[str]] = []
 
-            def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                command: list[str], **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 commands.append(command)
                 return subprocess.CompletedProcess(
                     command,
@@ -320,7 +314,9 @@ class RagEvaluationTests(unittest.TestCase):
             config["index"]["retrieval_mode"] = "lexical"
             commands: list[list[str]] = []
 
-            def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                command: list[str], **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 commands.append(command)
                 return subprocess.CompletedProcess(
                     command,
@@ -348,7 +344,9 @@ class RagEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             _vault, config, answers = self._fixture(Path(temp_dir))
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -381,7 +379,9 @@ class RagEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             _vault, config, _answers = self._fixture(Path(temp_dir))
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -419,13 +419,17 @@ class RagEvaluationTests(unittest.TestCase):
             cases.write_text(json.dumps(content) + "\n", encoding="utf-8")
 
             with self.assertRaisesRegex(RagEvaluationError, "human-accepted"):
-                evaluate_rag(config, runner=lambda *_args, **_kwargs: None, executable="qmd")
+                evaluate_rag(
+                    config, runner=lambda *_args, **_kwargs: None, executable="qmd"
+                )
 
     def test_wraps_invalid_qmd_output_as_evaluation_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _vault, config, _answers = self._fixture(Path(temp_dir))
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess([], 0, stdout="not json", stderr="")
 
             with self.assertRaisesRegex(RagEvaluationError, "JSON results"):
@@ -440,7 +444,9 @@ class RagEvaluationTests(unittest.TestCase):
             _git(vault, "add", ".gitignore")
             _git(vault, "commit", "-qm", "Ignore local proposed evaluation cases")
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -486,7 +492,9 @@ class RagEvaluationTests(unittest.TestCase):
             _git(vault, "add", "--", str(cases.relative_to(vault)))
             _git(vault, "commit", "-qm", "Add second RAG case")
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -513,7 +521,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -558,7 +568,9 @@ class RagEvaluationTests(unittest.TestCase):
             _git(vault, "add", ".gitignore")
             _git(vault, "commit", "-qm", "Ignore local expected note")
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -596,7 +608,9 @@ class RagEvaluationTests(unittest.TestCase):
             _git(vault, "add", "--", ".vault-pr/quality/rag/cases.jsonl")
             _git(vault, "commit", "-qm", "Reference untracked provenance")
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -622,7 +636,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -684,9 +700,7 @@ class RagEvaluationTests(unittest.TestCase):
 
             self.assertEqual(accepted["status"], "baseline_applied")
             self.assertEqual(active_retry["status"], "already_active")
-            self.assertEqual(
-                active_retry["transaction_id"], accepted["transaction_id"]
-            )
+            self.assertEqual(active_retry["transaction_id"], accepted["transaction_id"])
             self.assertEqual(active_retry["next_action"], "commit")
             record = vault / accepted["path"]
             self.assertTrue(record.is_file())
@@ -769,7 +783,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -806,7 +822,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -843,7 +861,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -883,7 +903,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -924,7 +946,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -943,9 +967,7 @@ class RagEvaluationTests(unittest.TestCase):
             )
             mutations = {
                 "missing_answer": lambda case: case.pop("answer"),
-                "unknown_nested_field": lambda case: case.update(
-                    {"unexpected": True}
-                ),
+                "unknown_nested_field": lambda case: case.update({"unexpected": True}),
             }
             for name, mutate in mutations.items():
                 with self.subTest(name=name):
@@ -980,7 +1002,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -1035,7 +1059,9 @@ class RagEvaluationTests(unittest.TestCase):
                             evaluation_path=evaluation_path,
                             assessment_path=assessment_path,
                             executable="qmd",
-                            index_validator=lambda _config, _qmd: self._index_evidence(),
+                            index_validator=lambda _config, _qmd: (
+                                self._index_evidence()
+                            ),
                         )
 
     def test_rechecks_rag_freshness_after_acquiring_mutation_lock(self) -> None:
@@ -1043,7 +1069,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -1098,9 +1126,7 @@ class RagEvaluationTests(unittest.TestCase):
                         index_validator=lambda _config, _qmd: evidence,
                     )
 
-            self.assertFalse(
-                (vault / ".vault-pr/quality/rag/baselines").exists()
-            )
+            self.assertFalse((vault / ".vault-pr/quality/rag/baselines").exists())
 
     def test_accepts_tracked_cases_override_from_packet_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1112,7 +1138,9 @@ class RagEvaluationTests(unittest.TestCase):
             _git(vault, "add", "--", str(override.relative_to(vault)))
             _git(vault, "commit", "-qm", "Add alternate RAG cases")
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -1153,7 +1181,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,
@@ -1208,7 +1238,9 @@ class RagEvaluationTests(unittest.TestCase):
             root = Path(temp_dir)
             _vault, config, answers = self._fixture(root)
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
 
             evidence = self._index_evidence()
@@ -1243,7 +1275,9 @@ class RagEvaluationTests(unittest.TestCase):
             scratch = vault / "scratch.tmp"
             scratch.write_text("diagnostic dirt", encoding="utf-8")
 
-            def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            def runner(
+                *_args: object, **_kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
                     [],
                     0,

@@ -266,11 +266,11 @@ def validate_snapshot_bundle(
         if manifest_inspection.mime != "application/json":
             raise SnapshotBundleError("snapshot manifest must be JSON")
         try:
-            manifest = json.loads(
-                (manifest_inspection.content or b"").decode("utf-8")
-            )
+            manifest = json.loads((manifest_inspection.content or b"").decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SnapshotBundleError("snapshot manifest is not valid UTF-8 JSON") from exc
+            raise SnapshotBundleError(
+                "snapshot manifest is not valid UTF-8 JSON"
+            ) from exc
         if (
             not isinstance(manifest, dict)
             or manifest.get("schema_version") != 1

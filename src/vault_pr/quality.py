@@ -45,6 +45,8 @@ GRAPH_AUDIT_PAYLOAD_FIELDS = (
     "resolved_edges",
     "findings",
 )
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(
         value,
@@ -57,9 +59,7 @@ def _canonical_json_bytes(value: Any) -> bytes:
 def graph_audit_payload_sha256(payload: dict[str, Any]) -> str:
     """Hash the closed deterministic portion of a graph audit."""
     if set(payload) != set(GRAPH_AUDIT_PAYLOAD_FIELDS):
-        raise QualityAuditError(
-            "graph audit payload has unknown or missing fields"
-        )
+        raise QualityAuditError("graph audit payload has unknown or missing fields")
     return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
 
 
@@ -80,9 +80,7 @@ def validate_graph_audit_digest(audit: dict[str, Any]) -> str:
         or not isinstance(audit.get("git_clean"), bool)
     ):
         raise QualityAuditError("graph audit schema is invalid")
-    payload = {
-        field: audit[field] for field in GRAPH_AUDIT_PAYLOAD_FIELDS
-    }
+    payload = {field: audit[field] for field in GRAPH_AUDIT_PAYLOAD_FIELDS}
     digest = graph_audit_payload_sha256(payload)
     if audit.get("audit_sha256") != digest:
         raise QualityAuditError("graph audit digest does not match its content")
@@ -413,7 +411,10 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
                     )
                 )
                 continue
-            if by_path.get(resolved) is None or by_path[resolved].role not in graph_roles:
+            if (
+                by_path.get(resolved) is None
+                or by_path[resolved].role not in graph_roles
+            ):
                 continue
             if resolved == note.path:
                 continue
@@ -435,7 +436,11 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
                     owner_sha256=note.sha256,
                 )
             )
-        elif note.role == "concept" and not incoming[note.path] and not outgoing[note.path]:
+        elif (
+            note.role == "concept"
+            and not incoming[note.path]
+            and not outgoing[note.path]
+        ):
             findings.append(
                 _finding(
                     "isolated_concept",
@@ -472,13 +477,9 @@ def audit_graph(config: dict[str, Any]) -> dict[str, Any]:
     status = run_git(vault, "status", "--porcelain=v1")
     role_counts = Counter(note.role for note in notes)
     relevant_config = relevant_quality_config(config)
-    config_digest = hashlib.sha256(
-        _canonical_json_bytes(relevant_config)
-    ).hexdigest()
+    config_digest = hashlib.sha256(_canonical_json_bytes(relevant_config)).hexdigest()
     rules_digest = hashlib.sha256(
-        _canonical_json_bytes(
-            {"graph_ruleset_version": GRAPH_RULESET_VERSION}
-        )
+        _canonical_json_bytes({"graph_ruleset_version": GRAPH_RULESET_VERSION})
     ).hexdigest()
     findings.sort(
         key=lambda item: (

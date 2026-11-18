@@ -198,9 +198,7 @@ def _restore_qmd_state(
     """Best-effort compensation for destructive qmd reconciliation steps."""
     failures: list[str] = []
     if remove_current:
-        removed = _run_qmd(
-            runner, qmd, index_name, "collection", "remove", collection
-        )
+        removed = _run_qmd(runner, qmd, index_name, "collection", "remove", collection)
         if removed.returncode != 0:
             failures.append("remove replacement: " + _qmd_failure(removed))
     if restore_collection and original_state is not None:
@@ -532,9 +530,7 @@ def load_index_status(vault: Path) -> tuple[dict[str, Any], str]:
     return _validate_status(parsed), hashlib.sha256(content).hexdigest()
 
 
-def _incremental_embed_is_trusted(
-    vault: Path, qmd_snapshot: dict[str, object]
-) -> bool:
+def _incremental_embed_is_trusted(vault: Path, qmd_snapshot: dict[str, object]) -> bool:
     """Return whether existing vectors are bound to the current runtime identity."""
     try:
         status, _status_sha256 = load_index_status(vault)
@@ -673,9 +669,7 @@ def update_qmd_index(
         reconciliation = reconcile_qmd_collection(config, runner=runner, executable=qmd)
         embed = _embed_enabled(config)
         batch_size = _batch_size(config)
-        force_embed = embed and not _incremental_embed_is_trusted(
-            vault, qmd_snapshot
-        )
+        force_embed = embed and not _incremental_embed_is_trusted(vault, qmd_snapshot)
         collection = _configured_collection(config, vault).collection
 
         attempts = 0
@@ -709,13 +703,11 @@ def update_qmd_index(
                     raise IndexUpdateError(
                         f"post-index qmd identity validation failed: {exc}"
                     ) from exc
-                if (
-                    verified_qmd_snapshot["runtime_identity_sha256"]
-                    != qmd_snapshot["runtime_identity_sha256"]
-                    and not _is_default_model_materialization(
-                        qmd_snapshot,
-                        verified_qmd_snapshot,
-                    )
+                if verified_qmd_snapshot["runtime_identity_sha256"] != qmd_snapshot[
+                    "runtime_identity_sha256"
+                ] and not _is_default_model_materialization(
+                    qmd_snapshot,
+                    verified_qmd_snapshot,
                 ):
                     raise IndexUpdateError(
                         "qmd runtime identity changed during index refresh"
